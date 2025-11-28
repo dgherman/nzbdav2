@@ -24,3 +24,4 @@ nuget
 *.md
 !README.md
 !CLAUDE.md
+!GEMINI.md

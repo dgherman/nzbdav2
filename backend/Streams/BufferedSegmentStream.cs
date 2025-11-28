@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
@@ -11,13 +12,13 @@ namespace NzbWebDAV.Streams;
 /// </summary>
 public class BufferedSegmentStream : Stream
 {
-    private readonly Channel<SegmentData> _bufferChannel;
+    private readonly Channel<PooledSegmentData> _bufferChannel;
     private readonly Task _fetchTask;
     private readonly CancellationTokenSource _cts = new();
     private readonly CancellationTokenSource _linkedCts;
     private readonly IDisposable[] _contextScopes;
 
-    private SegmentData? _currentSegment;
+    private PooledSegmentData? _currentSegment;
     private int _currentSegmentPosition;
     private long _position;
     private bool _disposed;
@@ -37,7 +38,7 @@ public class BufferedSegmentStream : Stream
             SingleReader = true,
             SingleWriter = true
         };
-        _bufferChannel = Channel.CreateBounded<SegmentData>(channelOptions);
+        _bufferChannel = Channel.CreateBounded<PooledSegmentData>(channelOptions);
 
         // Link cancellation tokens and preserve context
         _linkedCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _cts.Token);
@@ -82,7 +83,7 @@ public class BufferedSegmentStream : Stream
             segmentQueue.Writer.Complete();
 
             // Use a concurrent dictionary to store results temporarily
-            var fetchedSegments = new System.Collections.Concurrent.ConcurrentDictionary<int, SegmentData>();
+            var fetchedSegments = new System.Collections.Concurrent.ConcurrentDictionary<int, PooledSegmentData>();
             var nextIndexToWrite = 0;
             var writeLock = new SemaphoreSlim(1, 1);
 
@@ -95,19 +96,60 @@ public class BufferedSegmentStream : Stream
                         var stream = await client.GetSegmentStreamAsync(segmentId, false, ct)
                             .ConfigureAwait(false);
 
-                        // Read entire segment into memory
-                        using var ms = new MemoryStream();
-                        await stream.CopyToAsync(ms, ct).ConfigureAwait(false);
-                        await stream.DisposeAsync().ConfigureAwait(false);
-
-                        var segmentData = new SegmentData
+                        // Rent a buffer and read the segment into it
+                        // We need to read the entire stream, so we use a MemoryStream as an intermediate
+                        // if we don't know the size, OR if we do know the size, we can rent directly.
+                        // Assuming average segment size is reasonable (e.g. 700KB), but it can vary.
+                        // Since we need to store it in 'PooledSegmentData', let's read fully.
+                        // To avoid allocating a new array, we can use a rented buffer, 
+                        // but we need to know the length.
+                        // Typically Usenet segments are a known size, but here we just have a stream.
+                        // Let's read into a rented buffer, resizing if necessary (or just use a large enough initial buffer).
+                        // A safer approach for unknown stream length without re-allocation is tricky with just one buffer.
+                        // However, typical segments are < 1MB. 
+                        
+                        // Let's use a recyclable memory stream approach or just simple array resizing manually with pool.
+                        // For simplicity and performance, let's assume a reasonable max segment size 
+                        // or just read into a temporary memory stream and THEN copy to a rented array of exact size?
+                        // No, that defeats the purpose. 
+                        
+                        // Better approach: Use the stream length if available? 
+                        // The underlying stream from UsenetClient likely doesn't support Length.
+                        
+                        // Let's buffer into a rented array. Start with 1MB (typical max article size is often 700KB-1MB).
+                        var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024); 
+                        var totalRead = 0;
+                        
+                        try 
                         {
-                            SegmentId = segmentId,
-                            Data = ms.ToArray()
-                        };
+                            while (true)
+                            {
+                                if (totalRead == buffer.Length)
+                                {
+                                    // Resize
+                                    var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
+                                    Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
+                                    ArrayPool<byte>.Shared.Return(buffer);
+                                    buffer = newBuffer;
+                                }
+                                
+                                var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
+                                if (read == 0) break;
+                                totalRead += read;
+                            }
+                            
+                            await stream.DisposeAsync().ConfigureAwait(false);
 
-                        // Store in dictionary temporarily
-                        fetchedSegments[index] = segmentData;
+                            var segmentData = new PooledSegmentData(segmentId, buffer, totalRead);
+
+                            // Store in dictionary temporarily
+                            fetchedSegments[index] = segmentData;
+                        }
+                        catch
+                        {
+                            ArrayPool<byte>.Shared.Return(buffer);
+                            throw;
+                        }
 
                         // Try to write any consecutive segments to the buffer channel in order
                         await writeLock.WaitAsync(ct).ConfigureAwait(false);
@@ -175,9 +217,10 @@ public class BufferedSegmentStream : Stream
             }
 
             // Read from current segment
-            var bytesAvailable = _currentSegment.Data.Length - _currentSegmentPosition;
+            var bytesAvailable = _currentSegment.Length - _currentSegmentPosition;
             if (bytesAvailable == 0)
             {
+                _currentSegment.Dispose();
                 _currentSegment = null;
                 continue;
             }
@@ -190,8 +233,9 @@ public class BufferedSegmentStream : Stream
             _position += bytesToRead;
 
             // If segment is exhausted, move to next
-            if (_currentSegmentPosition >= _currentSegment.Data.Length)
+            if (_currentSegmentPosition >= _currentSegment.Length)
             {
+                _currentSegment.Dispose();
                 _currentSegment = null;
             }
         }
@@ -233,6 +277,9 @@ public class BufferedSegmentStream : Stream
             _cts.Dispose();
             _bufferChannel.Writer.TryComplete();
             try { _fetchTask.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            
+            _currentSegment?.Dispose();
+            _currentSegment = null;
 
             // Dispose context scopes
             foreach (var scope in _contextScopes)
@@ -258,6 +305,9 @@ public class BufferedSegmentStream : Stream
         catch { }
 
         _cts.Dispose();
+        
+        _currentSegment?.Dispose();
+        _currentSegment = null;
 
         // Dispose context scopes
         foreach (var scope in _contextScopes)
@@ -269,9 +319,28 @@ public class BufferedSegmentStream : Stream
         GC.SuppressFinalize(this);
     }
 
-    private class SegmentData
+    private class PooledSegmentData : IDisposable
     {
-        public required string SegmentId { get; init; }
-        public required byte[] Data { get; init; }
+        private byte[]? _buffer;
+        
+        public string SegmentId { get; }
+        public byte[] Data => _buffer ?? Array.Empty<byte>();
+        public int Length { get; }
+
+        public PooledSegmentData(string segmentId, byte[] buffer, int length)
+        {
+            SegmentId = segmentId;
+            _buffer = buffer;
+            Length = length;
+        }
+
+        public void Dispose()
+        {
+            if (_buffer != null)
+            {
+                ArrayPool<byte>.Shared.Return(_buffer);
+                _buffer = null;
+            }
+        }
     }
 }
