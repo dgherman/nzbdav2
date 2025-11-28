@@ -16,3 +16,11 @@ nuget
 
 .idea/
 .vscode/
+
+######################
+# analysis/docs (AI) #
+######################
+
+*.md
+!README.md
+!CLAUDE.md
