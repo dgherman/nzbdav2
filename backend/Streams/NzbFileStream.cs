@@ -22,6 +22,7 @@ public class NzbFileStream(
     private readonly ConnectionUsageContext _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
     private CancellationTokenSource? _streamCts;
     private IDisposable? _contextScope;
+    private CancellationTokenRegistration _cancellationRegistration;
 
     public override void Flush()
     {
@@ -134,7 +135,14 @@ public class NzbFileStream(
             );
 
             // Link cancellation from parent to child manually (one-way, doesn't copy contexts)
-            ct.Register(() => _streamCts?.Cancel());
+            // Safe cancellation: only cancel if not already disposed
+            _cancellationRegistration = ct.Register(() =>
+            {
+                if (!_disposed && _streamCts != null)
+                {
+                    try { _streamCts.Cancel(); } catch (ObjectDisposedException) { }
+                }
+            });
 
             return new CombinedStream(new[] { Task.FromResult<Stream>(bufferedStream) });
         }
@@ -145,7 +153,14 @@ public class NzbFileStream(
         var contextCt = _streamCts.Token;
 
         // Link cancellation from parent to child manually (one-way, doesn't copy contexts)
-        ct.Register(() => _streamCts?.Cancel());
+        // Safe cancellation: only cancel if not already disposed
+        _cancellationRegistration = ct.Register(() =>
+        {
+            if (!_disposed && _streamCts != null)
+            {
+                try { _streamCts.Cancel(); } catch (ObjectDisposedException) { }
+            }
+        });
 
         return new CombinedStream(
             fileSegmentIds[firstSegmentIndex..]
@@ -157,19 +172,21 @@ public class NzbFileStream(
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
+        _disposed = true;
+        _cancellationRegistration.Dispose(); // Unregister callback first
         _innerStream?.Dispose();
         _streamCts?.Dispose();
         _contextScope?.Dispose();
-        _disposed = true;
     }
 
     public override async ValueTask DisposeAsync()
     {
         if (_disposed) return;
+        _disposed = true;
+        _cancellationRegistration.Dispose(); // Unregister callback first
         if (_innerStream != null) await _innerStream.DisposeAsync().ConfigureAwait(false);
         _streamCts?.Dispose();
         _contextScope?.Dispose();
-        _disposed = true;
         GC.SuppressFinalize(this);
     }
 }
