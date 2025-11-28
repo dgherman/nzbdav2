@@ -1,5 +1,6 @@
 ﻿using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Utils;
@@ -10,7 +11,7 @@ using Usenet.Yenc;
 
 namespace NzbWebDAV.Clients.Usenet;
 
-public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPool, ProviderType type) : INntpClient
+public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPool, ProviderType type, GlobalOperationLimiter? globalLimiter = null) : INntpClient
 {
     public ProviderType ProviderType { get; } = type;
     public int LiveConnections => _connectionPool.LiveConnections;
@@ -20,6 +21,7 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
     public int RemainingSemaphoreSlots => _connectionPool.RemainingSemaphoreSlots;
 
     private ConnectionPool<INntpClient> _connectionPool = connectionPool;
+    private readonly GlobalOperationLimiter? _globalLimiter = globalLimiter;
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
@@ -79,35 +81,57 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
         int retries = 1
     )
     {
-        var connectionLock = await _connectionPool.GetConnectionLockAsync(cancellationToken).ConfigureAwait(false);
-        var isDisposed = false;
+        // Acquire global operation permit first (if global limiter is configured)
+        GlobalOperationLimiter.OperationPermit? globalPermit = null;
+        if (_globalLimiter != null)
+        {
+            var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
+            var usageType = usageContext.UsageType;
+            globalPermit = await _globalLimiter.AcquirePermitAsync(usageType, cancellationToken).ConfigureAwait(false);
+        }
+
         try
         {
-            return await task(connectionLock.Connection).ConfigureAwait(false);
-        }
-        catch (NntpException)
-        {
-            // we want to replace the underlying connection in cases of NntpExceptions.
-            connectionLock.Replace();
-            connectionLock.Dispose();
-            isDisposed = true;
+            var connectionLock = await _connectionPool.GetConnectionLockAsync(cancellationToken).ConfigureAwait(false);
+            var isDisposed = false;
+            try
+            {
+                return await task(connectionLock.Connection).ConfigureAwait(false);
+            }
+            catch (NntpException)
+            {
+                // we want to replace the underlying connection in cases of NntpExceptions.
+                connectionLock.Replace();
+                connectionLock.Dispose();
+                isDisposed = true;
 
-            // and try again with a new connection (max 1 retry)
-            if (retries > 0)
-                return await RunWithConnection<T>(task, cancellationToken, retries - 1).ConfigureAwait(false);
+                // and try again with a new connection (max 1 retry)
+                if (retries > 0)
+                {
+                    // Release global permit before retry (we'll acquire a new one)
+                    globalPermit?.Dispose();
+                    globalPermit = null;
+                    return await RunWithConnection<T>(task, cancellationToken, retries - 1).ConfigureAwait(false);
+                }
 
-            throw;
+                throw;
+            }
+            finally
+            {
+                // we only want to release the connection-lock once the underlying connection is ready again.
+                //
+                // ReSharper disable once MethodSupportsCancellation
+                // we intentionally do not pass the cancellation token to ContinueWith,
+                // since we want the continuation to always run.
+                if (!isDisposed)
+                    _ = connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken())
+                        .ContinueWith(_ => connectionLock.Dispose());
+            }
         }
         finally
         {
-            // we only want to release the connection-lock once the underlying connection is ready again.
-            //
-            // ReSharper disable once MethodSupportsCancellation
-            // we intentionally do not pass the cancellation token to ContinueWith,
-            // since we want the continuation to always run.
-            if (!isDisposed)
-                _ = connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken())
-                    .ContinueWith(_ => connectionLock.Dispose());
+            // Release global permit
+            globalPermit?.Dispose();
         }
     }
 

@@ -101,17 +101,21 @@ public class NzbFileStream(
 
     private CombinedStream GetCombinedStream(int firstSegmentIndex, CancellationToken ct)
     {
-        // Create a child cancellation token that will live for the stream's lifetime
+        // Create a NEW cancellation token that will live for the stream's lifetime
+        // IMPORTANT: We create a new CTS (not linked) to avoid inheriting the parent's ConnectionUsageContext
+        // which would cause double-counting (e.g., Queue + BufferedStreaming for the same connections)
         _streamCts?.Dispose();
-        _streamCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        _streamCts = new CancellationTokenSource();
 
         // Dispose previous context scope if any
         _contextScope?.Dispose();
 
+        // No need to copy ReservedPooledConnectionsContext - operation limits handle this now
+
         // Use buffered streaming if configured for better performance
         if (useBufferedStreaming && concurrentConnections >= 3 && fileSegmentIds.Length > concurrentConnections)
         {
-            // Update context to BufferedStreaming and keep the scope alive for the stream's lifetime
+            // Set BufferedStreaming context - this will be the ONLY ConnectionUsageContext
             var bufferedContext = new ConnectionUsageContext(
                 ConnectionUsageType.BufferedStreaming,
                 _usageContext.Details
@@ -128,6 +132,10 @@ public class NzbFileStream(
                 bufferSize,
                 bufferedContextCt
             );
+
+            // Link cancellation from parent to child manually (one-way, doesn't copy contexts)
+            ct.Register(() => _streamCts?.Cancel());
+
             return new CombinedStream(new[] { Task.FromResult<Stream>(bufferedStream) });
         }
 
@@ -135,6 +143,9 @@ public class NzbFileStream(
         // Set context for non-buffered streaming and keep scope alive
         _contextScope = _streamCts.Token.SetScopedContext(_usageContext);
         var contextCt = _streamCts.Token;
+
+        // Link cancellation from parent to child manually (one-way, doesn't copy contexts)
+        ct.Register(() => _streamCts?.Cancel());
 
         return new CombinedStream(
             fileSegmentIds[firstSegmentIndex..]

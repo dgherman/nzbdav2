@@ -49,6 +49,12 @@ class Program
             .WriteTo.Console(theme: AnsiConsoleTheme.Code)
             .CreateLogger();
 
+        // Log build version to verify correct build is running
+        Log.Warning("═══════════════════════════════════════════════════════════════");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2025-11-29-NO-RESERVED");
+        Log.Warning("  FIX: Removed reserved connections - queue no longer waits");
+        Log.Warning("═══════════════════════════════════════════════════════════════");
+
         // initialize database
         await using var databaseContext = new DavDatabaseContext();
 
@@ -105,6 +111,7 @@ class Program
 
         // run
         app.UseMiddleware<ExceptionMiddleware>();
+        // ReservedConnectionsMiddleware removed - using GlobalOperationLimiter instead
         app.UseWebSockets();
         app.MapHealthChecks("/health");
         app.Map("/ws", websocketManager.HandleRoute);

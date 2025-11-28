@@ -58,15 +58,12 @@ public class HealthCheckService
                     continue;
                 }
 
-                // get concurrency
+                // get concurrency (not used anymore - operation limit enforces this)
                 var concurrency = _configManager.GetMaxRepairConnections();
 
-                // set reserved-connections context
+                // set connection usage context (no reservation needed - operation limits handle it)
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
-                var providerConfig = _configManager.GetUsenetProviderConfig();
-                var reservedConnections = providerConfig.TotalPooledConnections - concurrency;
-                using var _1 = cts.Token.SetScopedContext(new ReservedPooledConnectionsContext(reservedConnections));
-                using var _2 = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck));
+                using var _1 = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck));
 
                 // get the davItem to health-check
                 await using var dbContext = new DavDatabaseContext();

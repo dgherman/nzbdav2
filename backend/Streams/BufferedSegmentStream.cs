@@ -46,7 +46,6 @@ public class BufferedSegmentStream : Stream
         // Store context scopes so they live for the duration of the stream
         _contextScopes = new[]
         {
-            _linkedCts.Token.SetScopedContext(cancellationToken.GetContext<ReservedPooledConnectionsContext>()),
             _linkedCts.Token.SetScopedContext(cancellationToken.GetContext<LastSuccessfulProviderContext>()),
             _linkedCts.Token.SetScopedContext(cancellationToken.GetContext<ConnectionUsageContext>())
         };

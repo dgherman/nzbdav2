@@ -16,11 +16,13 @@ public class UsenetStreamingClient
 {
     private readonly CachingNntpClient _client;
     private readonly WebsocketManager _websocketManager;
+    private readonly ConfigManager _configManager;
 
     public UsenetStreamingClient(ConfigManager configManager, WebsocketManager websocketManager)
     {
         // initialize private members
         _websocketManager = websocketManager;
+        _configManager = configManager;
 
         // get connection settings from config-manager
         var providerConfig = configManager.GetUsenetProviderConfig();
@@ -51,10 +53,10 @@ public class UsenetStreamingClient
         CancellationToken cancellationToken = default
     )
     {
+        // No need to copy ReservedPooledConnectionsContext - operation limits handle this now
         using var childCt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        using var _1 = childCt.Token.SetScopedContext(cancellationToken.GetContext<ReservedPooledConnectionsContext>());
-        using var _2 = childCt.Token.SetScopedContext(cancellationToken.GetContext<LastSuccessfulProviderContext>());
-        using var _3 = childCt.Token.SetScopedContext(cancellationToken.GetContext<ConnectionUsageContext>());
+        using var _1 = childCt.Token.SetScopedContext(cancellationToken.GetContext<LastSuccessfulProviderContext>());
+        using var _2 = childCt.Token.SetScopedContext(cancellationToken.GetContext<ConnectionUsageContext>());
         var token = childCt.Token;
 
         var tasks = segmentIds
@@ -143,12 +145,14 @@ public class UsenetStreamingClient
         int providerIndex
     )
     {
-        var connectionPool = new ConnectionPool<INntpClient>(maxConnections, pooledSemaphore, connectionFactory);
-        connectionPool.OnConnectionPoolChanged += onConnectionPoolChanged;
-        connectionPoolStats.RegisterConnectionPool(providerIndex, connectionPool);
+        // Create connection pool (uses global semaphore for all providers)
+        var pool = new ConnectionPool<INntpClient>(maxConnections, pooledSemaphore, connectionFactory);
+        pool.OnConnectionPoolChanged += onConnectionPoolChanged;
+        connectionPoolStats.RegisterConnectionPool(providerIndex, pool);
         var args = new ConnectionPoolStats.ConnectionPoolChangedEventArgs(0, 0, maxConnections);
-        onConnectionPoolChanged(connectionPool, args);
-        return connectionPool;
+        onConnectionPoolChanged(pool, args);
+
+        return pool;
     }
 
     private MultiProviderNntpClient CreateMultiProviderClient(UsenetProviderConfig providerConfig)
@@ -156,12 +160,23 @@ public class UsenetStreamingClient
         var connectionPoolStats = new ConnectionPoolStats(providerConfig, _websocketManager);
         var totalPooledConnectionCount = providerConfig.TotalPooledConnections;
         var pooledSemaphore = new ExtendedSemaphoreSlim(totalPooledConnectionCount, totalPooledConnectionCount);
+
+        // Create ONE global operation limiter shared across ALL providers
+        var maxQueueConnections = _configManager.GetMaxQueueConnections();
+        var maxHealthCheckConnections = _configManager.GetMaxRepairConnections();
+        var globalLimiter = new GlobalOperationLimiter(
+            maxQueueConnections,
+            maxHealthCheckConnections,
+            totalPooledConnectionCount
+        );
+
         var providerClients = providerConfig.Providers
             .Select((provider, index) => CreateProviderClient(
                 provider,
                 connectionPoolStats,
                 index,
-                pooledSemaphore
+                pooledSemaphore,
+                globalLimiter  // ← Same instance for all providers
             ))
             .ToList();
         return new MultiProviderNntpClient(providerClients);
@@ -172,7 +187,8 @@ public class UsenetStreamingClient
         UsenetProviderConfig.ConnectionDetails connectionDetails,
         ConnectionPoolStats connectionPoolStats,
         int providerIndex,
-        ExtendedSemaphoreSlim pooledSemaphore
+        ExtendedSemaphoreSlim pooledSemaphore,
+        GlobalOperationLimiter globalLimiter
     )
     {
         var connectionPool = CreateNewConnectionPool(
@@ -183,7 +199,7 @@ public class UsenetStreamingClient
             connectionPoolStats: connectionPoolStats,
             providerIndex: providerIndex
         );
-        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type);
+        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter);
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection

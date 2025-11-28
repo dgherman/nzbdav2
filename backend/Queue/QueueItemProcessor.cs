@@ -107,13 +107,11 @@ public class QueueItemProcessor(
             return;
         }
 
-        // ensure we don't use more than max-queue-connections
+        // GlobalOperationLimiter now handles all connection limits - no need for reserved connections
         var providerConfig = configManager.GetUsenetProviderConfig();
         var concurrency = configManager.GetMaxQueueConnections();
-        var reservedConnections = providerConfig.TotalPooledConnections - concurrency;
-        Log.Debug($"[Queue] Processing '{queueItem.JobName}': TotalConnections={providerConfig.TotalPooledConnections}, MaxQueueConnections={concurrency}, ReservedForNonQueue={reservedConnections}");
-        using var _1 = ct.SetScopedContext(new ReservedPooledConnectionsContext(reservedConnections));
-        using var _2 = ct.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Queue, queueItem.JobName));
+        Log.Debug($"[Queue] Processing '{queueItem.JobName}': TotalConnections={providerConfig.TotalPooledConnections}, MaxQueueConnections={concurrency}");
+        using var _1 = ct.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Queue, queueItem.JobName));
 
         // read the nzb document
         var documentBytes = Encoding.UTF8.GetBytes(queueNzbContents.NzbContents);

@@ -76,7 +76,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     public async Task<ConnectionLock<T>> GetConnectionLockAsync(
         CancellationToken cancellationToken = default)
     {
-        var reservedCount = cancellationToken.GetContext<ReservedPooledConnectionsContext>().Count;
         var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
 
         // Make caller cancellation also cancel the wait on the gate.
@@ -84,8 +83,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             cancellationToken, _sweepCts.Token);
 
         var usageBreakdown = GetUsageBreakdownString();
-        Serilog.Log.Debug($"[ConnPool] Requesting connection for {usageContext}: Live={_live}, Idle={IdleConnections}, Active={ActiveConnections}, Available={AvailableConnections}, RequiredReserved={reservedCount}, RemainingSemaphore={RemainingSemaphoreSlots}, Usage={usageBreakdown}");
-        await _gate.WaitAsync(reservedCount, linked.Token).ConfigureAwait(false);
+        Serilog.Log.Debug($"[ConnPool] Requesting connection for {usageContext}: Live={_live}, Idle={IdleConnections}, Active={ActiveConnections}, Available={AvailableConnections}, RemainingSemaphore={RemainingSemaphoreSlots}, Usage={usageBreakdown}");
+        await _gate.WaitAsync(0, linked.Token).ConfigureAwait(false);
 
         // Pool might have been disposed after wait returned:
         if (Volatile.Read(ref _disposed) == 1)

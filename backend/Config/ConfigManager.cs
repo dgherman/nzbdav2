@@ -160,6 +160,18 @@ public class ConfigManager
         );
     }
 
+    /// <summary>
+    /// Gets the number of connections that should be reserved for queue processing.
+    /// All non-queue operations (streaming, health checks) should set this as their
+    /// GlobalOperationLimiter enforces this limit globally across all providers.
+    /// </summary>
+    public int GetReservedConnectionsForQueue()
+    {
+        var providerConfig = GetUsenetProviderConfig();
+        var maxQueueConnections = GetMaxQueueConnections();
+        return Math.Max(0, providerConfig.TotalPooledConnections - maxQueueConnections);
+    }
+
     public bool IsEnforceReadonlyWebdavEnabled()
     {
         var defaultValue = true;
