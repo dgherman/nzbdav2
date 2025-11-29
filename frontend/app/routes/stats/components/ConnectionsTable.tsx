@@ -41,7 +41,7 @@ export function ConnectionsTable({ connections }: Props) {
                                 <ConnectionGroup 
                                     key={type} 
                                     type={type} 
-                                    items={grouped[type]} 
+                                    items={grouped[type] || []} 
                                 />
                             ))
                         )}
@@ -52,7 +52,7 @@ export function ConnectionsTable({ connections }: Props) {
     );
 }
 
-function ConnectionGroup({ type, items }: { type: number, items: ConnectionUsageContext[] }) {
+function ConnectionGroup({ type, items = [] }: { type: number, items: ConnectionUsageContext[] }) {
     const [open, setOpen] = useState(false);
 
     return (
