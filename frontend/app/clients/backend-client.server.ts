@@ -226,11 +226,19 @@ class BackendClient {
         return data;
     }
 
-    public async getActiveConnections(): Promise<ConnectionUsageContext[]> {
+    public async getActiveConnections(): Promise<Record<number, ConnectionUsageContext[]>> {
         const url = process.env.BACKEND_URL + "/api/stats/connections";
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await fetch(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get active connections: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async getCurrentBandwidth(): Promise<ProviderBandwidthSnapshot[]> {
+        const url = process.env.BACKEND_URL + "/api/stats/bandwidth/current";
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get current bandwidth: ${(await response.json()).error}`);
         return response.json();
     }
 
@@ -373,4 +381,10 @@ export type BandwidthSample = {
     providerIndex: number,
     timestamp: string,
     bytes: number
+}
+
+export type ProviderBandwidthSnapshot = {
+    providerIndex: number,
+    totalBytes: number,
+    currentSpeed: number
 }

@@ -1,10 +1,11 @@
 import { useEffect, useState } from "react";
-import { Form, Link, useLoaderData, useSearchParams, useSubmit } from "react-router";
+import { Form, Link, useLoaderData, useSearchParams, useSubmit, useRevalidator } from "react-router";
 import { Alert, Button, ButtonGroup, Container, Spinner } from "react-bootstrap";
 import type { Route } from "./+types/route";
 import { backendClient } from "~/clients/backend-client.server";
 import { ConnectionsTable } from "./components/ConnectionsTable";
-import { BandwidthGraph } from "./components/BandwidthGraph";
+import { BandwidthTable } from "./components/BandwidthTable";
+import { ProviderStatus } from "./components/ProviderStatus";
 import { DeletedFilesTable } from "./components/DeletedFilesTable";
 import { isAuthenticated } from "~/auth/authentication.server";
 
@@ -14,19 +15,36 @@ export async function loader({ request }: Route.LoaderArgs) {
     const url = new URL(request.url);
     const range = url.searchParams.get("range") || "1h";
 
-    const [connections, bandwidth, deletedFiles] = await Promise.all([
+    const [connections, bandwidthHistory, currentBandwidth, deletedFiles] = await Promise.all([
         backendClient.getActiveConnections(),
         backendClient.getBandwidthHistory(range),
+        backendClient.getCurrentBandwidth(),
         backendClient.getDeletedFiles(50)
     ]);
 
-    return { connections, bandwidth, deletedFiles, range };
+    // Flatten connections for the detailed table if needed, 
+    // but ConnectionsTable now expects a list.
+    // Wait, ConnectionsTable expects ConnectionUsageContext[] but I changed getActiveConnections to return Record<number, ...>
+    // I need to update ConnectionsTable to accept the record or flatten it here.
+    // Let's update ConnectionsTable to accept the record, it's better.
+    
+    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, range };
 }
 
 export default function StatsPage({ loaderData }: Route.ComponentProps) {
-    const { connections, bandwidth, deletedFiles, range } = loaderData;
+    const { connections, bandwidthHistory, currentBandwidth, deletedFiles, range } = loaderData;
     const [searchParams, setSearchParams] = useSearchParams();
-    const submit = useSubmit();
+    const revalidator = useRevalidator();
+
+    // Auto-refresh current stats every 2 seconds
+    useEffect(() => {
+        const timer = setInterval(() => {
+            if (document.visibilityState === "visible") {
+                revalidator.revalidate();
+            }
+        }, 2000);
+        return () => clearInterval(timer);
+    }, [revalidator]);
 
     const handleRangeChange = (newRange: string) => {
         setSearchParams(prev => {
@@ -34,6 +52,9 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
             return prev;
         });
     };
+
+    // Flatten connections for the legacy table view if we want to keep it
+    const allConnections = Object.values(connections).flat();
 
     return (
         <Container fluid className="p-4">
@@ -52,16 +73,19 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                 </ButtonGroup>
             </div>
 
-            <BandwidthGraph data={bandwidth} range={range} />
+            <ProviderStatus bandwidth={currentBandwidth} connections={connections} />
 
             <div className="row">
                 <div className="col-lg-6">
-                    <ConnectionsTable connections={connections} />
+                    <BandwidthTable data={bandwidthHistory} range={range} />
                 </div>
                 <div className="col-lg-6">
                     <DeletedFilesTable files={deletedFiles} />
                 </div>
             </div>
+
+            <ConnectionsTable connections={allConnections} />
         </Container>
     );
 }
+

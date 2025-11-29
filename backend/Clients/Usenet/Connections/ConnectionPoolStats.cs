@@ -46,6 +46,18 @@ public class ConnectionPoolStats
         return list;
     }
 
+    public Dictionary<int, List<ConnectionUsageContext>> GetActiveConnectionsByProvider()
+    {
+        var result = new Dictionary<int, List<ConnectionUsageContext>>();
+        for (int i = 0; i < _connectionPools.Length; i++)
+        {
+            var pool = _connectionPools[i];
+            if (pool != null)
+                result[i] = pool.GetActiveConnections();
+        }
+        return result;
+    }
+
     public EventHandler<ConnectionPoolChangedEventArgs> GetOnConnectionPoolChanged(int providerIndex)
     {
         return OnEvent;

@@ -46,8 +46,18 @@ public class StatsController(
     {
         return ExecuteSafely(() =>
         {
-            var connections = streamingClient.GetActiveConnections();
+            var connections = streamingClient.GetActiveConnectionsByProvider();
             return Task.FromResult<IActionResult>(Ok(connections));
+        });
+    }
+
+    [HttpGet("bandwidth/current")]
+    public Task<IActionResult> GetCurrentBandwidth()
+    {
+        return ExecuteSafely(() =>
+        {
+            var stats = bandwidthService.GetBandwidthStats();
+            return Task.FromResult<IActionResult>(Ok(stats));
         });
     }
 

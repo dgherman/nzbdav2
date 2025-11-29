@@ -57,6 +57,11 @@ public class UsenetStreamingClient
         return _connectionPoolStats?.GetActiveConnections() ?? new List<ConnectionUsageContext>();
     }
 
+    public Dictionary<int, List<ConnectionUsageContext>> GetActiveConnectionsByProvider()
+    {
+        return _connectionPoolStats?.GetActiveConnectionsByProvider() ?? new Dictionary<int, List<ConnectionUsageContext>>();
+    }
+
     public async Task CheckAllSegmentsAsync
     (
         IEnumerable<string> segmentIds,
