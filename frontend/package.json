@@ -18,6 +18,7 @@
     "express": "^5.1.0",
     "http-proxy-middleware": "^3.0.5",
     "isbot": "^5.1.27",
+    "lucide-react": "^0.555.0",
     "mime-types": "^3.0.1",
     "morgan": "^1.10.0",
     "react": "^19.1.0",
@@ -25,6 +26,7 @@
     "react-dom": "^19.1.0",
     "react-dropzone": "^14.3.8",
     "react-router": "^7.5.3",
+    "recharts": "^3.5.1",
     "remix-auth": "^4.2.0",
     "remix-auth-form": "^3.0.0",
     "ws": "^8.18.3"

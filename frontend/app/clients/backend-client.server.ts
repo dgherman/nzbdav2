@@ -225,6 +225,30 @@ class BackendClient {
         const data = await response.json();
         return data;
     }
+
+    public async getActiveConnections(): Promise<ConnectionUsageContext[]> {
+        const url = process.env.BACKEND_URL + "/api/stats/connections";
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get active connections: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async getBandwidthHistory(range: string): Promise<BandwidthSample[]> {
+        const url = process.env.BACKEND_URL + `/api/stats/bandwidth/history?range=${range}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get bandwidth history: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async getDeletedFiles(limit: number = 100): Promise<HealthCheckResult[]> {
+        const url = process.env.BACKEND_URL + `/api/stats/deleted-files?limit=${limit}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get deleted files: ${(await response.json()).error}`);
+        return response.json();
+    }
 }
 
 export const backendClient = new BackendClient();
@@ -328,4 +352,25 @@ export enum RepairAction {
     Repaired = 1,
     Deleted = 2,
     ActionNeeded = 3,
+}
+
+export type ConnectionUsageContext = {
+    usageType: ConnectionUsageType,
+    details: string | null
+}
+
+export enum ConnectionUsageType {
+    Unknown = 0,
+    Queue = 1,
+    Streaming = 2,
+    HealthCheck = 3,
+    Repair = 4,
+    BufferedStreaming = 5
+}
+
+export type BandwidthSample = {
+    id: number,
+    providerIndex: number,
+    timestamp: string,
+    bytes: number
 }
