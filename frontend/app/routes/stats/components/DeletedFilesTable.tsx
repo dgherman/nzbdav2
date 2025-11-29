@@ -1,4 +1,5 @@
-import { Table, Badge } from "react-bootstrap";
+import { useState } from "react";
+import { Table, Pagination } from "react-bootstrap";
 import type { HealthCheckResult } from "~/clients/backend-client.server";
 
 interface Props {
@@ -6,35 +7,45 @@ interface Props {
 }
 
 export function DeletedFilesTable({ files }: Props) {
+    const [page, setPage] = useState(1);
+    const pageSize = 10;
+    const totalPages = Math.ceil(files.length / pageSize);
+    
+    const paginatedFiles = files.slice((page - 1) * pageSize, page * pageSize);
+
     return (
         <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
-            <h4 className="mb-3">Deleted Files (Health Check Failures)</h4>
-            <div className="table-responsive">
-                <Table variant="dark" striped hover size="sm">
+            <div className="d-flex justify-content-between align-items-center mb-3">
+                <h4 className="m-0">Deleted Files</h4>
+                <small className="text-muted">Total: {files.length}</small>
+            </div>
+            
+            <div className="table-responsive mb-3">
+                <Table variant="dark" striped hover size="sm" className="mb-0">
                     <thead>
-                        <tr>
+                        <tr className="text-xs text-muted">
                             <th>Date</th>
                             <th>Path</th>
                             <th>Message</th>
                         </tr>
                     </thead>
                     <tbody>
-                        {files.length === 0 ? (
+                        {paginatedFiles.length === 0 ? (
                             <tr>
-                                <td colSpan={3} className="text-center py-4 text-muted">
+                                <td colSpan={3} className="text-center py-4 text-muted text-sm">
                                     No deleted files found
                                 </td>
                             </tr>
                         ) : (
-                            files.map((file) => (
-                                <tr key={file.id}>
-                                    <td className="whitespace-nowrap text-sm text-muted">
+                            paginatedFiles.map((file) => (
+                                <tr key={file.id} style={{ fontSize: '0.8rem' }}>
+                                    <td className="whitespace-nowrap text-muted" style={{ width: '160px' }}>
                                         {new Date(file.createdAt).toLocaleString()}
                                     </td>
-                                    <td className="font-mono text-sm truncate max-w-xs" title={file.path}>
+                                    <td className="font-mono truncate max-w-xs text-light" title={file.path}>
                                         {file.path.split('/').pop()}
                                     </td>
-                                    <td className="text-sm text-muted truncate max-w-md" title={file.message || ""}>
+                                    <td className="text-muted truncate max-w-md" title={file.message || ""}>
                                         {file.message}
                                     </td>
                                 </tr>
@@ -43,6 +54,31 @@ export function DeletedFilesTable({ files }: Props) {
                     </tbody>
                 </Table>
             </div>
+
+            {totalPages > 1 && (
+                <div className="d-flex justify-content-center">
+                    <Pagination size="sm" className="m-0">
+                        <Pagination.Prev 
+                            onClick={() => setPage(p => Math.max(1, p - 1))} 
+                            disabled={page === 1} 
+                        />
+                        {[...Array(totalPages)].map((_, i) => (
+                            <Pagination.Item 
+                                key={i + 1} 
+                                active={i + 1 === page}
+                                onClick={() => setPage(i + 1)}
+                            >
+                                {i + 1}
+                            </Pagination.Item>
+                        ))}
+                        <Pagination.Next 
+                            onClick={() => setPage(p => Math.min(totalPages, p + 1))} 
+                            disabled={page === totalPages} 
+                        />
+                    </Pagination>
+                </div>
+            )}
         </div>
     );
 }
+
