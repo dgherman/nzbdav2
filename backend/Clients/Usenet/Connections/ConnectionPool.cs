@@ -191,6 +191,11 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             .ToDictionary(g => g.Key, g => g.Count());
     }
 
+    public List<ConnectionUsageContext> GetActiveConnections()
+    {
+        return _activeConnections.Values.ToList();
+    }
+
     private string GetUsageBreakdownString()
     {
         var breakdown = GetUsageBreakdown();

@@ -30,10 +30,28 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<HealthCheckResult> HealthCheckResults => Set<HealthCheckResult>();
     public DbSet<HealthCheckStat> HealthCheckStats => Set<HealthCheckStat>();
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
+    public DbSet<BandwidthSample> BandwidthSamples => Set<BandwidthSample>();
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
     {
+        // BandwidthSample
+        b.Entity<BandwidthSample>(e =>
+        {
+            e.ToTable("BandwidthSamples");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedOnAdd();
+            e.Property(i => i.ProviderIndex).IsRequired();
+            e.Property(i => i.Bytes).IsRequired();
+            e.Property(i => i.Timestamp)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+            e.HasIndex(i => new { i.Timestamp, i.ProviderIndex });
+        });
+
         // Account
         b.Entity<Account>(e =>
         {

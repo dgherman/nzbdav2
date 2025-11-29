@@ -5,6 +5,7 @@ using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Config;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Websocket;
 using Usenet.Nntp.Responses;
@@ -17,12 +18,18 @@ public class UsenetStreamingClient
     private readonly CachingNntpClient _client;
     private readonly WebsocketManager _websocketManager;
     private readonly ConfigManager _configManager;
+    private readonly BandwidthService _bandwidthService;
+    private ConnectionPoolStats? _connectionPoolStats;
 
-    public UsenetStreamingClient(ConfigManager configManager, WebsocketManager websocketManager)
+    public UsenetStreamingClient(
+        ConfigManager configManager, 
+        WebsocketManager websocketManager,
+        BandwidthService bandwidthService)
     {
         // initialize private members
         _websocketManager = websocketManager;
         _configManager = configManager;
+        _bandwidthService = bandwidthService;
 
         // get connection settings from config-manager
         var providerConfig = configManager.GetUsenetProviderConfig();
@@ -43,6 +50,11 @@ public class UsenetStreamingClient
             var newMultiProviderClient = CreateMultiProviderClient(newProviderConfig!);
             _client.UpdateUnderlyingClient(newMultiProviderClient);
         };
+    }
+
+    public List<ConnectionUsageContext> GetActiveConnections()
+    {
+        return _connectionPoolStats?.GetActiveConnections() ?? new List<ConnectionUsageContext>();
     }
 
     public async Task CheckAllSegmentsAsync
@@ -158,6 +170,7 @@ public class UsenetStreamingClient
     private MultiProviderNntpClient CreateMultiProviderClient(UsenetProviderConfig providerConfig)
     {
         var connectionPoolStats = new ConnectionPoolStats(providerConfig, _websocketManager);
+        _connectionPoolStats = connectionPoolStats;
         var totalPooledConnectionCount = providerConfig.TotalPooledConnections;
         var pooledSemaphore = new ExtendedSemaphoreSlim(totalPooledConnectionCount, totalPooledConnectionCount);
 
@@ -176,7 +189,7 @@ public class UsenetStreamingClient
                 connectionPoolStats,
                 index,
                 pooledSemaphore,
-                globalLimiter  // ← Same instance for all providers
+                globalLimiter
             ))
             .ToList();
         return new MultiProviderNntpClient(providerClients);
@@ -199,7 +212,7 @@ public class UsenetStreamingClient
             connectionPoolStats: connectionPoolStats,
             providerIndex: providerIndex
         );
-        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter);
+        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter, _bandwidthService, providerIndex);
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection

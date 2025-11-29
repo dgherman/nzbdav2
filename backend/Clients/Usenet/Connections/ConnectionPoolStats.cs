@@ -35,6 +35,17 @@ public class ConnectionPoolStats
         _connectionPools[providerIndex] = connectionPool;
     }
 
+    public List<ConnectionUsageContext> GetActiveConnections()
+    {
+        var list = new List<ConnectionUsageContext>();
+        foreach (var pool in _connectionPools)
+        {
+            if (pool != null)
+                list.AddRange(pool.GetActiveConnections());
+        }
+        return list;
+    }
+
     public EventHandler<ConnectionPoolChangedEventArgs> GetOnConnectionPoolChanged(int providerIndex)
     {
         return OnEvent;
@@ -54,7 +65,8 @@ public class ConnectionPoolStats
 
             // Get usage breakdown from all connection pools
             var usageBreakdown = GetGlobalUsageBreakdown();
-            var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}|{usageBreakdown}";
+            var providerBreakdown = GetProviderUsageBreakdown(providerIndex);
+            var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}|{usageBreakdown}|{providerBreakdown}";
             _websocketManager.SendMessage(WebsocketTopic.UsenetConnections, message);
         }
     }
@@ -76,6 +88,20 @@ public class ConnectionPoolStats
         }
 
         var parts = allUsageCounts
+            .OrderBy(x => x.Key)
+            .Select(kv => $"{kv.Key}={kv.Value}")
+            .ToArray();
+
+        return parts.Length > 0 ? string.Join(",", parts) : "none";
+    }
+
+    private string GetProviderUsageBreakdown(int providerIndex)
+    {
+        var pool = _connectionPools[providerIndex];
+        if (pool == null) return "none";
+
+        var breakdown = pool.GetUsageBreakdown();
+        var parts = breakdown
             .OrderBy(x => x.Key)
             .Select(kv => $"{kv.Key}={kv.Value}")
             .ToArray();

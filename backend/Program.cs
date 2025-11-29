@@ -85,6 +85,7 @@ class Program
             .AddWebdavBasicAuthentication(configManager)
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
+            .AddSingleton<BandwidthService>()
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ArrMonitoringService>()
@@ -108,6 +109,7 @@ class Program
         var app = builder.Build();
         app.Services.GetRequiredService<ArrMonitoringService>();
         app.Services.GetRequiredService<HealthCheckService>();
+        app.Services.GetRequiredService<BandwidthService>();
 
         // run
         app.UseMiddleware<ExceptionMiddleware>();

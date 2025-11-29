@@ -2,6 +2,7 @@
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
+using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Utils;
 using Usenet.Exceptions;
@@ -11,7 +12,12 @@ using Usenet.Yenc;
 
 namespace NzbWebDAV.Clients.Usenet;
 
-public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPool, ProviderType type, GlobalOperationLimiter? globalLimiter = null) : INntpClient
+public class MultiConnectionNntpClient(
+    ConnectionPool<INntpClient> connectionPool, 
+    ProviderType type, 
+    GlobalOperationLimiter? globalLimiter = null,
+    BandwidthService? bandwidthService = null,
+    int providerIndex = -1) : INntpClient
 {
     public ProviderType ProviderType { get; } = type;
     public int LiveConnections => _connectionPool.LiveConnections;
@@ -22,6 +28,8 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
 
     private ConnectionPool<INntpClient> _connectionPool = connectionPool;
     private readonly GlobalOperationLimiter? _globalLimiter = globalLimiter;
+    private readonly BandwidthService? _bandwidthService = bandwidthService;
+    private readonly int _providerIndex = providerIndex;
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
@@ -49,12 +57,20 @@ public class MultiConnectionNntpClient(ConnectionPool<INntpClient> connectionPoo
             cancellationToken);
     }
 
-    public Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders,
+    public async Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders,
         CancellationToken cancellationToken)
     {
-        return RunWithConnection(
+        var stream = await RunWithConnection(
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
-            cancellationToken);
+            cancellationToken).ConfigureAwait(false);
+
+        if (_bandwidthService != null && _providerIndex >= 0)
+        {
+            var monitoringStream = new MonitoringStream(stream, bytes => _bandwidthService.RecordBytes(_providerIndex, bytes));
+            return new YencHeaderStream(stream.Header, stream.ArticleHeaders, monitoringStream);
+        }
+
+        return stream;
     }
 
     public Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
