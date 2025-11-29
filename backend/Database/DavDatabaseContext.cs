@@ -1,5 +1,6 @@
 ﻿using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Database.Models;
@@ -15,6 +16,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
         () => new DbContextOptionsBuilder<DavDatabaseContext>()
             .UseSqlite($"Data Source={DatabaseFilePath}")
             .AddInterceptors(new SqliteForeignKeyEnabler())
+            .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning))
             .Options
     );
 
