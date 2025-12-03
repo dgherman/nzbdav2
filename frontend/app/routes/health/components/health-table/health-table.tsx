@@ -1,4 +1,4 @@
-import { Table, Badge } from "react-bootstrap";
+import { Table, Badge, Pagination, Form, InputGroup } from "react-bootstrap";
 import type { HealthCheckQueueItem } from "~/clients/backend-client.server";
 import styles from "./health-table.module.css";
 import { Truncate } from "~/routes/queue/components/truncate/truncate";
@@ -7,16 +7,61 @@ import { ProgressBadge } from "~/routes/queue/components/status-badge/status-bad
 export type HealthTableProps = {
     isEnabled: boolean,
     healthCheckItems: HealthCheckQueueItem[],
+    totalCount: number,
+    page: number,
+    pageSize: number,
+    search: string,
+    showAll: boolean,
+    onPageChange: (page: number) => void,
+    onSearchChange: (search: string) => void,
+    onShowAllChange: (showAll: boolean) => void,
 }
 
-export function HealthTable({ isEnabled, healthCheckItems }: HealthTableProps) {
+export function HealthTable({ 
+    isEnabled, 
+    healthCheckItems, 
+    totalCount,
+    page,
+    pageSize,
+    search,
+    showAll,
+    onPageChange,
+    onSearchChange,
+    onShowAllChange
+}: HealthTableProps) {
+
+    const totalPages = Math.ceil(totalCount / pageSize);
 
     return (
         <div className={styles.container}>
             <div className={styles.header}>
                 <h3 className={styles.title}>Health Check Queue</h3>
                 <div className={styles.count}>
-                    Only {healthCheckItems.length} shown
+                    {totalCount} items
+                </div>
+            </div>
+
+            <div className={styles.controls}>
+                <div className={styles.searchContainer}>
+                    <InputGroup>
+                        <InputGroup.Text id="search-addon">🔍</InputGroup.Text>
+                        <Form.Control
+                            placeholder="Search files..."
+                            aria-label="Search"
+                            aria-describedby="search-addon"
+                            value={search}
+                            onChange={(e) => onSearchChange(e.target.value)}
+                        />
+                    </InputGroup>
+                </div>
+                <div className={styles.filterContainer}>
+                    <Form.Check 
+                        type="switch"
+                        id="show-all-switch"
+                        label="Show All Files"
+                        checked={showAll}
+                        onChange={(e) => onShowAllChange(e.target.checked)}
+                    />
                 </div>
             </div>
 
@@ -30,52 +75,74 @@ export function HealthTable({ isEnabled, healthCheckItems }: HealthTableProps) {
                 </div>
             ) : healthCheckItems.length === 0 ? (
                 <div className={styles.emptyState}>
-                    <div className={styles.emptyIcon}>🩺💙💪</div>
-                    <div className={styles.emptyTitle}>No Items To Health-Check</div>
+                    <div className={styles.emptyIcon}>
+                        {search ? "🔍" : "🩺💙💪"}
+                    </div>
+                    <div className={styles.emptyTitle}>
+                        {search ? "No Results Found" : "No Items To Health-Check"}
+                    </div>
                     <div className={styles.emptyDescription}>
-                        Once you begin processing nzbs, the mounted usenet files will be queued for continuous health monitoring
+                        {search 
+                            ? `No items matching "${search}" were found in the queue.` 
+                            : "Once you begin processing nzbs, the mounted usenet files will be queued for continuous health monitoring"}
                     </div>
                 </div>
             ) : (
-                <div className={styles.tableContainer}>
-                    <Table className={styles.table} responsive>
-                        <thead className={styles.desktop}>
-                            <tr>
-                                <th>Name</th>
-                                <th className={styles.desktop}>Created</th>
-                                <th className={styles.desktop}>Last Check</th>
-                                <th className={styles.desktop}>Next Check</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {healthCheckItems.map(item => (
-                                <tr key={item.id} className={styles.tableRow}>
-                                    <td className={styles.nameCell}>
-                                        <div className={styles.nameContainer}>
-                                            <div className={styles.name}><Truncate>{item.name}</Truncate></div>
-                                            <div className={styles.path}><Truncate>{item.path}</Truncate></div>
-                                            <div className={styles.mobile}>
-                                                <DateDetailsTable item={item} />
-                                            </div>
-                                        </div>
-                                    </td>
-                                    <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                        {formatDateBadge(item.releaseDate, 'Unknown', 'info')}
-                                    </td>
-                                    <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                        {formatDateBadge(item.lastHealthCheck, 'Never', 'warning')}
-                                    </td>
-                                    <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                        {item.progress > 0
-                                            ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
-                                            : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
-                                        }
-                                    </td>
+                <>
+                    <div className={styles.tableContainer}>
+                        <Table className={styles.table} responsive>
+                            <thead className={styles.desktop}>
+                                <tr>
+                                    <th>Name</th>
+                                    <th className={styles.desktop}>Created</th>
+                                    <th className={styles.desktop}>Last Check</th>
+                                    <th className={styles.desktop}>Next Check</th>
                                 </tr>
-                            ))}
-                        </tbody>
-                    </Table>
-                </div>
+                            </thead>
+                            <tbody>
+                                {healthCheckItems.map(item => (
+                                    <tr key={item.id} className={styles.tableRow}>
+                                        <td className={styles.nameCell}>
+                                            <div className={styles.nameContainer}>
+                                                <div className={styles.name}><Truncate>{item.name}</Truncate></div>
+                                                <div className={styles.path}><Truncate>{item.path}</Truncate></div>
+                                                <div className={styles.mobile}>
+                                                    <DateDetailsTable item={item} />
+                                                </div>
+                                            </div>
+                                        </td>
+                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
+                                            {formatDateBadge(item.releaseDate, 'Unknown', 'info')}
+                                        </td>
+                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
+                                            {formatDateBadge(item.lastHealthCheck, 'Never', 'warning')}
+                                        </td>
+                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
+                                            {item.progress > 0
+                                                ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
+                                                : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
+                                            }
+                                        </td>
+                                    </tr>
+                                ))}
+                            </tbody>
+                        </Table>
+                    </div>
+
+                    {totalPages > 1 && (
+                        <div className="d-flex justify-content-center mt-3">
+                            <Pagination>
+                                <Pagination.First onClick={() => onPageChange(0)} disabled={page === 0} />
+                                <Pagination.Prev onClick={() => onPageChange(page - 1)} disabled={page === 0} />
+                                
+                                <Pagination.Item active>{page + 1}</Pagination.Item>
+                                
+                                <Pagination.Next onClick={() => onPageChange(page + 1)} disabled={page >= totalPages - 1} />
+                                <Pagination.Last onClick={() => onPageChange(totalPages - 1)} disabled={page >= totalPages - 1} />
+                            </Pagination>
+                        </div>
+                    )}
+                </>
             )}
         </div>
     );

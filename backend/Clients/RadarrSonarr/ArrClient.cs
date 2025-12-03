@@ -56,6 +56,13 @@ public class ArrClient(string host, string apiKey)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"{Host}{rootPath}");
         using var response = await SendAsync(request);
+        
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Request to {rootPath} failed with status {response.StatusCode}");
+
+        if (response.Content.Headers.ContentLength == 0)
+            return default!;
+
         await using var stream = await response.Content.ReadAsStreamAsync();
         return await JsonSerializer.DeserializeAsync<T>(stream) ?? throw new NullReferenceException();
     }
@@ -64,7 +71,15 @@ public class ArrClient(string host, string apiKey)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, GetRequestUri(path));
         request.Content = new StringContent(JsonSerializer.Serialize(body));
+        request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
         using var response = await SendAsync(request);
+
+        if (!response.IsSuccessStatusCode)
+            throw new HttpRequestException($"Request to {path} failed with status {response.StatusCode}");
+
+        if (response.Content.Headers.ContentLength == 0)
+            return default!;
+
         await using var stream = await response.Content.ReadAsStreamAsync();
         return await JsonSerializer.DeserializeAsync<T>(stream) ?? throw new NullReferenceException();
     }

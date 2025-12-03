@@ -34,6 +34,25 @@
     border: 1px solid rgba(255, 255, 255, 0.05);
 }
 
+.controls {
+    display: flex;
+    gap: 16px;
+    align-items: flex-start;
+    margin-bottom: 20px;
+    flex-wrap: wrap;
+}
+
+.searchContainer {
+    flex: 1;
+    min-width: 200px;
+}
+
+.filterContainer {
+    display: flex;
+    align-items: center;
+    height: 38px; /* Match input height usually */
+}
+
 .tableContainer {
     min-height: 200px;
     margin-left: calc(-1 * var(--container-padding));
@@ -207,5 +226,14 @@
 
     .table td:first-child {
         padding: var(--container-padding) var(--container-padding);
+    }
+    
+    .controls {
+        flex-direction: column;
+        gap: 12px;
+    }
+    
+    .searchContainer {
+        width: 100%;
     }
 }

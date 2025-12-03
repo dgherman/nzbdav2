@@ -1,5 +1,6 @@
 using System.Text;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using NzbWebDAV.Api.SabControllers.GetHistory;
 using NzbWebDAV.Clients.RadarrSonarr;
 using NzbWebDAV.Clients.Usenet;
@@ -25,7 +26,7 @@ namespace NzbWebDAV.Queue;
 public class QueueItemProcessor(
     QueueItem queueItem,
     QueueNzbContents queueNzbContents,
-    DavDatabaseClient dbClient,
+    IServiceScopeFactory scopeFactory,
     UsenetStreamingClient usenetClient,
     ConfigManager configManager,
     WebsocketManager websocketManager,
@@ -36,6 +37,7 @@ public class QueueItemProcessor(
 {
     public async Task ProcessAsync()
     {
+        Log.Information($"[Queue] Starting processing for {queueItem.JobName} ({queueItem.Id})");
         // initialize
         var startTime = DateTime.Now;
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Downloading");
@@ -51,7 +53,7 @@ public class QueueItemProcessor(
         catch (Exception e) when (e.GetBaseException() is OperationCanceledException or TaskCanceledException)
         {
             Log.Information($"Processing of queue item `{queueItem.JobName}` was cancelled.");
-            dbClient.Ctx.ChangeTracker.Clear();
+            // No need to clear change tracker as we use short-lived contexts now
         }
 
         // when a retryable error is encountered
@@ -63,11 +65,22 @@ public class QueueItemProcessor(
             try
             {
                 Log.Error($"Failed to process job, `{queueItem.JobName}` -- {e.Message}");
-                dbClient.Ctx.ChangeTracker.Clear();
-                queueItem.PauseUntil = DateTime.Now.AddMinutes(1);
-                dbClient.Ctx.QueueItems.Attach(queueItem);
-                dbClient.Ctx.Entry(queueItem).Property(x => x.PauseUntil).IsModified = true;
-                await dbClient.Ctx.SaveChangesAsync().ConfigureAwait(false);
+                using var scope = scopeFactory.CreateScope();
+                var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+                
+                // We need to attach queueItem to the new context because it was tracked by the old (now gone) context?
+                // Actually queueItem object comes from QueueManager loop context which is disposed?
+                // No, QueueManager loop keeps context alive.
+                // BUT QueueItemProcessor now doesn't have that context.
+                // So we must attach it or fetch it again.
+                
+                // Fetching fresh is safer.
+                var item = await dbClient.Ctx.QueueItems.FirstOrDefaultAsync(x => x.Id == queueItem.Id, ct);
+                if (item != null)
+                {
+                    item.PauseUntil = DateTime.Now.AddMinutes(1);
+                    await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                }
                 _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Queued");
             }
             catch (Exception ex)
@@ -83,7 +96,9 @@ public class QueueItemProcessor(
         {
             try
             {
-                await MarkQueueItemCompleted(startTime, error: e.Message).ConfigureAwait(false);
+                using var scope = scopeFactory.CreateScope();
+                var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+                await MarkQueueItemCompleted(dbClient, startTime, error: e.Message).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
@@ -94,23 +109,31 @@ public class QueueItemProcessor(
 
     private async Task ProcessQueueItemAsync(DateTime startTime)
     {
-        var existingMountFolder = await GetMountFolder().ConfigureAwait(false);
-        var duplicateNzbBehavior = configManager.GetDuplicateNzbBehavior();
+        DavItem? existingMountFolder = null;
+        string duplicateNzbBehavior = "ignore"; // default
 
-        // if the mount folder already exists and setting is `marked-failed`
-        // then immediately mark the job as failed.
-        var isDuplicateNzb = existingMountFolder is not null;
-        if (isDuplicateNzb && duplicateNzbBehavior == "mark-failed")
+        // Scope 1: Initial DB checks
+        using (var scope = scopeFactory.CreateScope())
         {
-            const string error = "Duplicate nzb: the download folder for this nzb already exists.";
-            await MarkQueueItemCompleted(startTime, error, () => Task.FromResult(existingMountFolder)).ConfigureAwait(false);
-            return;
+            var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+            existingMountFolder = await GetMountFolder(dbClient).ConfigureAwait(false);
+            duplicateNzbBehavior = configManager.GetDuplicateNzbBehavior();
+
+            // if the mount folder already exists and setting is `marked-failed`
+            // then immediately mark the job as failed.
+            var isDuplicateNzb = existingMountFolder is not null;
+            if (isDuplicateNzb && duplicateNzbBehavior == "mark-failed")
+            {
+                const string error = "Duplicate nzb: the download folder for this nzb already exists.";
+                await MarkQueueItemCompleted(dbClient, startTime, error, () => Task.FromResult(existingMountFolder)).ConfigureAwait(false);
+                return;
+            }
         }
 
         // GlobalOperationLimiter now handles all connection limits - no need for reserved connections
         var providerConfig = configManager.GetUsenetProviderConfig();
         var concurrency = configManager.GetMaxQueueConnections();
-        Log.Debug($"[Queue] Processing '{queueItem.JobName}': TotalConnections={providerConfig.TotalPooledConnections}, MaxQueueConnections={concurrency}");
+        Log.Information($"[Queue] Processing '{queueItem.JobName}': TotalConnections={providerConfig.TotalPooledConnections}, MaxQueueConnections={concurrency}");
         using var _1 = ct.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Queue, queueItem.JobName));
 
         // read the nzb document
@@ -126,7 +149,7 @@ public class QueueItemProcessor(
         healthCheckService.CheckCachedMissingSegmentIds(articlesToPrecheck);
 
         // step 1 -- get name and size of each nzb file
-        Log.Debug($"[Queue] Step 1: Fetching first segments for {nzbFiles.Count} files with concurrency={concurrency}");
+        Log.Information($"[Queue] Step 1: Fetching first segments for {nzbFiles.Count} files with concurrency={concurrency}");
         var part1Progress = progress
             .Scale(50, 100)
             .ToPercentage(nzbFiles.Count);
@@ -141,7 +164,7 @@ public class QueueItemProcessor(
         var filesWithoutSize = fileInfos.Where(f => f.FileSize == null).Select(f => f.NzbFile).ToList();
         if (filesWithoutSize.Count > 0)
         {
-            Log.Debug($"[Queue] Step 1b: Batch fetching file sizes for {filesWithoutSize.Count} files (Par2 provided {fileInfos.Count - filesWithoutSize.Count} sizes)");
+            Log.Information($"[Queue] Step 1b: Batch fetching file sizes for {filesWithoutSize.Count} files (Par2 provided {fileInfos.Count - filesWithoutSize.Count} sizes)");
             var fileSizes = await usenetClient.GetFileSizesBatchAsync(filesWithoutSize, concurrency, ct).ConfigureAwait(false);
             foreach (var fileInfo in fileInfos.Where(f => f.FileSize == null))
             {
@@ -153,12 +176,12 @@ public class QueueItemProcessor(
         }
         else
         {
-            Log.Debug($"[Queue] Step 1b: Skipped - Par2 file provided all {fileInfos.Count} file sizes");
+            Log.Information($"[Queue] Step 1b: Skipped - Par2 file provided all {fileInfos.Count} file sizes");
         }
 
         // step 2 -- perform file processing
         var fileProcessors = GetFileProcessors(fileInfos, archivePassword).ToList();
-        Log.Debug($"[Queue] Step 2: Processing {fileProcessors.Count} file groups with concurrency={concurrency}");
+        Log.Information($"[Queue] Step 2: Processing {fileProcessors.Count} file groups with concurrency={concurrency}");
         var part2Progress = progress
             .Offset(50)
             .Scale(50, 100)
@@ -180,7 +203,7 @@ public class QueueItemProcessor(
                 .Where(x => x.IsRar || FilenameUtil.IsImportantFileType(x.FileName))
                 .SelectMany(x => x.NzbFile.GetSegmentIds())
                 .ToList();
-            Log.Debug($"[Queue] Step 3: Checking {articlesToCheck.Count} article segments with concurrency={concurrency}");
+            Log.Information($"[Queue] Step 3: Checking {articlesToCheck.Count} article segments with concurrency={concurrency}");
             var part3Progress = progress
                 .Offset(100)
                 .ToPercentage(articlesToCheck.Count);
@@ -188,30 +211,35 @@ public class QueueItemProcessor(
             checkedFullHealth = true;
         }
 
-        // update the database
-        await MarkQueueItemCompleted(startTime, error: null, async () =>
+        // Scope 2: Final DB update
+        using (var scope = scopeFactory.CreateScope())
         {
-            var categoryFolder = await GetOrCreateCategoryFolder().ConfigureAwait(false);
-            var mountFolder = await CreateMountFolder(categoryFolder, existingMountFolder, duplicateNzbBehavior).ConfigureAwait(false);
-            new RarAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
-            new FileAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
-            new SevenZipAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
-            new MultipartMkvAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
+            var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+            // update the database
+            await MarkQueueItemCompleted(dbClient, startTime, error: null, async () =>
+            {
+                var categoryFolder = await GetOrCreateCategoryFolder(dbClient).ConfigureAwait(false);
+                var mountFolder = await CreateMountFolder(dbClient, categoryFolder, existingMountFolder, duplicateNzbBehavior).ConfigureAwait(false);
+                new RarAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
+                new FileAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
+                new SevenZipAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
+                new MultipartMkvAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
 
-            // post-processing
-            new RenameDuplicatesPostProcessor(dbClient).RenameDuplicates();
-            new BlacklistedExtensionPostProcessor(configManager, dbClient).RemoveBlacklistedExtensions();
+                // post-processing
+                new RenameDuplicatesPostProcessor(dbClient).RenameDuplicates();
+                new BlacklistedExtensionPostProcessor(configManager, dbClient).RemoveBlacklistedExtensions();
 
-            // validate video files found
-            if (configManager.IsEnsureImportableVideoEnabled())
-                new EnsureImportableVideoValidator(dbClient).ThrowIfValidationFails();
+                // validate video files found
+                if (configManager.IsEnsureImportableVideoEnabled())
+                    new EnsureImportableVideoValidator(dbClient).ThrowIfValidationFails();
 
-            // create strm files, if necessary
-            if (configManager.GetImportStrategy() == "strm")
-                await new CreateStrmFilesPostProcessor(configManager, dbClient).CreateStrmFilesAsync().ConfigureAwait(false);
+                // create strm files, if necessary
+                if (configManager.GetImportStrategy() == "strm")
+                    await new CreateStrmFilesPostProcessor(configManager, dbClient).CreateStrmFilesAsync().ConfigureAwait(false);
 
-            return mountFolder;
-        }).ConfigureAwait(false);
+                return mountFolder;
+            }).ConfigureAwait(false);
+        }
     }
 
     private IEnumerable<BaseProcessor> GetFileProcessors
@@ -259,7 +287,7 @@ public class QueueItemProcessor(
             : "other";
     }
 
-    private async Task<DavItem?> GetMountFolder()
+    private async Task<DavItem?> GetMountFolder(DavDatabaseClient dbClient)
     {
         var query = from mountFolder in dbClient.Ctx.Items
             join categoryFolder in dbClient.Ctx.Items on mountFolder.ParentId equals categoryFolder.Id
@@ -272,7 +300,7 @@ public class QueueItemProcessor(
         return await query.FirstOrDefaultAsync(ct).ConfigureAwait(false);
     }
 
-    private async Task<DavItem> GetOrCreateCategoryFolder()
+    private async Task<DavItem> GetOrCreateCategoryFolder(DavDatabaseClient dbClient)
     {
         // if the category item already exists, return it
         var categoryFolder = await dbClient.GetDirectoryChildAsync(
@@ -296,13 +324,14 @@ public class QueueItemProcessor(
 
     private Task<DavItem> CreateMountFolder
     (
+        DavDatabaseClient dbClient,
         DavItem categoryFolder,
         DavItem? existingMountFolder,
         string duplicateNzbBehavior
     )
     {
         if (existingMountFolder is not null && duplicateNzbBehavior == "increment")
-            return IncrementMountFolder(categoryFolder);
+            return IncrementMountFolder(dbClient, categoryFolder);
 
         var mountFolder = DavItem.New(
             id: Guid.NewGuid(),
@@ -317,7 +346,7 @@ public class QueueItemProcessor(
         return Task.FromResult(mountFolder);
     }
 
-    private async Task<DavItem> IncrementMountFolder(DavItem categoryFolder)
+    private async Task<DavItem> IncrementMountFolder(DavDatabaseClient dbClient, DavItem categoryFolder)
     {
         for (var i = 2; i < 100; i++)
         {
@@ -362,6 +391,7 @@ public class QueueItemProcessor(
 
     private async Task MarkQueueItemCompleted
     (
+        DavDatabaseClient dbClient,
         DateTime startTime,
         string? error = null,
         Func<Task<DavItem?>>? databaseOperations = null

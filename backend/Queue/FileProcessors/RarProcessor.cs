@@ -1,5 +1,6 @@
 ﻿using System.Text.RegularExpressions;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
 using NzbWebDAV.Queue.DeobfuscationSteps._3.GetFileInfos;
@@ -95,7 +96,8 @@ public class RarProcessor(
         var filesize = fileInfo.FileSize ?? await usenet.GetFileSizeAsync(fileInfo.NzbFile, ct).ConfigureAwait(false);
         // Use adaptive concurrency for faster header reading (limited to 10 to avoid over-subscription)
         var concurrency = Math.Min(maxConcurrentConnections, 10);
-        return usenet.GetFileStream(fileInfo.NzbFile, filesize, concurrentConnections: concurrency);
+        var usageContext = ct.GetContext<ConnectionUsageContext>();
+        return usenet.GetFileStream(fileInfo.NzbFile.GetSegmentIds(), filesize, concurrency, usageContext);
     }
 
     public new class Result : BaseProcessor.Result

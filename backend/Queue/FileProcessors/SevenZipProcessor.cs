@@ -1,5 +1,6 @@
 ﻿using System.Text.RegularExpressions;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
@@ -35,7 +36,8 @@ public class SevenZipProcessor : BaseProcessor
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
         var multipartFile = await GetMultipartFile().ConfigureAwait(false);
-        await using var stream = new MultipartFileStream(multipartFile, _client);
+        var usageContext = _ct.GetContext<ConnectionUsageContext>();
+        await using var stream = new MultipartFileStream(multipartFile, _client, usageContext);
         var sevenZipEntries = await SevenZipUtil.GetSevenZipEntriesAsync(stream, _archivePassword, _ct).ConfigureAwait(false);
         if (sevenZipEntries.Any(x => x.CompressionType != CompressionType.None))
         {

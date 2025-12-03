@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Text.Json;
 using Microsoft.Extensions.DependencyInjection;
+using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Websocket;
@@ -12,20 +13,27 @@ public class BandwidthService
 {
     private readonly WebsocketManager _websocketManager;
     private readonly IServiceScopeFactory _scopeFactory;
+    private readonly ConfigManager _configManager;
     private readonly ConcurrentDictionary<int, ProviderStats> _providerStats = new();
     private readonly Timer _broadcastTimer;
     private readonly Timer _persistenceTimer;
 
-    public BandwidthService(WebsocketManager websocketManager, IServiceScopeFactory scopeFactory)
+    public BandwidthService(
+        WebsocketManager websocketManager, 
+        IServiceScopeFactory scopeFactory,
+        ConfigManager configManager)
     {
         _websocketManager = websocketManager;
         _scopeFactory = scopeFactory;
+        _configManager = configManager;
         _broadcastTimer = new Timer(BroadcastStats, null, TimeSpan.Zero, TimeSpan.FromSeconds(1));
         _persistenceTimer = new Timer(PersistStats, null, TimeSpan.FromMinutes(1), TimeSpan.FromMinutes(1));
     }
 
     private void BroadcastStats(object? state)
     {
+        if (!_configManager.IsStatsEnabled()) return;
+
         var snapshots = GetBandwidthStats();
         var json = JsonSerializer.Serialize(snapshots);
         _websocketManager.SendMessage(WebsocketTopic.Bandwidth, json);
@@ -33,6 +41,8 @@ public class BandwidthService
 
     private async void PersistStats(object? state)
     {
+        if (!_configManager.IsStatsEnabled()) return;
+
         try
         {
             using var scope = _scopeFactory.CreateScope();
@@ -68,6 +78,8 @@ public class BandwidthService
 
     public void RecordBytes(int providerIndex, long bytes)
     {
+        if (!_configManager.IsStatsEnabled()) return;
+
         var stats = _providerStats.GetOrAdd(providerIndex, _ => new ProviderStats());
         stats.AddBytes(bytes);
     }
@@ -88,8 +100,10 @@ public class BandwidthService
         private long _pendingDbBytes;
         private readonly object _lock = new();
         
-        // Track last 5 seconds for "Current Speed" smoothing
-        private readonly Queue<(DateTimeOffset time, long bytes)> _recentReads = new();
+        // Optimization: Track bandwidth in 1-second buckets instead of storing every read event.
+        // This reduces AddBytes from O(N) to O(1) and removes GC pressure.
+        private long _currentBucketBytes;
+        private readonly Queue<long> _historyBuckets = new();
         
         public void AddBytes(long bytes)
         {
@@ -97,8 +111,7 @@ public class BandwidthService
             {
                 _totalBytes += bytes;
                 _pendingDbBytes += bytes;
-                _recentReads.Enqueue((DateTimeOffset.UtcNow, bytes));
-                CleanupOldReads();
+                _currentBucketBytes += bytes;
             }
         }
 
@@ -112,25 +125,26 @@ public class BandwidthService
             }
         }
 
-        private void CleanupOldReads()
-        {
-            var threshold = DateTimeOffset.UtcNow.AddSeconds(-5);
-            while (_recentReads.TryPeek(out var item) && item.time < threshold)
-            {
-                _recentReads.Dequeue();
-            }
-        }
-
         public ProviderBandwidthSnapshot GetSnapshot(int index)
         {
             lock (_lock)
             {
-                CleanupOldReads();
-                var recentBytes = _recentReads.Sum(x => x.bytes);
-                var duration = 5.0;
+                // Rotate the bucket
+                _historyBuckets.Enqueue(_currentBucketBytes);
+                _currentBucketBytes = 0;
+
+                // Keep only last 5 seconds
+                while (_historyBuckets.Count > 5)
+                {
+                    _historyBuckets.Dequeue();
+                }
+
+                var recentBytes = _historyBuckets.Sum();
+                // Average over the window (5s), or actual elapsed if less than 5s to avoid slow startup ramp-up
+                var duration = Math.Max(1, _historyBuckets.Count); 
                 
                 // Calculate speed (bytes per second)
-                var speed = (long)(recentBytes / duration);
+                var speed = (long)(recentBytes / (double)duration);
                 
                 return new ProviderBandwidthSnapshot
                 {

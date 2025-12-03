@@ -75,12 +75,26 @@ public class UsenetStreamingClient
         using var _1 = childCt.Token.SetScopedContext(cancellationToken.GetContext<LastSuccessfulProviderContext>());
         using var _2 = childCt.Token.SetScopedContext(cancellationToken.GetContext<ConnectionUsageContext>());
         var token = childCt.Token;
+        var usageContext = token.GetContext<ConnectionUsageContext>();
 
         var tasks = segmentIds
-            .Select(async x => (
-                SegmentId: x,
-                Result: await _client.StatAsync(x, token).ConfigureAwait(false)
-            ))
+            .Select(async x =>
+            {
+                using var segmentCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                segmentCts.CancelAfter(TimeSpan.FromSeconds(60));
+                using var _ = segmentCts.Token.SetScopedContext(usageContext);
+                try
+                {
+                    return (
+                        SegmentId: x,
+                        Result: await _client.StatAsync(x, segmentCts.Token).ConfigureAwait(false)
+                    );
+                }
+                catch (OperationCanceledException) when (!token.IsCancellationRequested && segmentCts.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"Stat timed out for segment {x}");
+                }
+            })
             .WithConcurrencyAsync(concurrency);
 
         var processed = 0;
@@ -131,11 +145,23 @@ public class UsenetStreamingClient
         if (filesToFetch.Count == 0)
             return results;
 
+        var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
+
         var tasks = filesToFetch
             .Select(async file =>
             {
-                var size = await _client.GetFileSizeAsync(file, cancellationToken).ConfigureAwait(false);
-                return (file, size);
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
+                using var _ = timeoutCts.Token.SetScopedContext(usageContext);
+                try
+                {
+                    var size = await _client.GetFileSizeAsync(file, timeoutCts.Token).ConfigureAwait(false);
+                    return (file, size);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"GetFileSizeAsync timed out for file {file.FileName}");
+                }
             })
             .WithConcurrencyAsync(concurrentConnections);
 

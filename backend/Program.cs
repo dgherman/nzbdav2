@@ -47,6 +47,7 @@ class Program
             .MinimumLevel.Override("Microsoft.AspNetCore.Routing", LogEventLevel.Warning)
             .MinimumLevel.Override("Microsoft.AspNetCore.DataProtection", LogEventLevel.Error)
             .WriteTo.Console(theme: AnsiConsoleTheme.Code)
+            .WriteTo.Sink(InMemoryLogSink.Instance)
             .CreateLogger();
 
         // Log build version to verify correct build is running

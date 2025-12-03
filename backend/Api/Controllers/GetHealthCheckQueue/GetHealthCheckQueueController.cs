@@ -1,7 +1,9 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Database;
+using NzbWebDAV.Database.Models;
 using NzbWebDAV.Services;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Api.Controllers.GetHealthCheckQueue;
 
@@ -11,25 +13,57 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
 {
     private async Task<GetHealthCheckQueueResponse> GetHealthCheckQueue(GetHealthCheckQueueRequest request)
     {
-        var davItems = await HealthCheckService.GetHealthCheckQueueItems(dbClient)
-            .Take(request.PageSize)
-            .ToListAsync().ConfigureAwait(false);
+        var query = HealthCheckService.GetHealthCheckQueueItems(dbClient);
 
-        var uncheckedCount = await HealthCheckService.GetHealthCheckQueueItemsQuery(dbClient)
-            .Where(x => x.NextHealthCheck == null)
-            .CountAsync().ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(request.Search))
+        {
+            query = (IOrderedQueryable<DavItem>)query.Where(x => EF.Functions.Like(x.Name, $"%{request.Search}%"));
+        }
+
+        var now = DateTimeOffset.UtcNow;
+        var pendingCount = await query.Where(x => x.NextHealthCheck == null || x.NextHealthCheck <= now).CountAsync().ConfigureAwait(false);
+
+        int totalCount;
+        List<DavItem> pagedItems;
+
+        if (request.ShowAll)
+        {
+            totalCount = await query.CountAsync().ConfigureAwait(false);
+            pagedItems = await query
+                .Skip(request.Page * request.PageSize)
+                .Take(request.PageSize)
+                .ToListAsync().ConfigureAwait(false);
+        }
+        else
+        {
+            // Fetch a larger batch to allow for in-memory filtering of non-video files
+            // Capped at 2000 to prevent OOM, assuming user won't page past 2000 video items often.
+            var rawItems = await query.Take(2000).ToListAsync().ConfigureAwait(false);
+
+            var filteredItems = rawItems
+                .Where(x => FilenameUtil.IsVideoFile(x.Name))
+                .ToList();
+
+            totalCount = filteredItems.Count;
+
+            pagedItems = filteredItems
+                .Skip(request.Page * request.PageSize)
+                .Take(request.PageSize)
+                .ToList();
+        }
 
         return new GetHealthCheckQueueResponse()
         {
-            UncheckedCount = uncheckedCount,
-            Items = davItems.Select(x => new GetHealthCheckQueueResponse.HealthCheckQueueItem()
+            UncheckedCount = totalCount,
+            PendingCount = pendingCount,
+            Items = pagedItems.Select(x => new GetHealthCheckQueueResponse.HealthCheckQueueItem()
             {
                 Id = x.Id.ToString(),
                 Name = x.Name,
                 Path = x.Path,
                 ReleaseDate = x.ReleaseDate,
                 LastHealthCheck = x.LastHealthCheck,
-                NextHealthCheck = x.NextHealthCheck,
+                NextHealthCheck = x.NextHealthCheck == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow : x.NextHealthCheck,
             }).ToList(),
         };
     }

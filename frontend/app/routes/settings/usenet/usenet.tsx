@@ -65,8 +65,22 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [connections, setConnections] = useState<{[index: number]: ConnectionCounts}>({});
     const providerConfig = useMemo(() => parseProviderConfig(config["usenet.providers"]), [config]);
+    const [statsEnabled, setStatsEnabled] = useState(config["stats.enable"] !== "false");
+    const [streamBufferSize, setStreamBufferSize] = useState(config["usenet.stream-buffer-size"] || "100");
 
     // handlers
+    const handleStatsEnableChange = useCallback((checked: boolean) => {
+        setStatsEnabled(checked);
+        setNewConfig(prev => ({ ...prev, "stats.enable": checked.toString() }));
+    }, [setNewConfig]);
+
+    const handleStreamBufferSizeChange = useCallback((value: string) => {
+        setStreamBufferSize(value);
+        if (isPositiveInteger(value)) {
+            setNewConfig(prev => ({ ...prev, "usenet.stream-buffer-size": value }));
+        }
+    }, [setNewConfig]);
+
     const handleAddProvider = useCallback(() => {
         setEditingIndex(null);
         setShowModal(true);
@@ -80,7 +94,7 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     const handleDeleteProvider = useCallback((index: number) => {
         const newProviderConfig = { ...providerConfig };
         newProviderConfig.Providers = providerConfig.Providers.filter((_, i) => i !== index);
-        setNewConfig({ ...config, "usenet.providers": serializeProviderConfig(newProviderConfig) });
+        setNewConfig(prev => ({ ...prev, "usenet.providers": serializeProviderConfig(newProviderConfig) }));
     }, [config, providerConfig, setNewConfig]);
 
     const handleCloseModal = useCallback(() => {
@@ -95,7 +109,7 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
         } else {
             newProviderConfig.Providers.push(provider);
         }
-        setNewConfig({ ...config, "usenet.providers": serializeProviderConfig(newProviderConfig) });
+        setNewConfig(prev => ({ ...prev, "usenet.providers": serializeProviderConfig(newProviderConfig) }));
         handleCloseModal();
     }, [config, providerConfig, editingIndex, setNewConfig, handleCloseModal]);
 
@@ -133,6 +147,43 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     // view
     return (
         <div className={styles.container}>
+            <div className={styles.section}>
+                <div className={styles.sectionHeader}>
+                    <div>Global Settings</div>
+                </div>
+                <div className={styles["form-group"]}>
+                    <div className={styles["form-checkbox-wrapper"]}>
+                        <input
+                            type="checkbox"
+                            id="stats-enable"
+                            className={styles["form-checkbox"]}
+                            checked={statsEnabled}
+                            onChange={(e) => handleStatsEnableChange(e.target.checked)}
+                        />
+                        <label htmlFor="stats-enable" className={styles["form-checkbox-label"]}>
+                            Enable Bandwidth Stats
+                        </label>
+                    </div>
+                </div>
+                <div className={styles["form-group"]}>
+                    <label htmlFor="stream-buffer-size" className={styles["form-label"]}>
+                        Stream Buffer Size (segments)
+                    </label>
+                    <input
+                        type="text"
+                        id="stream-buffer-size"
+                        className={`${styles["form-input"]} ${!isPositiveInteger(streamBufferSize) ? styles.error : ""}`}
+                        placeholder="100"
+                        value={streamBufferSize}
+                        onChange={(e) => handleStreamBufferSizeChange(e.target.value)}
+                        style={{ maxWidth: '200px' }}
+                    />
+                    <div className={styles["form-help"]}>
+                        Higher values increase RAM usage but may improve streaming stability. (Default: 100)
+                    </div>
+                </div>
+            </div>
+
             <div className={styles.section}>
                 <div className={styles.sectionHeader}>
                     <div>Usenet Providers</div>
@@ -297,9 +348,15 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
     const [pass, setPass] = useState(provider?.Pass || "");
     const [maxConnections, setMaxConnections] = useState(provider?.MaxConnections?.toString() || "");
     const [type, setType] = useState<ProviderType>(provider?.Type ?? ProviderType.Pooled);
+    
     const [isTestingConnection, setIsTestingConnection] = useState(false);
     const [connectionTested, setConnectionTested] = useState(false);
     const [testError, setTestError] = useState<string | null>(null);
+
+    const [isTestingThroughput, setIsTestingThroughput] = useState(false);
+    const [throughputResult, setThroughputResult] = useState<string | null>(null);
+    const [throughputError, setThroughputError] = useState<string | null>(null);
+    const [testNzbFile, setTestNzbFile] = useState<File | null>(null);
 
     // Reset form when modal opens or provider changes
     useEffect(() => {
@@ -313,6 +370,9 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
             setType(provider?.Type ?? ProviderType.Pooled);
             setConnectionTested(false);
             setTestError(null);
+            setThroughputResult(null);
+            setThroughputError(null);
+            setTestNzbFile(null);
         }
     }, [show, provider]);
 
@@ -333,6 +393,8 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
     const handleTestConnection = useCallback(async () => {
         setIsTestingConnection(true);
         setTestError(null);
+        setThroughputResult(null);
+        setThroughputError(null);
 
         try {
             const formData = new FormData();
@@ -364,6 +426,46 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
             setIsTestingConnection(false);
         }
     }, [host, port, useSsl, user, pass]);
+
+    const handleTestThroughput = useCallback(async () => {
+        if (!testNzbFile) {
+            setThroughputError("Please select an NZB file for testing");
+            return;
+        }
+
+        setIsTestingThroughput(true);
+        setThroughputError(null);
+        setThroughputResult(null);
+
+        try {
+            const formData = new FormData();
+            formData.append('host', host);
+            formData.append('port', port);
+            formData.append('use-ssl', useSsl.toString());
+            formData.append('user', user);
+            formData.append('pass', pass);
+            formData.append('max-connections', maxConnections);
+            formData.append('nzbFile', testNzbFile);
+
+            const response = await fetch('/api/test-usenet-throughput', {
+                method: 'POST',
+                body: formData,
+            });
+
+            if (response.ok) {
+                const data = await response.json();
+                if (data.success) {
+                    setThroughputResult(`${data.speedInMBps} MB/s - ${data.message}`);
+                }
+            } else {
+                setThroughputError("Failed to test throughput");
+            }
+        } catch (error) {
+            setThroughputError("Network error: " + (error instanceof Error ? error.message : "Unknown error"));
+        } finally {
+            setIsTestingThroughput(false);
+        }
+    }, [host, port, useSsl, user, pass, maxConnections, testNzbFile]);
 
     const handleSave = useCallback(() => {
         onSave({
@@ -522,6 +624,19 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
                                 </label>
                             </div>
                         </div>
+
+                        <div className={`${styles["form-group"]} ${styles["full-width"]}`}>
+                            <label htmlFor="test-nzb-file" className={styles["form-label"]}>
+                                Speed Test NZB (Optional)
+                            </label>
+                            <input
+                                type="file"
+                                id="test-nzb-file"
+                                accept=".nzb"
+                                className={styles["form-input"]}
+                                onChange={(e) => setTestNzbFile(e.target.files?.[0] || null)}
+                            />
+                        </div>
                     </div>
 
                     {testError && (
@@ -530,15 +645,36 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
                         </div>
                     )}
 
+                    {throughputError && (
+                        <div className={`${styles.alert} ${styles["alert-danger"]}`} style={{ marginTop: '16px' }}>
+                            {throughputError}
+                        </div>
+                    )}
+
                     {connectionTested && (
                         <div className={`${styles.alert} ${styles["alert-success"]}`} style={{ marginTop: '16px' }}>
                             Connection test successful!
                         </div>
                     )}
+
+                    {throughputResult && (
+                        <div className={`${styles.alert} ${styles["alert-success"]}`} style={{ marginTop: '16px' }}>
+                            <strong>Speed Test:</strong> {throughputResult}
+                        </div>
+                    )}
                 </div>
 
                 <div className={styles["modal-footer"]}>
-                    <div className={styles["modal-footer-left"]}></div>
+                    <div className={styles["modal-footer-left"]}>
+                        <Button 
+                            variant="outline-primary" 
+                            size="sm"
+                            onClick={handleTestThroughput}
+                            disabled={!isFormValid || isTestingThroughput || isTestingConnection}
+                        >
+                            {isTestingThroughput ? "Testing Speed..." : "Test Speed"}
+                        </Button>
+                    </div>
                     <div className={styles["modal-footer-right"]}>
                         <Button variant="secondary" onClick={onClose}>
                             Cancel
@@ -565,6 +701,8 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
 
 export function isUsenetSettingsUpdated(config: Record<string, string>, newConfig: Record<string, string>) {
     return config["usenet.providers"] !== newConfig["usenet.providers"]
+        || config["stats.enable"] !== newConfig["stats.enable"]
+        || config["usenet.stream-buffer-size"] !== newConfig["usenet.stream-buffer-size"];
 }
 
 export function isPositiveInteger(value: string) {

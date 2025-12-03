@@ -7,9 +7,10 @@ import { LiveUsenetConnections } from "../live-usenet-connections/live-usenet-co
 export type LeftNavigationProps = {
     version?: string,
     isFrontendAuthDisabled?: boolean,
+    statsEnabled?: boolean,
 }
 
-export function LeftNavigation({ version, isFrontendAuthDisabled }: LeftNavigationProps) {
+export function LeftNavigation({ version, isFrontendAuthDisabled, statsEnabled }: LeftNavigationProps) {
     return (
         <div className={styles.container}>
             <Item target="/queue">
@@ -24,10 +25,10 @@ export function LeftNavigation({ version, isFrontendAuthDisabled }: LeftNavigati
                 <div className={styles["health-icon"]} />
                 <div className={styles.title}>Health</div>
             </Item>
-            <Item target="/stats">
+            {statsEnabled && <Item target="/stats">
                 <div className={styles["health-icon"]} />
                 <div className={styles.title}>Stats</div>
-            </Item>
+            </Item>}
             <Item target="/settings">
                 <div className={styles["settings-icon"]} />
                 <div className={styles.title}>Settings</div>

@@ -16,7 +16,6 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
         () => new DbContextOptionsBuilder<DavDatabaseContext>()
             .UseSqlite($"Data Source={DatabaseFilePath}")
             .AddInterceptors(new SqliteForeignKeyEnabler())
-            .ConfigureWarnings(w => w.Ignore(RelationalEventId.PendingModelChangesWarning))
             .Options
     );
 

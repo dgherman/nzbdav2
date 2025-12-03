@@ -1,6 +1,7 @@
 // ReSharper disable InconsistentNaming
 
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Config;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
@@ -36,9 +37,14 @@ public static class FetchFirstSegmentsStep
     {
         try
         {
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
+            var context = cancellationToken.GetContext<ConnectionUsageContext>();
+            using var _ = timeoutCts.Token.SetScopedContext(context);
+
             // get the first article stream
             var firstSegment = nzbFile.Segments[0].MessageId.Value;
-            await using var stream = await client.GetSegmentStreamAsync(firstSegment, true, cancellationToken).ConfigureAwait(false);
+            await using var stream = await client.GetSegmentStreamAsync(firstSegment, true, timeoutCts.Token).ConfigureAwait(false);
 
             // read up to the first 16KB from the stream
             var totalRead = 0;
@@ -46,7 +52,7 @@ public static class FetchFirstSegmentsStep
             while (totalRead < buffer.Length)
             {
                 var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead),
-                    cancellationToken).ConfigureAwait(false);
+                    timeoutCts.Token).ConfigureAwait(false);
                 if (read == 0) break;
                 totalRead += read;
             }

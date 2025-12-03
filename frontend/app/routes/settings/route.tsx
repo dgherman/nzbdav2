@@ -25,6 +25,7 @@ const defaultConfig = {
     "api.completed-downloads-dir": "",
     "usenet.providers": "",
     "usenet.connections-per-stream": "5",
+    "usenet.stream-buffer-size": "100",
     "webdav.user": "admin",
     "webdav.pass": "",
     "webdav.show-hidden-files": "false",
@@ -35,6 +36,7 @@ const defaultConfig = {
     "arr.instances": "{\"RadarrInstances\":[],\"SonarrInstances\":[],\"QueueRules\":[]}",
     "repair.connections": "",
     "repair.enable": "false",
+    "stats.enable": "false",
 }
 
 export async function loader({ request }: Route.LoaderArgs) {

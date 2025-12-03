@@ -1,5 +1,8 @@
 ﻿using Microsoft.AspNetCore.Http;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using NWebDav.Server.Helpers;
+using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Utils;
@@ -35,6 +38,35 @@ public class ExceptionMiddleware(RequestDelegate next)
 
             var filePath = GetRequestFilePath(context);
             Log.Error($"File `{filePath}` has missing articles: {e.Message}");
+
+            if (context.Items["DavItem"] is DavItem davItem)
+            {
+                try
+                {
+                    using var scope = context.RequestServices.CreateScope();
+                    var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+
+                    // Reset any existing error status so the item is picked up by the queue query
+                    await dbContext.HealthCheckResults
+                        .Where(h => h.DavItemId == davItem.Id && h.RepairStatus == HealthCheckResult.RepairAction.ActionNeeded)
+                        .ExecuteDeleteAsync()
+                        .ConfigureAwait(false);
+                    
+                    var rows = await dbContext.Items
+                        .Where(x => x.Id == davItem.Id && x.NextHealthCheck != DateTimeOffset.MinValue)
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, DateTimeOffset.MinValue))
+                        .ConfigureAwait(false);
+                        
+                    if (rows > 0)
+                        Log.Information($"Bumping priority for item `{davItem.Name}` to immediate health check/repair.");
+                    else
+                        Log.Information($"Item `{davItem.Name}` is already at highest priority for health check.");
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "Failed to queue item for health check.");
+                }
+            }
         }
         catch (SeekPositionNotFoundException)
         {

@@ -26,6 +26,7 @@ export async function loader() {
 
     return {
         uncheckedCount: queueData.uncheckedCount,
+        pendingCount: queueData.pendingCount,
         queueItems: queueData.items,
         historyStats: historyData.stats,
         historyItems: historyData.items,
@@ -41,26 +42,31 @@ export default function Health({ loaderData }: Route.ComponentProps) {
     const [historyStats, setHistoryStats] = useState(loaderData.historyStats);
     const [queueItems, setQueueItems] = useState(loaderData.queueItems);
     const [uncheckedCount, setUncheckedCount] = useState(loaderData.uncheckedCount);
+    const [pendingCount, setPendingCount] = useState(loaderData.pendingCount);
+    const [page, setPage] = useState(0);
+    const [search, setSearch] = useState("");
+    const [showAll, setShowAll] = useState(false);
 
     // effects
     useEffect(() => {
-        if (queueItems.length >= 15) return;
         const refetchData = async () => {
-            var response = await fetch('/api/get-health-check-queue?pageSize=30');
+            var response = await fetch(`/api/get-health-check-queue?pageSize=30&page=${page}&search=${encodeURIComponent(search)}&showAll=${showAll}`);
             if (response.ok) {
                 const healthCheckQueue = await response.json();
                 setQueueItems(healthCheckQueue.items);
                 setUncheckedCount(healthCheckQueue.uncheckedCount);
+                setPendingCount(healthCheckQueue.pendingCount);
             }
         };
         refetchData();
-    }, [queueItems, setQueueItems])
+    }, [page, search, showAll])
 
     // events
     const onHealthItemStatus = useCallback(async (message: string) => {
         const [davItemId, healthResult, repairAction] = message.split('|');
         setQueueItems(x => x.filter(item => item.id !== davItemId));
         setUncheckedCount(x => x - 1);
+        setPendingCount(x => Math.max(0, x - 1));
         setHistoryStats(x => {
             const healthResultNum = Number(healthResult);
             const repairActionNum = Number(repairAction);
@@ -138,12 +144,12 @@ export default function Health({ loaderData }: Route.ComponentProps) {
             <div className={styles.section}>
                 <HealthStats stats={historyStats} />
             </div>
-            {isEnabled && uncheckedCount > 20 &&
+            {isEnabled && pendingCount > 20 &&
                 <Alert className={styles.alert} variant={'warning'}>
                     <b>Attention</b>
                     <ul className={styles.list}>
                         <li className={styles.listItem}>
-                            You have ~{uncheckedCount} files whose health has never been determined.
+                            You have ~{pendingCount} files pending health check.
                         </li>
                         <li className={styles.listItem}>
                             The queue will run an initial health check of these files.
@@ -155,7 +161,18 @@ export default function Health({ loaderData }: Route.ComponentProps) {
                 </Alert>
             }
             <div className={styles.section}>
-                <HealthTable isEnabled={isEnabled} healthCheckItems={queueItems.filter((_, index) => index < 10)} />
+                <HealthTable 
+                    isEnabled={isEnabled} 
+                    healthCheckItems={queueItems} 
+                    totalCount={uncheckedCount}
+                    page={page}
+                    pageSize={30}
+                    search={search}
+                    showAll={showAll}
+                    onPageChange={setPage}
+                    onSearchChange={(s) => { setSearch(s); setPage(0); }}
+                    onShowAllChange={(val) => { setShowAll(val); setPage(0); }}
+                />
             </div>
         </div>
     );

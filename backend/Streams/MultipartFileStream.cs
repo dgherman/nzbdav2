@@ -1,4 +1,6 @@
 ﻿using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
+using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
 using NzbWebDAV.Utils;
 
@@ -9,6 +11,7 @@ public class MultipartFileStream : Stream
     private bool _isDisposed;
     private readonly UsenetStreamingClient _client;
     private readonly MultipartFile _multipartFile;
+    private readonly ConnectionUsageContext _usageContext;
     private Stream? _currentStream;
     private long _position = 0;
 
@@ -23,10 +26,11 @@ public class MultipartFileStream : Stream
         set => throw new NotSupportedException();
     }
 
-    public MultipartFileStream(MultipartFile multipartFile, UsenetStreamingClient client)
+    public MultipartFileStream(MultipartFile multipartFile, UsenetStreamingClient client, ConnectionUsageContext? usageContext = null)
     {
         _multipartFile = multipartFile;
         _client = client;
+        _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
     }
 
     public override int Read(byte[] buffer, int offset, int count)
@@ -70,7 +74,7 @@ public class MultipartFileStream : Stream
         );
 
         var filePart = _multipartFile.FileParts[searchResult.FoundIndex];
-        var stream = _client.GetFileStream(filePart.NzbFile, filePart.PartSize, concurrentConnections: 1);
+        var stream = _client.GetFileStream(filePart.NzbFile.GetSegmentIds(), filePart.PartSize, 1, _usageContext);
         stream.Seek(_position - searchResult.FoundByteRange.StartInclusive, SeekOrigin.Begin);
         return stream;
     }

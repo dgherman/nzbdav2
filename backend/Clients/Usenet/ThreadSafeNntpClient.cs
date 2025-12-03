@@ -60,29 +60,46 @@ public class ThreadSafeNntpClient : INntpClient
     )
     {
         await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-        return await Task.Run(() =>
+        try
         {
-            try
+            return await Task.Run(() =>
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                var article = GetArticle(segmentId, includeHeaders);
-                var stream = YencStreamDecoder.Decode(article.Body);
-                return new YencHeaderStream(
-                    stream.Header,
-                    article.Headers,
-                    new BufferToEndStream(stream.OnDispose(OnDispose))
-                );
+                try
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var article = GetArticle(segmentId, includeHeaders);
+                    var stream = YencStreamDecoder.Decode(article.Body);
+                    return new YencHeaderStream(
+                        stream.Header,
+                        article.Headers,
+                        new BufferToEndStream(stream.OnDispose(OnDispose))
+                    );
 
-                // we only want to release the semaphore once the stream is disposed.
-                void OnDispose() => _semaphore.Release();
-            }
-            catch (Exception)
-            {
-                // or if there is an error getting the stream itself.
-                _semaphore.Release();
-                throw;
-            }
-        }).ConfigureAwait(false);
+                    void OnDispose()
+                    {
+                        try
+                        {
+                            _semaphore.Release();
+                        }
+                        catch (ObjectDisposedException) { }
+                    }
+                }
+                catch (Exception)
+                {
+                    try
+                    {
+                        _semaphore.Release();
+                    }
+                    catch (ObjectDisposedException) { }
+                    throw;
+                }
+            }, cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+        {
+            Dispose();
+            throw;
+        }
     }
 
     public async Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
@@ -116,11 +133,23 @@ public class ThreadSafeNntpClient : INntpClient
         await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await run().ConfigureAwait(false);
+            return await run().WaitAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+        {
+            Dispose();
+            throw;
         }
         finally
         {
-            _semaphore.Release();
+            try
+            {
+                _semaphore.Release();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Ignore if semaphore was disposed
+            }
         }
     }
 

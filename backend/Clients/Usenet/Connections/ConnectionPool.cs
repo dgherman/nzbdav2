@@ -78,13 +78,30 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     {
         var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
 
+        if (usageContext.UsageType == ConnectionUsageType.Unknown)
+        {
+            Serilog.Log.Warning("Connection acquired with Unknown usage context.");
+        }
+
+        // Determine if we need to reserve slots for higher-priority traffic (Streaming)
+        // Background tasks (Queue, HealthCheck, Repair) must leave some capacity available.
+        // We reserve 25% of the pool for Streaming.
+        var reservedSlots = 0;
+        if (usageContext.UsageType == ConnectionUsageType.Queue ||
+            usageContext.UsageType == ConnectionUsageType.HealthCheck ||
+            usageContext.UsageType == ConnectionUsageType.Repair)
+        {
+            // Reserve ~16% of slots for high-priority traffic.
+            // This allows background tasks to balloon up to ~84% utilization
+            // while keeping a buffer for streaming starts.
+            reservedSlots = Math.Max(1, _maxConnections / 6);
+        }
+
         // Make caller cancellation also cancel the wait on the gate.
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken, _sweepCts.Token);
 
-        var usageBreakdown = GetUsageBreakdownString();
-        Serilog.Log.Debug($"[ConnPool] Requesting connection for {usageContext}: Live={_live}, Idle={IdleConnections}, Active={ActiveConnections}, Available={AvailableConnections}, RemainingSemaphore={RemainingSemaphoreSlots}, Usage={usageBreakdown}");
-        await _gate.WaitAsync(0, linked.Token).ConfigureAwait(false);
+        await _gate.WaitAsync(reservedSlots, linked.Token).ConfigureAwait(false);
 
         // Pool might have been disposed after wait returned:
         if (Volatile.Read(ref _disposed) == 1)
@@ -103,7 +120,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             {
                 TriggerConnectionPoolChangedEvent();
                 _activeConnections[connectionId] = usageContext;
-                Serilog.Log.Debug($"[ConnPool] Connection reused for {usageContext}: Live={_live}, Idle={IdleConnections}, Active={ActiveConnections}, ConnId={connectionId}");
                 return BuildLock(item.Connection, connectionId);
             }
 
@@ -129,7 +145,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         TriggerConnectionPoolChangedEvent();
 
         _activeConnections[connectionId] = usageContext;
-        Serilog.Log.Debug($"[ConnPool] Connection acquired for {usageContext}: Live={_live}, Idle={IdleConnections}, Active={ActiveConnections}, ConnId={connectionId}");
         return BuildLock(conn, connectionId);
 
         ConnectionLock<T> BuildLock(T c, string connId)
@@ -166,7 +181,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         _idleConnections.Push(new Pooled(connection, Environment.TickCount64));
         _gate.Release();
         TriggerConnectionPoolChangedEvent();
-        Serilog.Log.Debug($"[ConnPool] Connection returned from {usageContext}: Live={_live}, Idle={IdleConnections}, Active={ActiveConnections}");
     }
 
     private void Destroy(T connection, string connectionId)

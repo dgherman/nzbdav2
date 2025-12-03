@@ -1,11 +1,13 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
+using Serilog;
 
 namespace NzbWebDAV.Api.Controllers.Stats;
 
@@ -47,6 +49,13 @@ public class StatsController(
         return ExecuteSafely(() =>
         {
             var connections = streamingClient.GetActiveConnectionsByProvider();
+            foreach (var provider in connections)
+            {
+                foreach (var conn in provider.Value)
+                {
+                    Log.Information($"[StatsAPI] Provider {provider.Key}: Type={conn.UsageType}, Details={conn.Details}");
+                }
+            }
             return Task.FromResult<IActionResult>(Ok(connections));
         });
     }

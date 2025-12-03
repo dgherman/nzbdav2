@@ -17,6 +17,7 @@ import { TopNavigation } from "./routes/_index/components/top-navigation/top-nav
 import { LeftNavigation } from "./routes/_index/components/left-navigation/left-navigation";
 import { PageLayout } from "./routes/_index/components/page-layout/page-layout";
 import { Loading } from "./routes/_index/components/loading/loading";
+import { backendClient } from "~/clients/backend-client.server";
 
 export async function loader({ request }: Route.LoaderArgs) {
   // unauthenticated routes
@@ -26,10 +27,15 @@ export async function loader({ request }: Route.LoaderArgs) {
 
   // ensure all other routes are authenticated
   if (!await isAuthenticated(request)) return redirect("/login");
+
+  var config = await backendClient.getConfig(["stats.enable"]);
+  var statsEnabled = config.find(x => x.configName === "stats.enable")?.configValue !== "false";
+
   return {
     useLayout: true,
     version: process.env.NZBDAV_VERSION,
     isFrontendAuthDisabled: IS_FRONTEND_AUTH_DISABLED,
+    statsEnabled: statsEnabled
   };
 }
 
@@ -54,7 +60,7 @@ export function Layout({ children }: { children: React.ReactNode }) {
 }
 
 export default function App({ loaderData }: Route.ComponentProps) {
-  const { useLayout, version, isFrontendAuthDisabled } = loaderData;
+  const { useLayout, version, isFrontendAuthDisabled, statsEnabled } = loaderData;
   const location = useLocation();
   const navigation = useNavigation();
   const isNavigating = Boolean(navigation.location);
@@ -73,7 +79,8 @@ export default function App({ loaderData }: Route.ComponentProps) {
         leftNavChild={
           <LeftNavigation
             version={version}
-            isFrontendAuthDisabled={isFrontendAuthDisabled} />
+            isFrontendAuthDisabled={isFrontendAuthDisabled}
+            statsEnabled={statsEnabled} />
         } />
     );
   }

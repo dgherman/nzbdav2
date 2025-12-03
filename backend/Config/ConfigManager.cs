@@ -113,7 +113,7 @@ public class ConfigManager
         return int.Parse(
             StringUtil.EmptyToNull(GetConfigValue("usenet.stream-buffer-size"))
             ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("STREAM_BUFFER_SIZE"))
-            ?? "10"
+            ?? "100"
         );
     }
 
@@ -217,6 +217,13 @@ public class ConfigManager
                && GetMaxRepairConnections() > 0
                && GetLibraryDir() != null
                && GetArrConfig().GetInstanceCount() > 0;
+    }
+
+    public bool IsStatsEnabled()
+    {
+        var defaultValue = false;
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("stats.enable"));
+        return (configValue != null ? bool.Parse(configValue) : defaultValue);
     }
 
     public ArrConfig GetArrConfig()

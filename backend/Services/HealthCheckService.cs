@@ -1,4 +1,6 @@
-﻿using Microsoft.EntityFrameworkCore;
+﻿using System.Collections.Concurrent;
+using System.Net.Http;
+using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Config;
@@ -23,6 +25,7 @@ public class HealthCheckService
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
     private readonly HashSet<string> _missingSegmentIds = [];
+    private readonly ConcurrentDictionary<Guid, int> _timeoutCounts = new();
 
     public HealthCheckService
     (
@@ -49,6 +52,7 @@ public class HealthCheckService
     {
         while (!_cancellationToken.IsCancellationRequested)
         {
+            DavItem? davItem = null;
             try
             {
                 // if the repair-job is disabled, then don't do anything
@@ -63,13 +67,15 @@ public class HealthCheckService
 
                 // set connection usage context (no reservation needed - operation limits handle it)
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
+                cts.CancelAfter(TimeSpan.FromMinutes(20)); // Timeout after 20 minutes per file to prevent blocking
+                
                 using var _1 = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck));
 
                 // get the davItem to health-check
                 await using var dbContext = new DavDatabaseContext();
                 var dbClient = new DavDatabaseClient(dbContext);
                 var currentDateTime = DateTimeOffset.UtcNow;
-                var davItem = await GetHealthCheckQueueItems(dbClient)
+                davItem = await GetHealthCheckQueueItems(dbClient)
                     .Where(x => x.NextHealthCheck == null || x.NextHealthCheck < currentDateTime)
                     .FirstOrDefaultAsync(cts.Token).ConfigureAwait(false);
 
@@ -81,7 +87,62 @@ public class HealthCheckService
                 }
 
                 // perform the health check
+                Log.Information($"[HealthCheck] Processing item: {davItem.Name} ({davItem.Id})");
                 await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token).ConfigureAwait(false);
+                
+                // Success! Remove from timeout tracking
+                _timeoutCounts.TryRemove(davItem.Id, out _);
+                
+                Log.Information($"[HealthCheck] Finished item: {davItem.Name}");
+            }
+            catch (OperationCanceledException) when (!_cancellationToken.IsCancellationRequested)
+            {
+                if (davItem != null)
+                {
+                    var timeouts = _timeoutCounts.AddOrUpdate(davItem.Id, 1, (_, count) => count + 1);
+
+                    if (timeouts >= 2)
+                    {
+                        Log.Error($"[HealthCheck] Item {davItem.Name} timed out {timeouts} times. Marking as failed.");
+                        _timeoutCounts.TryRemove(davItem.Id, out _);
+
+                        try
+                        {
+                            await using var dbContext = new DavDatabaseContext();
+                            dbContext.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+                            {
+                                Id = Guid.NewGuid(),
+                                DavItemId = davItem.Id,
+                                Path = davItem.Path,
+                                CreatedAt = DateTimeOffset.UtcNow,
+                                Result = HealthCheckResult.HealthResult.Unhealthy,
+                                RepairStatus = HealthCheckResult.RepairAction.ActionNeeded,
+                                Message = "Health check timed out repeatedly (likely due to slow download or hanging)."
+                            }));
+                            await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(ex, "[HealthCheck] Failed to mark timed-out item as failed.");
+                        }
+                    }
+                    else
+                    {
+                        Log.Warning($"[HealthCheck] Timed out processing item: {davItem.Name}. Rescheduling for later (Attempt {timeouts}).");
+                        try
+                        {
+                            using var dbContext = new DavDatabaseContext();
+                            await dbContext.Items
+                                .Where(x => x.Id == davItem.Id)
+                                .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, DateTimeOffset.UtcNow.AddHours(1)))
+                                .ConfigureAwait(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(ex, "[HealthCheck] Failed to reschedule timed-out item.");
+                        }
+                    }
+                }
             }
             catch (Exception e)
             {
@@ -118,10 +179,12 @@ public class HealthCheckService
         CancellationToken ct
     )
     {
+        List<string> segments = [];
         try
         {
             // update the release date, if null
-            var segments = await GetAllSegments(davItem, dbClient, ct).ConfigureAwait(false);
+            segments = await GetAllSegments(davItem, dbClient, ct).ConfigureAwait(false);
+            Log.Debug($"[HealthCheck] Fetched {segments.Count} segments for {davItem.Name}");
             if (davItem.ReleaseDate == null) await UpdateReleaseDate(davItem, segments, ct).ConfigureAwait(false);
 
 
@@ -135,8 +198,10 @@ public class HealthCheckService
             };
 
             // perform health check
+            Log.Debug($"[HealthCheck] Verifying segments for {davItem.Name}...");
             var progress = progressHook.ToPercentage(segments.Count);
             await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, ct).ConfigureAwait(false);
+            Log.Debug($"[HealthCheck] Segments verified for {davItem.Name}. Updating database...");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");
 
@@ -157,6 +222,12 @@ public class HealthCheckService
         }
         catch (UsenetArticleNotFoundException e)
         {
+            var totalSegments = segments.Count;
+            var missingIndex = segments.IndexOf(e.SegmentId);
+            var percentage = totalSegments > 0 ? (double)missingIndex / totalSegments * 100.0 : 0;
+            var failureDetails = $"Missing segment at index {missingIndex}/{totalSegments} ({percentage:F2}%)";
+
+            Log.Warning($"[HealthCheck] Health check failed for item {davItem.Name} (Missing Segment: {e.SegmentId}). {failureDetails}. Attempting repair.");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");
             if (FilenameUtil.IsImportantFileType(davItem.Name))
@@ -166,7 +237,7 @@ public class HealthCheckService
             // when usenet article is missing, perform repairs
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, davItem.Path));
-            await Repair(davItem, dbClient, cts2.Token).ConfigureAwait(false);
+            await Repair(davItem, dbClient, cts2.Token, failureDetails).ConfigureAwait(false);
         }
     }
 
@@ -205,10 +276,12 @@ public class HealthCheckService
         return [];
     }
 
-    private async Task Repair(DavItem davItem, DavDatabaseClient dbClient, CancellationToken ct)
+    private async Task Repair(DavItem davItem, DavDatabaseClient dbClient, CancellationToken ct, string? failureDetails = null)
     {
         try
         {
+            var failureReason = "File had missing articles" + (failureDetails != null ? $" ({failureDetails})" : "") + ".";
+
             // if the file extension has been marked as ignored,
             // then don't bother trying to repair it. We can simply delete it.
             var blacklistedExtensions = _configManager.GetBlacklistedExtensions();
@@ -224,7 +297,7 @@ public class HealthCheckService
                     Result = HealthCheckResult.HealthResult.Unhealthy,
                     RepairStatus = HealthCheckResult.RepairAction.Deleted,
                     Message = string.Join(" ", [
-                        "File had missing articles.",
+                        failureReason,
                         "File extension is marked in settings as ignored (unwanted) file type.",
                         "Deleted file."
                     ])
@@ -248,7 +321,7 @@ public class HealthCheckService
                     Result = HealthCheckResult.HealthResult.Unhealthy,
                     RepairStatus = HealthCheckResult.RepairAction.Deleted,
                     Message = string.Join(" ", [
-                        "File had missing articles.",
+                        failureReason,
                         "Could not find corresponding symlink or strm-file within Library Dir.",
                         "Deleted file."
                     ])
@@ -279,7 +352,7 @@ public class HealthCheckService
                         Result = HealthCheckResult.HealthResult.Unhealthy,
                         RepairStatus = HealthCheckResult.RepairAction.Repaired,
                         Message = string.Join(" ", [
-                            "File had missing articles.",
+                            failureReason,
                             $"Corresponding {linkType} found within Library Dir.",
                             "Triggered new Arr search."
                         ])
@@ -297,6 +370,7 @@ public class HealthCheckService
 
             // if we could not find a corresponding arr instance
             // then we can delete both the item and the link-file.
+            Log.Warning($"[HealthCheck] Could not find corresponding Radarr/Sonarr media-item for file: {davItem.Name}. Deleting file and link.");
             await Task.Run(() => File.Delete(symlinkOrStrmPath)).ConfigureAwait(false);
             dbClient.Ctx.Items.Remove(davItem);
             dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
@@ -308,11 +382,30 @@ public class HealthCheckService
                 Result = HealthCheckResult.HealthResult.Unhealthy,
                 RepairStatus = HealthCheckResult.RepairAction.Deleted,
                 Message = string.Join(" ", [
-                    "File had missing articles.",
+                    failureReason,
                     $"Corresponding {linkType} found within Library Dir.",
                     "Could not find corresponding Radarr/Sonarr media-item to trigger a new search.",
                     $"Deleted the webdav-file and {linkType}."
                 ])
+            }));
+            await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+        }
+        catch (HttpRequestException e)
+        {
+            Log.Warning($"[HealthCheck] Repair failed for item {davItem.Name}: {e.Message}");
+
+            var utcNow = DateTimeOffset.UtcNow;
+            davItem.LastHealthCheck = utcNow;
+            davItem.NextHealthCheck = null;
+            dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+            {
+                Id = Guid.NewGuid(),
+                DavItemId = davItem.Id,
+                Path = davItem.Path,
+                CreatedAt = utcNow,
+                Result = HealthCheckResult.HealthResult.Unhealthy,
+                RepairStatus = HealthCheckResult.RepairAction.ActionNeeded,
+                Message = $"Error performing file repair: {e.Message}"
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         }

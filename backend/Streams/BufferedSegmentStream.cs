@@ -3,6 +3,7 @@ using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Extensions;
+using Serilog;
 
 namespace NzbWebDAV.Streams;
 
@@ -31,6 +32,9 @@ public class BufferedSegmentStream : Stream
         int bufferSegmentCount,
         CancellationToken cancellationToken)
     {
+        // Ensure buffer is large enough to prevent thrashing with high concurrency
+        bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 5);
+
         // Create bounded channel for buffering
         var channelOptions = new BoundedChannelOptions(bufferSegmentCount)
         {
@@ -55,7 +59,7 @@ public class BufferedSegmentStream : Stream
         // Start background fetcher
         _fetchTask = Task.Run(async () =>
         {
-            await FetchSegmentsAsync(segmentIds, client, concurrentConnections, contextToken)
+            await FetchSegmentsAsync(segmentIds, client, concurrentConnections, bufferSegmentCount, contextToken)
                 .ConfigureAwait(false);
         }, contextToken);
 
@@ -66,21 +70,38 @@ public class BufferedSegmentStream : Stream
         string[] segmentIds,
         INntpClient client,
         int concurrentConnections,
+        int bufferSegmentCount,
         CancellationToken ct)
     {
+        Log.Information($"[BufferedStream] Starting FetchSegmentsAsync for {segmentIds.Length} segments with {concurrentConnections} connections");
         try
         {
             // Use a producer-consumer pattern with indexed segments to maintain order
             // This is critical for video playback - segments MUST be in correct order
-            var segmentQueue = Channel.CreateUnbounded<(int index, string segmentId)>();
+            var segmentQueue = Channel.CreateBounded<(int index, string segmentId)>(new BoundedChannelOptions(bufferSegmentCount)
+            {
+                FullMode = BoundedChannelFullMode.Wait,
+                SingleReader = false,
+                SingleWriter = true
+            });
 
             // Producer: Queue all segment IDs with their index
-            for (int i = 0; i < segmentIds.Length; i++)
+            var producerTask = Task.Run(async () =>
             {
-                if (ct.IsCancellationRequested) break;
-                await segmentQueue.Writer.WriteAsync((i, segmentIds[i]), ct).ConfigureAwait(false);
-            }
-            segmentQueue.Writer.Complete();
+                try
+                {
+                    for (int i = 0; i < segmentIds.Length; i++)
+                    {
+                        if (ct.IsCancellationRequested) break;
+                        await segmentQueue.Writer.WriteAsync((i, segmentIds[i]), ct).ConfigureAwait(false);
+                    }
+                    segmentQueue.Writer.Complete();
+                }
+                catch (Exception ex)
+                {
+                    segmentQueue.Writer.Complete(ex);
+                }
+            }, ct);
 
             // Use a concurrent dictionary to store results temporarily
             var fetchedSegments = new System.Collections.Concurrent.ConcurrentDictionary<int, PooledSegmentData>();
@@ -91,6 +112,7 @@ public class BufferedSegmentStream : Stream
             var workers = Enumerable.Range(0, concurrentConnections)
                 .Select(async workerId =>
                 {
+                    Log.Debug($"[BufferedStream] Worker {workerId} started");
                     await foreach (var (index, segmentId) in segmentQueue.Reader.ReadAllAsync(ct).ConfigureAwait(false))
                     {
                         var stream = await client.GetSegmentStreamAsync(segmentId, false, ct)
@@ -192,6 +214,7 @@ public class BufferedSegmentStream : Stream
         }
         catch (Exception ex)
         {
+            Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync");
             _bufferChannel.Writer.Complete(ex);
         }
     }
@@ -207,11 +230,14 @@ public class BufferedSegmentStream : Stream
             // Get current segment if we don't have one
             if (_currentSegment == null)
             {
-                if (!await _bufferChannel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
-                    break; // No more segments
-
                 if (!_bufferChannel.Reader.TryRead(out _currentSegment))
-                    break;
+                {
+                    if (!await _bufferChannel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+                        break; // No more segments
+
+                    if (!_bufferChannel.Reader.TryRead(out _currentSegment))
+                        break;
+                }
 
                 _currentSegmentPosition = 0;
             }

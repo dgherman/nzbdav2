@@ -1,4 +1,6 @@
-﻿using NzbWebDAV.Clients.Usenet.Connections;
+﻿using System.IO;
+using System.Net.Sockets;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
@@ -94,7 +96,7 @@ public class MultiConnectionNntpClient(
     (
         Func<INntpClient, Task<T>> task,
         CancellationToken cancellationToken,
-        int retries = 1
+        int retries = 5
     )
     {
         // Acquire global operation permit first (if global limiter is configured)
@@ -114,7 +116,7 @@ public class MultiConnectionNntpClient(
             {
                 return await task(connectionLock.Connection).ConfigureAwait(false);
             }
-            catch (NntpException)
+            catch (Exception ex) when (ex is NntpException or ObjectDisposedException or IOException or SocketException or TimeoutException)
             {
                 // we want to replace the underlying connection in cases of NntpExceptions.
                 connectionLock.Replace();

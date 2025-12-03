@@ -1,4 +1,5 @@
-﻿using NzbWebDAV.Clients.Usenet;
+﻿using Microsoft.Extensions.DependencyInjection;
+using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -19,18 +20,21 @@ public class QueueManager : IDisposable
     private readonly ConfigManager _configManager;
     private readonly WebsocketManager _websocketManager;
     private readonly HealthCheckService _healthCheckService;
+    private readonly IServiceScopeFactory _scopeFactory;
 
     public QueueManager(
         UsenetStreamingClient usenetClient,
         ConfigManager configManager,
         WebsocketManager websocketManager,
-        HealthCheckService healthCheckService
+        HealthCheckService healthCheckService,
+        IServiceScopeFactory scopeFactory
     )
     {
         _usenetClient = usenetClient;
         _configManager = configManager;
         _websocketManager = websocketManager;
         _healthCheckService = healthCheckService;
+        _scopeFactory = scopeFactory;
         _cancellationTokenSource = CancellationTokenSource
             .CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
         _ = ProcessQueueAsync(_cancellationTokenSource.Token);
@@ -70,10 +74,16 @@ public class QueueManager : IDisposable
             try
             {
                 // get the next queue-item from the database
-                await using var dbContext = new DavDatabaseContext();
-                var dbClient = new DavDatabaseClient(dbContext);
-                var topItem = await LockAsync(() => dbClient.GetTopQueueItem(ct)).ConfigureAwait(false);
-                if (topItem.queueItem is null || topItem.queueNzbContents is null)
+                QueueItem? queueItem = null;
+                QueueNzbContents? queueNzbContents = null;
+
+                using (var scope = _scopeFactory.CreateScope())
+                {
+                    var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+                    (queueItem, queueNzbContents) = await LockAsync(() => dbClient.GetTopQueueItem(ct)).ConfigureAwait(false);
+                }
+
+                if (queueItem is null || queueNzbContents is null)
                 {
                     // if we're done with the queue, wait
                     // five seconds before checking again.
@@ -86,7 +96,7 @@ public class QueueManager : IDisposable
                 await LockAsync(() =>
                 {
                     _inProgressQueueItem = BeginProcessingQueueItem(
-                        dbClient, topItem.queueItem, topItem.queueNzbContents, queueItemCancellationTokenSource
+                        _scopeFactory, queueItem, queueNzbContents, queueItemCancellationTokenSource
                     );
                 }).ConfigureAwait(false);
                 await (_inProgressQueueItem?.ProcessingTask ?? Task.CompletedTask).ConfigureAwait(false);
@@ -104,7 +114,7 @@ public class QueueManager : IDisposable
 
     private InProgressQueueItem BeginProcessingQueueItem
     (
-        DavDatabaseClient dbClient,
+        IServiceScopeFactory scopeFactory,
         QueueItem queueItem,
         QueueNzbContents queueNzbContents,
         CancellationTokenSource cts
@@ -112,7 +122,7 @@ public class QueueManager : IDisposable
     {
         var progressHook = new Progress<int>();
         var task = new QueueItemProcessor(
-            queueItem, queueNzbContents, dbClient, _usenetClient, 
+            queueItem, queueNzbContents, scopeFactory, _usenetClient, 
             _configManager, _websocketManager, _healthCheckService,
             progressHook, cts.Token
         ).ProcessAsync();

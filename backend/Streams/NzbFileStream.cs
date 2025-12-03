@@ -94,7 +94,11 @@ public class NzbFileStream(
     private async Task<CombinedStream> GetFileStream(long rangeStart, CancellationToken cancellationToken)
     {
         if (rangeStart == 0) return GetCombinedStream(0, cancellationToken);
-        var foundSegment = await SeekSegment(rangeStart, cancellationToken).ConfigureAwait(false);
+
+        using var seekCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        using var _ = seekCts.Token.SetScopedContext(_usageContext);
+
+        var foundSegment = await SeekSegment(rangeStart, seekCts.Token).ConfigureAwait(false);
         var stream = GetCombinedStream(foundSegment.FoundIndex, cancellationToken);
         await stream.DiscardBytesAsync(rangeStart - foundSegment.FoundByteRange.StartInclusive).ConfigureAwait(false);
         return stream;
