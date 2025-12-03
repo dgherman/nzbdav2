@@ -18,6 +18,7 @@ using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.Websocket;
 using Serilog;
+using Serilog.Core;
 using Serilog.Events;
 using Serilog.Sinks.SystemConsole.Themes;
 
@@ -38,8 +39,10 @@ class Program
         var defaultLevel = LogEventLevel.Information;
         var envLevel = Environment.GetEnvironmentVariable("LOG_LEVEL");
         var level = Enum.TryParse<LogEventLevel>(envLevel, true, out var parsed) ? parsed : defaultLevel;
+        var levelSwitch = new LoggingLevelSwitch(level);
+
         Log.Logger = new LoggerConfiguration()
-            .MinimumLevel.Is(level)
+            .MinimumLevel.ControlledBy(levelSwitch)
             .MinimumLevel.Override("NWebDAV", LogEventLevel.Warning)
             .MinimumLevel.Override("Microsoft", LogEventLevel.Information)
             .MinimumLevel.Override("Microsoft.AspNetCore.Hosting", LogEventLevel.Warning)
@@ -71,6 +74,21 @@ class Program
         // initialize the config-manager
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
+
+        // Sync log level from config
+        var configLevel = configManager.GetLogLevel();
+        if (configLevel != null) levelSwitch.MinimumLevel = configLevel.Value;
+
+        // Update log level on config change
+        configManager.OnConfigChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.NewConfig.TryGetValue("general.log-level", out var val)
+                && Enum.TryParse<LogEventLevel>(val, true, out var newLevel))
+            {
+                levelSwitch.MinimumLevel = newLevel;
+                Log.Information($"Log level updated to {newLevel}");
+            }
+        };
 
         // initialize websocket-manager
         var websocketManager = new WebsocketManager();

@@ -9,9 +9,11 @@ import { isWebdavSettingsUpdated, isWebdavSettingsValid, WebdavSettings } from "
 import { isArrsSettingsUpdated, isArrsSettingsValid, ArrsSettings } from "./arrs/arrs";
 import { Maintenance } from "./maintenance/maintenance";
 import { isRepairsSettingsUpdated, isRepairsSettingsValid, RepairsSettings } from "./repairs/repairs";
+import { GeneralSettings, isGeneralSettingsUpdated } from "./general/general";
 
 const defaultConfig = {
     "general.base-url": "",
+    "general.log-level": "Information",
     "api.key": "",
     "api.categories": "",
     "api.manual-category": "uncategorized",
@@ -67,16 +69,18 @@ function Body(props: BodyProps) {
     const [newConfig, setNewConfig] = React.useState(config);
     const [isSaving, setIsSaving] = React.useState(false);
     const [isSaved, setIsSaved] = React.useState(false);
-    const [activeTab, setActiveTab] = React.useState('usenet');
+    const [activeTab, setActiveTab] = React.useState('general');
 
     // derived variables
+    const isGeneralUpdated = isGeneralSettingsUpdated(config, newConfig);
     const iseUsenetUpdated = isUsenetSettingsUpdated(config, newConfig);
     const isSabnzbdUpdated = isSabnzbdSettingsUpdated(config, newConfig);
     const isWebdavUpdated = isWebdavSettingsUpdated(config, newConfig);
     const isArrsUpdated = isArrsSettingsUpdated(config, newConfig);
     const isRepairsUpdated = isRepairsSettingsUpdated(config, newConfig);
-    const isUpdated = iseUsenetUpdated || isSabnzbdUpdated || isWebdavUpdated || isArrsUpdated || isRepairsUpdated;
+    const isUpdated = isGeneralUpdated || iseUsenetUpdated || isSabnzbdUpdated || isWebdavUpdated || isArrsUpdated || isRepairsUpdated;
 
+    const generalTitle = isGeneralUpdated ? "✏️ General" : "General";
     const usenetTitle = iseUsenetUpdated ? "✏️ Usenet" : "Usenet";
     const sabnzbdTitle = isSabnzbdUpdated ? "✏️ SABnzbd " : "SABnzbd";
     const webdavTitle = isWebdavUpdated ? "✏️ WebDAV" : "WebDAV";
@@ -128,6 +132,9 @@ function Body(props: BodyProps) {
                 onSelect={x => setActiveTab(x!)}
                 className={styles.tabs}
             >
+                <Tab eventKey="general" title={generalTitle}>
+                    <GeneralSettings config={newConfig} setNewConfig={setNewConfig} />
+                </Tab>
                 <Tab eventKey="usenet" title={usenetTitle}>
                     <UsenetSettings config={newConfig} setNewConfig={setNewConfig} />
                 </Tab>

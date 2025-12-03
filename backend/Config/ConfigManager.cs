@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Utils;
+using Serilog.Events;
 
 namespace NzbWebDAV.Config;
 
@@ -115,6 +116,14 @@ public class ConfigManager
             ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("STREAM_BUFFER_SIZE"))
             ?? "100"
         );
+    }
+
+    public LogEventLevel? GetLogLevel()
+    {
+        var val = GetConfigValue("general.log-level");
+        if (Enum.TryParse<LogEventLevel>(val, true, out var level))
+            return level;
+        return null;
     }
 
     public string? GetWebdavUser()

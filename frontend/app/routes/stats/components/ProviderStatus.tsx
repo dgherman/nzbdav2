@@ -6,6 +6,30 @@ interface Props {
     connections: Record<number, ConnectionUsageContext[]>;
 }
 
+function getTypeLabel(type: number) {
+    const map: Record<number, string> = {
+        0: "Unknown",
+        1: "Queue",
+        2: "Stream",
+        3: "Health",
+        4: "Repair",
+        5: "Buffer"
+    };
+    return map[type] || "Unknown";
+}
+
+function getTypeColor(type: number) {
+    const map: Record<number, string> = {
+        0: "secondary",
+        1: "info",
+        2: "success",
+        3: "warning",
+        4: "danger",
+        5: "primary"
+    };
+    return map[type] || "secondary";
+}
+
 export function ProviderStatus({ bandwidth, connections }: Props) {
     // Get all provider indices
     const providerIndices = new Set([
@@ -50,15 +74,20 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                         {conns.length === 0 ? (
                                             <div className="text-muted fst-italic">Idle</div>
                                         ) : (
-                                            <div className="font-mono small mt-1" style={{ maxHeight: "100px", overflowY: "auto" }}>
-                                                {conns.slice(0, 5).map((c, i) => (
-                                                    <div key={i} className="text-truncate" title={c.details || ""}>
-                                                        • {c.details || "Unknown"}
+                                            <div className="font-mono small mt-1" style={{ maxHeight: "150px", overflowY: "auto" }}>
+                                                {conns.slice(0, 10).map((c, i) => (
+                                                    <div key={i} className="text-truncate d-flex align-items-center gap-2 mb-1" title={c.details || ""}>
+                                                        <Badge bg={getTypeColor(c.usageType)} style={{fontSize: '0.6rem', minWidth: '50px'}}>
+                                                            {getTypeLabel(c.usageType)}
+                                                        </Badge>
+                                                        <span style={{fontSize: '0.8rem'}}>
+                                                            {c.details || "No details"}
+                                                        </span>
                                                     </div>
                                                 ))}
-                                                {conns.length > 5 && (
-                                                    <div className="text-muted fst-italic">
-                                                        + {conns.length - 5} more...
+                                                {conns.length > 10 && (
+                                                    <div className="text-muted fst-italic text-center small">
+                                                        + {conns.length - 10} more...
                                                     </div>
                                                 )}
                                             </div>
