@@ -22,6 +22,9 @@ public class QueueManager : IDisposable
     private readonly HealthCheckService _healthCheckService;
     private readonly IServiceScopeFactory _scopeFactory;
 
+    private CancellationTokenSource _sleepingQueueToken = new();
+    private readonly object _sleepingQueueLock = new();
+
     public QueueManager(
         UsenetStreamingClient usenetClient,
         ConfigManager configManager,
@@ -43,6 +46,14 @@ public class QueueManager : IDisposable
     public (QueueItem? queueItem, int? progress) GetInProgressQueueItem()
     {
         return (_inProgressQueueItem?.QueueItem, _inProgressQueueItem?.ProgressPercentage);
+    }
+
+    public void AwakenQueue()
+    {
+        lock (_sleepingQueueLock)
+        {
+            _sleepingQueueToken.Cancel();
+        }
     }
 
     public async Task RemoveQueueItemsAsync
@@ -85,9 +96,21 @@ public class QueueManager : IDisposable
 
                 if (queueItem is null || queueNzbContents is null)
                 {
-                    // if we're done with the queue, wait
-                    // five seconds before checking again.
-                    await Task.Delay(TimeSpan.FromSeconds(5), ct).ConfigureAwait(false);
+                    try
+                    {
+                        // if we're done with the queue, wait a minute before checking again.
+                        // or wait until awoken by cancellation of _sleepingQueueToken
+                        await Task.Delay(TimeSpan.FromMinutes(1), _sleepingQueueToken.Token).ConfigureAwait(false);
+                    }
+                    catch when (_sleepingQueueToken.IsCancellationRequested)
+                    {
+                        lock (_sleepingQueueLock)
+                        {
+                            _sleepingQueueToken.Dispose();
+                            _sleepingQueueToken = new CancellationTokenSource();
+                        }
+                    }
+
                     continue;
                 }
 
