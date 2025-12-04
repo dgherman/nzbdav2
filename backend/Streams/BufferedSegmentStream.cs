@@ -30,7 +30,8 @@ public class BufferedSegmentStream : Stream
         INntpClient client,
         int concurrentConnections,
         int bufferSegmentCount,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        ConnectionUsageContext? usageContext = null)
     {
         // Ensure buffer is large enough to prevent thrashing with high concurrency
         bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 5);
@@ -52,7 +53,7 @@ public class BufferedSegmentStream : Stream
         _contextScopes = new[]
         {
             _linkedCts.Token.SetScopedContext(cancellationToken.GetContext<LastSuccessfulProviderContext>()),
-            _linkedCts.Token.SetScopedContext(cancellationToken.GetContext<ConnectionUsageContext>())
+            _linkedCts.Token.SetScopedContext(usageContext ?? cancellationToken.GetContext<ConnectionUsageContext>())
         };
         var contextToken = _linkedCts.Token;
 

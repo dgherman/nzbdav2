@@ -135,7 +135,8 @@ public class NzbFileStream(
                 client,
                 concurrentConnections,
                 bufferSize,
-                bufferedContextCt
+                bufferedContextCt,
+                bufferedContext
             );
 
             // Link cancellation from parent to child manually (one-way, doesn't copy contexts)
