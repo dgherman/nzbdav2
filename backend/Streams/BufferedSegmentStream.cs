@@ -212,6 +212,11 @@ public class BufferedSegmentStream : Stream
 
             _bufferChannel.Writer.Complete();
         }
+        catch (OperationCanceledException)
+        {
+            Log.Debug("[BufferedStream] FetchSegmentsAsync canceled");
+            _bufferChannel.Writer.TryComplete();
+        }
         catch (Exception ex)
         {
             Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync");
