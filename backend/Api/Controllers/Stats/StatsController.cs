@@ -48,6 +48,11 @@ public class StatsController(
         return ExecuteSafely(() =>
         {
             var connections = streamingClient.GetActiveConnectionsByProvider();
+            
+            // Debug logging for connections
+            var json = System.Text.Json.JsonSerializer.Serialize(connections);
+            Serilog.Log.Debug($"[StatsController] GetActiveConnections returning: {json}");
+            
             return Task.FromResult<IActionResult>(Ok(connections));
         });
     }
