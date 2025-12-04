@@ -62,7 +62,7 @@ public class MultiConnectionNntpClient(
     public async Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders,
         CancellationToken cancellationToken)
     {
-        var stream = await RunWithConnection(
+        var stream = await RunStreamWithConnection(
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
             cancellationToken).ConfigureAwait(false);
 
@@ -90,6 +90,91 @@ public class MultiConnectionNntpClient(
     {
         using var connectionLock =
             await _connectionPool.GetConnectionLockAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<YencHeaderStream> RunStreamWithConnection
+    (
+        Func<INntpClient, Task<YencHeaderStream>> task,
+        CancellationToken cancellationToken,
+        int retries = 5
+    )
+    {
+        // Acquire global operation permit first (if global limiter is configured)
+        GlobalOperationLimiter.OperationPermit? globalPermit = null;
+        if (_globalLimiter != null)
+        {
+            var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
+            var usageType = usageContext.UsageType;
+            globalPermit = await _globalLimiter.AcquirePermitAsync(usageType, cancellationToken).ConfigureAwait(false);
+        }
+
+        ConnectionLock<INntpClient>? connectionLock = null;
+        bool success = false;
+
+        try
+        {
+            connectionLock = await _connectionPool.GetConnectionLockAsync(cancellationToken).ConfigureAwait(false);
+            
+            try
+            {
+                var stream = await task(connectionLock.Connection).ConfigureAwait(false);
+
+                // Create a callback stream that will handle the cleanup of the connection lock and global permit
+                // when the stream is disposed.
+                var wrappedStream = new DisposableCallbackStream(
+                    stream,
+                    onDisposeAsync: async () =>
+                    {
+                        try
+                        {
+                            // We assume connection is not "disposed" (replaced) because if it was, we would have caught exception below
+                            // Wait for connection to be ready before returning to pool
+                            await connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken()).ConfigureAwait(false);
+                        }
+                        finally
+                        {
+                            connectionLock.Dispose();
+                            globalPermit?.Dispose();
+                        }
+                    }
+                );
+
+                success = true;
+                // Return a new YencHeaderStream that wraps our callback stream, preserving headers
+                return new YencHeaderStream(stream.Header, stream.ArticleHeaders, wrappedStream);
+            }
+            catch (Exception ex) when (ex is NntpException or ObjectDisposedException or IOException or SocketException or TimeoutException)
+            {
+                // we want to replace the underlying connection in cases of NntpExceptions.
+                connectionLock.Replace();
+                connectionLock.Dispose();
+                connectionLock = null;
+
+                // and try again with a new connection (max 1 retry)
+                if (retries > 0)
+                {
+                    // Release global permit before retry (we'll acquire a new one)
+                    globalPermit?.Dispose();
+                    globalPermit = null;
+                    return await RunStreamWithConnection(task, cancellationToken, retries - 1).ConfigureAwait(false);
+                }
+
+                throw;
+            }
+        }
+        finally
+        {
+            // If we failed to create the stream (success == false), we must cleanup here.
+            if (!success)
+            {
+                if (connectionLock != null)
+                {
+                    _ = connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken())
+                        .ContinueWith(_ => connectionLock.Dispose());
+                }
+                globalPermit?.Dispose();
+            }
+        }
     }
 
     private async Task<T> RunWithConnection<T>
