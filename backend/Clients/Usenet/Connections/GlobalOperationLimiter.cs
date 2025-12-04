@@ -65,8 +65,6 @@ public class GlobalOperationLimiter : IDisposable
             currentUsage = _currentUsage[usageType];
         }
 
-        Serilog.Log.Debug($"[GlobalOperationLimiter] Acquired permit for {usageType}: Current={currentUsage}, Guaranteed={guaranteedLimit}, Usage={GetUsageBreakdown()}");
-
         return new OperationPermit(this, usageType, semaphore);
     }
 
@@ -81,7 +79,6 @@ public class GlobalOperationLimiter : IDisposable
         }
 
         semaphore.Release();
-        Serilog.Log.Debug($"[GlobalOperationLimiter] Released permit for {usageType}: Usage={GetUsageBreakdown()}");
     }
 
     private SemaphoreSlim GetSemaphoreForType(ConnectionUsageType type)
