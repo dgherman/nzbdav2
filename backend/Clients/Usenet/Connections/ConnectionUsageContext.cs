@@ -5,8 +5,8 @@ namespace NzbWebDAV.Clients.Usenet.Connections;
 /// </summary>
 public readonly struct ConnectionUsageContext
 {
-    public readonly ConnectionUsageType UsageType;
-    public readonly string? Details;
+    public ConnectionUsageType UsageType { get; }
+    public string? Details { get; }
 
     public ConnectionUsageContext(ConnectionUsageType usageType, string? details = null)
     {
