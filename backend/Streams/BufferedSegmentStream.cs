@@ -73,7 +73,7 @@ public class BufferedSegmentStream : Stream
         int bufferSegmentCount,
         CancellationToken ct)
     {
-        Log.Information($"[BufferedStream] Starting FetchSegmentsAsync for {segmentIds.Length} segments with {concurrentConnections} connections");
+        Log.Debug($"[BufferedStream] Starting FetchSegmentsAsync for {segmentIds.Length} segments with {concurrentConnections} connections");
         try
         {
             // Use a producer-consumer pattern with indexed segments to maintain order
