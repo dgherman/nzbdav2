@@ -79,23 +79,19 @@ public static class IEnumerableTaskExtensions
         {
             runningTasks.Add(task);
             totalStarted++;
-            Serilog.Log.Debug($"[WithConcurrency] Started task {totalStarted}, Running={runningTasks.Count}, MaxConcurrency={concurrency}");
 
             if (runningTasks.Count < concurrency) continue;
             var completedTask = await Task.WhenAny(runningTasks).ConfigureAwait(false);
             runningTasks.Remove(completedTask);
             totalCompleted++;
-            Serilog.Log.Debug($"[WithConcurrency] Task completed {totalCompleted}/{totalStarted}, Running={runningTasks.Count}");
             yield return await completedTask.ConfigureAwait(false);
         }
 
-        Serilog.Log.Debug($"[WithConcurrency] All tasks started ({totalStarted}), draining remaining {runningTasks.Count}");
         while (runningTasks.Count > 0)
         {
             var completedTask = await Task.WhenAny(runningTasks).ConfigureAwait(false);
             runningTasks.Remove(completedTask);
             totalCompleted++;
-            Serilog.Log.Debug($"[WithConcurrency] Task completed {totalCompleted}/{totalStarted}, Remaining={runningTasks.Count}");
             yield return await completedTask.ConfigureAwait(false);
         }
     }
