@@ -9,6 +9,7 @@ namespace NzbWebDAV.Clients.Usenet;
 public abstract class WrappingNntpClient(INntpClient client) : INntpClient
 {
     protected INntpClient Client = client;
+    public INntpClient InnerClient => Client;
 
     public virtual Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
@@ -58,6 +59,16 @@ public abstract class WrappingNntpClient(INntpClient client) : INntpClient
     public virtual Task WaitForReady(CancellationToken cancellationToken)
     {
         return Client.WaitForReady(cancellationToken);
+    }
+
+    public virtual Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
+    {
+        return Client.GroupAsync(group, cancellationToken);
+    }
+
+    public virtual Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken cancellationToken)
+    {
+        return Client.DownloadArticleBodyAsync(group, articleId, cancellationToken);
     }
 
     public void UpdateUnderlyingClient(INntpClient client)

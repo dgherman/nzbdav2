@@ -62,19 +62,21 @@ public sealed class BufferToEndStream : Stream
     private async Task PumpAsync(Stream source)
     {
         byte[] scratch = ArrayPool<byte>.Shared.Rent(_segmentSize);
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(_localCts.Token, SigtermUtil.GetCancellationToken());
+        var token = cts.Token;
 
         try
         {
             while (true)
             {
-                int read = await source.ReadAsync(scratch, 0, scratch.Length).ConfigureAwait(false);
+                int read = await source.ReadAsync(scratch, 0, scratch.Length, token).ConfigureAwait(false);
                 if (read == 0) break;                        // EOF
 
                 if (!_publiclyDisposed)                      // normal mode: write to Pipe
                 {
                     await _pipe.Writer.WriteAsync(
                             scratch.AsMemory(0, read),
-                            SigtermUtil.GetCancellationToken()).ConfigureAwait(false);
+                            token).ConfigureAwait(false);
                 }
                 // else: wrapper already disposed → just discard into 'scratch'
             }

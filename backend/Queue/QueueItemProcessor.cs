@@ -181,14 +181,22 @@ public class QueueItemProcessor(
 
         // step 2 -- perform file processing
         var fileProcessors = GetFileProcessors(fileInfos, archivePassword).ToList();
-        Log.Information($"[Queue] Step 2: Processing {fileProcessors.Count} file groups with concurrency={concurrency}");
+
+        // Reduce concurrency to prevent connection pool exhaustion when processing archives
+        // Each RAR can use up to 5 connections, so with 145 total connections:
+        // - MaxQueueConnections reserves 30 permits for queue operations
+        // - But physical connection pool is shared, so limit concurrent file processing
+        // - Safe limit: totalConnections / maxConnectionsPerFile = 145 / 5 = 29
+        var fileConcurrency = Math.Min(concurrency, providerConfig.TotalPooledConnections / 5);
+
+        Log.Information($"[Queue] Step 2: Processing {fileProcessors.Count} file groups with concurrency={fileConcurrency}");
         var part2Progress = progress
             .Offset(50)
             .Scale(50, 100)
             .ToPercentage(fileProcessors.Count);
         var fileProcessingResultsAll = await fileProcessors
             .Select(x => x!.ProcessAsync())
-            .WithConcurrencyAsync(concurrency)
+            .WithConcurrencyAsync(fileConcurrency)
             .GetAllAsync(ct, part2Progress).ConfigureAwait(false);
         var fileProcessingResults = fileProcessingResultsAll
             .Where(x => x is not null)
@@ -263,6 +271,8 @@ public class QueueItemProcessor(
 
         foreach (var group in groups)
         {
+            Log.Debug($"[Queue] Processing group '{group.Key}' with {group.Count()} files. First file: {group.First().FileName}");
+
             if (group.Key == "7z")
                 yield return new SevenZipProcessor(group.ToList(), usenetClient, archivePassword, ct);
 

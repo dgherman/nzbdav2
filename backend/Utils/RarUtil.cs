@@ -16,8 +16,13 @@ public static class RarUtil
         CancellationToken ct
     )
     {
-        await using var cancellableStream = new CancellableStream(stream, ct);
-        return await Task.Run(() => GetRarHeaders(cancellableStream, password), ct).ConfigureAwait(false);
+        // Wrap in a limit stream to prevent scanning the entire file if headers are missing
+        // 50MB should be enough for any valid RAR header
+        var maxBytes = 50 * 1024 * 1024; 
+        var limitedStream = new MaxBytesReadStream(stream, maxBytes);
+
+        await using var cancellableStream = new CancellableStream(limitedStream, ct);
+        return await Task.Run(() => GetRarHeaders(cancellableStream, password), ct).WaitAsync(ct).ConfigureAwait(false);
     }
 
     private static List<IRarHeader> GetRarHeaders(Stream stream, string? password)

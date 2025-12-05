@@ -15,6 +15,7 @@ const topicNames = {
     queueItemPercentage: 'qp',
     queueItemAdded: 'qa',
     queueItemRemoved: 'qr',
+    queueItemPriorityChanged: 'qpc',
     historyItemAdded: 'ha',
     historyItemRemoved: 'hr',
 }
@@ -23,6 +24,7 @@ const topicSubscriptions = {
     [topicNames.queueItemPercentage]: 'state',
     [topicNames.queueItemAdded]: 'event',
     [topicNames.queueItemRemoved]: 'event',
+    [topicNames.queueItemPriorityChanged]: 'event',
     [topicNames.historyItemAdded]: 'event',
     [topicNames.historyItemRemoved]: 'event',
 }
@@ -74,6 +76,21 @@ export default function Queue(props: Route.ComponentProps) {
         setQueueSlots(slots => slots.map(x => x.nzo_id === nzo_id ? { ...x, true_percentage } : x));
     }, [setQueueSlots]);
 
+    const onQueuePriorityChanged = useCallback(async () => {
+        // Refresh the queue to get the new order
+        try {
+            const response = await fetch(`/api?mode=queue&limit=${maxItems}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.queue?.slots) {
+                    setQueueSlots(data.queue.slots);
+                }
+            }
+        } catch (e) {
+            console.error('Failed to refresh queue after priority change', e);
+        }
+    }, [setQueueSlots]);
+
     // history events
     const onAddHistorySlot = useCallback((historySlot: HistorySlot) => {
         setHistorySlots(slots => [historySlot, ...slots]);
@@ -102,6 +119,8 @@ export default function Queue(props: Route.ComponentProps) {
             onChangeQueueSlotStatus(message);
         else if (topic == topicNames.queueItemPercentage)
             onChangeQueueSlotPercentage(message);
+        else if (topic == topicNames.queueItemPriorityChanged)
+            onQueuePriorityChanged();
         else if (topic == topicNames.historyItemAdded)
             onAddHistorySlot(JSON.parse(message));
         else if (topic == topicNames.historyItemRemoved)
@@ -111,6 +130,7 @@ export default function Queue(props: Route.ComponentProps) {
         onRemoveQueueSlots,
         onChangeQueueSlotStatus,
         onChangeQueueSlotPercentage,
+        onQueuePriorityChanged,
         onAddHistorySlot,
         onRemoveHistorySlots,
         disableLiveView

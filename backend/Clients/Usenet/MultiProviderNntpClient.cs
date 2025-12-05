@@ -14,6 +14,8 @@ namespace NzbWebDAV.Clients.Usenet;
 
 public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) : INntpClient
 {
+    public IReadOnlyList<MultiConnectionNntpClient> Providers => providers;
+
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
         throw new NotSupportedException("Please connect within the connectionFactory");
@@ -26,18 +28,25 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
 
     public Task<NntpStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return RunFromPoolWithBackup(connection => connection.StatAsync(segmentId, cancellationToken),
+        return RunFromPoolWithBackup(
+            connection => connection.StatAsync(segmentId, cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken);
     }
 
     public Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken)
     {
-        return RunFromPoolWithBackup(connection => connection.DateAsync(cancellationToken), cancellationToken);
+        return RunFromPoolWithBackup(
+            connection => connection.DateAsync(cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            cancellationToken);
     }
 
     public Task<UsenetArticleHeaders> GetArticleHeadersAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return RunFromPoolWithBackup(connection => connection.GetArticleHeadersAsync(segmentId, cancellationToken),
+        return RunFromPoolWithBackup(
+            connection => connection.GetArticleHeadersAsync(segmentId, cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken);
     }
 
@@ -46,18 +55,32 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
     {
         return RunFromPoolWithBackup(
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            cancellationToken);
+    }
+
+    public Task<YencHeaderStream> GetBalancedSegmentStreamAsync(string segmentId, bool includeHeaders,
+        CancellationToken cancellationToken)
+    {
+        return RunFromPoolWithBackup(
+            connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
+            GetBalancedProviders(),
             cancellationToken);
     }
 
     public Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return RunFromPoolWithBackup(connection => connection.GetSegmentYencHeaderAsync(segmentId, cancellationToken),
+        return RunFromPoolWithBackup(
+            connection => connection.GetSegmentYencHeaderAsync(segmentId, cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken);
     }
 
     public Task<long> GetFileSizeAsync(NzbFile file, CancellationToken cancellationToken)
     {
-        return RunFromPoolWithBackup(connection => connection.GetFileSizeAsync(file, cancellationToken),
+        return RunFromPoolWithBackup(
+            connection => connection.GetFileSizeAsync(file, cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken);
     }
 
@@ -66,16 +89,32 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         return Task.CompletedTask;
     }
 
+    public Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
+    {
+        return RunFromPoolWithBackup(
+            connection => connection.GroupAsync(group, cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            cancellationToken);
+    }
+
+    public Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken cancellationToken)
+    {
+        return RunFromPoolWithBackup(
+            connection => connection.DownloadArticleBodyAsync(group, articleId, cancellationToken),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            cancellationToken);
+    }
+
     private async Task<T> RunFromPoolWithBackup<T>
     (
         Func<INntpClient, Task<T>> task,
+        IEnumerable<MultiConnectionNntpClient> orderedProviders,
         CancellationToken cancellationToken
     )
     {
         ExceptionDispatchInfo? lastException = null;
         var lastSuccessfulProviderContext = cancellationToken.GetContext<LastSuccessfulProviderContext>();
         var lastSuccessfulProvider = lastSuccessfulProviderContext?.Provider;
-        var orderedProviders = GetOrderedProviders(lastSuccessfulProvider);
         T? result = default;
         foreach (var provider in orderedProviders)
         {
@@ -121,6 +160,28 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
             .Where(x => x is not null)
             .Select(x => x!)
             .Distinct();
+    }
+
+    private IEnumerable<MultiConnectionNntpClient> GetBalancedProviders()
+    {
+        // Balanced strategy for BufferedStream:
+        // 1. Prioritize Pooled providers.
+        // 2. Within Pooled, prefer lower latency.
+        // 3. Prefer available connections.
+        // 4. Fallback to Backups.
+
+        var pooled = providers
+            .Where(x => x.ProviderType == ProviderType.Pooled)
+            .OrderBy(x => x.AverageLatency)
+            .ThenByDescending(x => x.AvailableConnections)
+            .ToList();
+
+        var others = providers
+            .Where(x => x.ProviderType != ProviderType.Pooled && x.ProviderType != ProviderType.Disabled)
+            .OrderBy(x => x.ProviderType) // Backup vs BackupOnly
+            .ThenByDescending(x => x.IdleConnections);
+
+        return pooled.Concat(others);
     }
 
     public void Dispose()

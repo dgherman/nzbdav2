@@ -15,6 +15,7 @@ public class ThreadSafeNntpClient : INntpClient
     private readonly NntpConnection _connection;
     private readonly NntpClient _client;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private string? _currentGroup;
 
     public ThreadSafeNntpClient()
     {
@@ -24,13 +25,15 @@ public class ThreadSafeNntpClient : INntpClient
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
-        return Synchronized(() => _client.ConnectAsync(host, port, useSsl), cancellationToken);
+        // Reset state on connect
+        return Synchronized(() => { _currentGroup = null; return _client.ConnectAsync(host, port, useSsl); }, cancellationToken);
     }
 
     public Task<bool> AuthenticateAsync(string user, string pass, CancellationToken cancellationToken)
     {
         return Synchronized(() => _client.Authenticate(user, pass), cancellationToken);
     }
+
 
     public Task<NntpStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
     {
@@ -121,6 +124,26 @@ public class ThreadSafeNntpClient : INntpClient
     {
         await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         _semaphore.Release();
+    }
+
+    public Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
+    {
+        return Synchronized(() => _client.Group(group), cancellationToken);
+    }
+
+    public Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken cancellationToken)
+    {
+        return Synchronized(() =>
+        {
+            var response = _client.Body(articleId);
+            if (response.Code != 222) throw new Exception($"Article {articleId} not found: {response.Message}");
+            long size = 0;
+            foreach (var line in response.Article.Body)
+            {
+                size += line.Length + 2; // Approximate CRLF
+            }
+            return size;
+        }, cancellationToken);
     }
 
     private Task<T> Synchronized<T>(Func<T> run, CancellationToken cancellationToken)

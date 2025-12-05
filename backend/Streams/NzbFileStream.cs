@@ -44,13 +44,19 @@ public class NzbFileStream(
 
     public override long Seek(long offset, SeekOrigin origin)
     {
+        Serilog.Log.Debug("[NzbFileStream] Seek called with offset: {Offset}, origin: {Origin}. Current position: {CurrentPosition}", offset, origin, _position);
         var absoluteOffset = origin == SeekOrigin.Begin ? offset
             : origin == SeekOrigin.Current ? _position + offset
             : throw new InvalidOperationException("SeekOrigin must be Begin or Current.");
-        if (_position == absoluteOffset) return _position;
+        if (_position == absoluteOffset)
+        {
+            Serilog.Log.Debug("[NzbFileStream] Seek resulted in no change. Position: {Position}", _position);
+            return _position;
+        }
         _position = absoluteOffset;
         _innerStream?.Dispose();
         _innerStream = null;
+        Serilog.Log.Debug("[NzbFileStream] Seek completed. New position: {NewPosition}", _position);
         return _position;
     }
 
@@ -100,8 +106,16 @@ public class NzbFileStream(
 
         var foundSegment = await SeekSegment(rangeStart, seekCts.Token).ConfigureAwait(false);
         var stream = GetCombinedStream(foundSegment.FoundIndex, cancellationToken);
-        await stream.DiscardBytesAsync(rangeStart - foundSegment.FoundByteRange.StartInclusive).ConfigureAwait(false);
-        return stream;
+        try
+        {
+            await stream.DiscardBytesAsync(rangeStart - foundSegment.FoundByteRange.StartInclusive).ConfigureAwait(false);
+            return stream;
+        }
+        catch
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
     }
 
     private CombinedStream GetCombinedStream(int firstSegmentIndex, CancellationToken ct)
@@ -117,18 +131,24 @@ public class NzbFileStream(
 
         // No need to copy ReservedPooledConnectionsContext - operation limits handle this now
 
+        // Disable buffered streaming for Queue processing since it only reads small amounts
+        // (e.g., just the first segment for file size detection)
+        var shouldUseBufferedStreaming = useBufferedStreaming &&
+            _usageContext.UsageType != ConnectionUsageType.Queue;
+
         // Use buffered streaming if configured for better performance
-        if (useBufferedStreaming && concurrentConnections >= 3 && fileSegmentIds.Length > concurrentConnections)
+        if (shouldUseBufferedStreaming && concurrentConnections >= 3 && fileSegmentIds.Length > concurrentConnections)
         {
             // Set BufferedStreaming context - this will be the ONLY ConnectionUsageContext
             var bufferedContext = new ConnectionUsageContext(
                 ConnectionUsageType.BufferedStreaming,
                 _usageContext.Details
             );
+            var remainingSegments = fileSegmentIds[firstSegmentIndex..];
+            Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}",
+                remainingSegments.Length, fileSize - firstSegmentIndex * (fileSize / fileSegmentIds.Length), concurrentConnections, bufferSize);
             _contextScope = _streamCts.Token.SetScopedContext(bufferedContext);
             var bufferedContextCt = _streamCts.Token;
-
-            var remainingSegments = fileSegmentIds[firstSegmentIndex..];
             var bufferedStream = new BufferedSegmentStream(
                 remainingSegments,
                 fileSize - firstSegmentIndex * (fileSize / fileSegmentIds.Length), // Approximate remaining size
@@ -177,6 +197,7 @@ public class NzbFileStream(
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
+        Serilog.Log.Debug("[NzbFileStream] Disposing NzbFileStream. Disposing: {Disposing}", disposing);
         _disposed = true;
         _cancellationRegistration.Dispose(); // Unregister callback first
         _innerStream?.Dispose();
@@ -187,6 +208,7 @@ public class NzbFileStream(
     public override async ValueTask DisposeAsync()
     {
         if (_disposed) return;
+        Serilog.Log.Debug("[NzbFileStream] Disposing NzbFileStream asynchronously.");
         _disposed = true;
         _cancellationRegistration.Dispose(); // Unregister callback first
         if (_innerStream != null) await _innerStream.DisposeAsync().ConfigureAwait(false);

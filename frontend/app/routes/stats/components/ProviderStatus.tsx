@@ -45,6 +45,12 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
         return parseFloat((bytesPerSec / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
     };
 
+    const formatLatency = (ms: number) => {
+        if (!ms) return "0 ms";
+        if (ms < 1000) return `${ms} ms`;
+        return `${(ms / 1000).toFixed(2)} s`;
+    };
+
     return (
         <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
             <h4 className="mb-3">Real-time Provider Status</h4>
@@ -63,12 +69,20 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                     </Badge>
                                 </Card.Header>
                                 <Card.Body>
-                                    <div className="mb-3">
-                                        <div className="text-muted small text-uppercase">Current Speed</div>
-                                        <div className="fs-4 fw-bold text-info">
-                                            {bw ? formatSpeed(bw.currentSpeed) : "0 B/s"}
-                                        </div>
-                                    </div>
+                                    <Row className="mb-3">
+                                        <Col>
+                                            <div className="text-muted small text-uppercase">Current Speed</div>
+                                            <div className="fs-4 fw-bold text-info">
+                                                {bw ? formatSpeed(bw.currentSpeed) : "0 B/s"}
+                                            </div>
+                                        </Col>
+                                        <Col>
+                                            <div className="text-muted small text-uppercase">Avg Latency</div>
+                                            <div className="fs-4 fw-bold text-warning">
+                                                {bw ? formatLatency(bw.averageLatency) : "0 ms"}
+                                            </div>
+                                        </Col>
+                                    </Row>
                                     <div>
                                         <div className="text-muted small text-uppercase">Active Operations</div>
                                         {conns.length === 0 ? (

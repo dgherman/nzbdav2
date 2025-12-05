@@ -49,7 +49,7 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         return true;
     }
 
-    private async Task<(int episodeFileId, List<int> episodeIds)?> GetMediaIds(string symlinkOrStrmPath)
+    public async Task<(int episodeFileId, List<int> episodeIds)?> GetMediaIds(string symlinkOrStrmPath)
     {
         // get episode-file-id
         var episodeFileId = await GetEpisodeFileId(symlinkOrStrmPath);
@@ -64,7 +64,7 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         return (episodeFileId.Value, episodeIds);
     }
 
-    private async Task<int?> GetEpisodeFileId(string symlinkOrStrmPath)
+    public async Task<int?> GetEpisodeFileId(string symlinkOrStrmPath)
     {
         // if episode-file-id is found in the cache, verify it and return it
         if (SymlinkOrStrmToEpisodeFileIdCache.TryGetValue(symlinkOrStrmPath, out var episodeFileId))
@@ -90,7 +90,7 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         return result;
     }
 
-    private async Task<int?> GetSeriesId(string symlinkOrStrmPath)
+    public async Task<int?> GetSeriesId(string symlinkOrStrmPath)
     {
         // get series-id from cache
         var cachedSeriesId = PathUtil.GetAllParentDirectories(symlinkOrStrmPath)

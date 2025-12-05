@@ -80,6 +80,7 @@ public class QueueManager : IDisposable
 
     private async Task ProcessQueueAsync(CancellationToken ct)
     {
+        Log.Debug("[QueueManager] Starting ProcessQueueAsync main loop");
         while (!ct.IsCancellationRequested)
         {
             try
@@ -88,6 +89,7 @@ public class QueueManager : IDisposable
                 QueueItem? queueItem = null;
                 QueueNzbContents? queueNzbContents = null;
 
+                Log.Debug("[QueueManager] Fetching next queue item from database");
                 using (var scope = _scopeFactory.CreateScope())
                 {
                     var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
@@ -96,6 +98,7 @@ public class QueueManager : IDisposable
 
                 if (queueItem is null || queueNzbContents is null)
                 {
+                    Log.Debug("[QueueManager] No queue items found, sleeping for 1 minute");
                     try
                     {
                         // if we're done with the queue, wait a minute before checking again.
@@ -104,6 +107,7 @@ public class QueueManager : IDisposable
                     }
                     catch when (_sleepingQueueToken.IsCancellationRequested)
                     {
+                        Log.Debug("[QueueManager] Queue awakened by cancellation token");
                         lock (_sleepingQueueLock)
                         {
                             _sleepingQueueToken.Dispose();
@@ -114,25 +118,41 @@ public class QueueManager : IDisposable
                     continue;
                 }
 
+                Log.Information("[QueueManager] Starting to process queue item: {QueueItemId}, Name: {QueueItemJobName}", queueItem.Id, queueItem.JobName);
                 // process the queue-item
                 using var queueItemCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 await LockAsync(() =>
                 {
+                    Log.Debug("[QueueManager] Beginning processing task for queue item: {QueueItemId}", queueItem.Id);
                     _inProgressQueueItem = BeginProcessingQueueItem(
                         _scopeFactory, queueItem, queueNzbContents, queueItemCancellationTokenSource
                     );
                 }).ConfigureAwait(false);
-                await (_inProgressQueueItem?.ProcessingTask ?? Task.CompletedTask).ConfigureAwait(false);
+
+                Log.Debug("[QueueManager] Waiting for processing task to complete for queue item: {QueueItemId}", queueItem.Id);
+                var processingTask = _inProgressQueueItem?.ProcessingTask ?? Task.CompletedTask;
+
+                // Add timeout monitoring
+                var completedTask = await Task.WhenAny(processingTask, Task.Delay(TimeSpan.FromMinutes(5), ct)).ConfigureAwait(false);
+                if (completedTask != processingTask)
+                {
+                    Log.Warning("[QueueManager] Queue item {QueueItemId} has not completed after 5 minutes, still waiting...", queueItem.Id);
+                    await processingTask.ConfigureAwait(false);
+                }
+
+                Log.Information("[QueueManager] Completed processing queue item: {QueueItemId}", queueItem.Id);
             }
             catch (Exception e)
             {
-                Log.Error($"An unexpected error occured while processing the queue: {e.Message}");
+                Log.Error(e, "[QueueManager] An unexpected error occurred while processing the queue: {ErrorMessage}", e.Message);
             }
             finally
             {
                 await LockAsync(() => { _inProgressQueueItem = null; }).ConfigureAwait(false);
+                Log.Debug("[QueueManager] Cleared in-progress queue item");
             }
         }
+        Log.Debug("[QueueManager] ProcessQueueAsync main loop exited");
     }
 
     private InProgressQueueItem BeginProcessingQueueItem

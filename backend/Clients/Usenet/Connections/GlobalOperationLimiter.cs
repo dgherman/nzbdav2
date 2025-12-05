@@ -54,6 +54,9 @@ public class GlobalOperationLimiter : IDisposable
         var semaphore = GetSemaphoreForType(usageType);
         var guaranteedLimit = _guaranteedLimits[usageType];
 
+        Serilog.Log.Debug("[GlobalOperationLimiter] Waiting to acquire permit for {UsageType}. Current usage breakdown: {UsageBreakdown}. Semaphore available: {SemaphoreAvailable}",
+            usageType, GetUsageBreakdown(), semaphore.CurrentCount);
+
         // Wait for the operation-specific semaphore
         await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
 
@@ -65,20 +68,28 @@ public class GlobalOperationLimiter : IDisposable
             currentUsage = _currentUsage[usageType];
         }
 
+        Serilog.Log.Debug("[GlobalOperationLimiter] Acquired permit for {UsageType}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total breakdown: {UsageBreakdown}",
+            usageType, currentUsage, guaranteedLimit, GetUsageBreakdown());
+
         return new OperationPermit(this, usageType, semaphore);
     }
 
     private void ReleasePermit(ConnectionUsageType usageType, SemaphoreSlim semaphore)
     {
+        int currentUsage;
         lock (_lock)
         {
             if (_currentUsage.ContainsKey(usageType) && _currentUsage[usageType] > 0)
             {
                 _currentUsage[usageType]--;
             }
+            currentUsage = _currentUsage[usageType];
         }
 
         semaphore.Release();
+
+        Serilog.Log.Debug("[GlobalOperationLimiter] Released permit for {UsageType}. Current usage: {CurrentUsage}. Total breakdown: {UsageBreakdown}",
+            usageType, currentUsage, GetUsageBreakdown());
     }
 
     private SemaphoreSlim GetSemaphoreForType(ConnectionUsageType type)

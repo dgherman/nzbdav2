@@ -124,6 +124,38 @@ export function QueueRow({ slot, onIsSelectedChanged, onIsRemovingChanged, onRem
         onIsRemovingChanged(slot.nzo_id, false);
     }, [slot.nzo_id, setIsConfirmingRemoval, onIsRemovingChanged, onRemoved]);
 
+    const onMoveToTop = useCallback(async () => {
+        try {
+            const url = '/api?mode=queue&name=priority'
+                + `&value=${encodeURIComponent(slot.nzo_id)}`
+                + `&value2=top`;
+            const response = await fetch(url);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.status === true) {
+                    // Queue will be updated via WebSocket
+                    return;
+                }
+            }
+        } catch { }
+    }, [slot.nzo_id]);
+
+    const onMoveToBottom = useCallback(async () => {
+        try {
+            const url = '/api?mode=queue&name=priority'
+                + `&value=${encodeURIComponent(slot.nzo_id)}`
+                + `&value2=bottom`;
+            const response = await fetch(url);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.status === true) {
+                    // Queue will be updated via WebSocket
+                    return;
+                }
+            }
+        } catch { }
+    }, [slot.nzo_id]);
+
     // view
     return (
         <>
@@ -135,7 +167,13 @@ export function QueueRow({ slot, onIsSelectedChanged, onIsRemovingChanged, onRem
                 status={slot.status}
                 percentage={slot.true_percentage}
                 fileSizeBytes={Number(slot.mb) * 1024 * 1024}
-                actions={<ActionButton type="delete" disabled={!!slot.isRemoving} onClick={onRemove} />}
+                actions={
+                    <>
+                        <ActionButton type="move-top" disabled={!!slot.isRemoving} onClick={onMoveToTop} />
+                        <ActionButton type="move-bottom" disabled={!!slot.isRemoving} onClick={onMoveToBottom} />
+                        <ActionButton type="delete" disabled={!!slot.isRemoving} onClick={onRemove} />
+                    </>
+                }
                 onRowSelectionChanged={isSelected => onIsSelectedChanged(slot.nzo_id, isSelected)}
             />
             <ConfirmModal

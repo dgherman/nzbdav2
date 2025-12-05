@@ -17,6 +17,10 @@ public class BandwidthService
     private readonly ConcurrentDictionary<int, ProviderStats> _providerStats = new();
     private readonly Timer _broadcastTimer;
     private readonly Timer _persistenceTimer;
+    private readonly JsonSerializerOptions _jsonOptions = new() 
+    { 
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase 
+    };
 
     public BandwidthService(
         WebsocketManager websocketManager, 
@@ -35,7 +39,7 @@ public class BandwidthService
         if (!_configManager.IsStatsEnabled()) return;
 
         var snapshots = GetBandwidthStats();
-        var json = JsonSerializer.Serialize(snapshots);
+        var json = JsonSerializer.Serialize(snapshots, _jsonOptions);
         _websocketManager.SendMessage(WebsocketTopic.Bandwidth, json);
     }
 
@@ -84,6 +88,25 @@ public class BandwidthService
         stats.AddBytes(bytes);
     }
 
+    public void RecordLatency(int providerIndex, int latencyMs)
+    {
+        if (!_configManager.IsStatsEnabled()) return;
+
+        var stats = _providerStats.GetOrAdd(providerIndex, _ => new ProviderStats());
+        stats.AddLatency(latencyMs);
+    }
+
+    public long GetAverageLatency(int providerIndex)
+    {
+        if (!_configManager.IsStatsEnabled()) return 0;
+
+        if (_providerStats.TryGetValue(providerIndex, out var stats))
+        {
+            return stats.GetAverageLatency();
+        }
+        return 0;
+    }
+
     public List<ProviderBandwidthSnapshot> GetBandwidthStats()
     {
         var snapshots = new List<ProviderBandwidthSnapshot>();
@@ -101,10 +124,40 @@ public class BandwidthService
         private readonly object _lock = new();
         
         // Optimization: Track bandwidth in 1-second buckets instead of storing every read event.
-        // This reduces AddBytes from O(N) to O(1) and removes GC pressure.
         private long _currentBucketBytes;
         private readonly Queue<long> _historyBuckets = new();
+
+        // Latency tracking
+        private long _currentBucketLatencySum;
+        private int _currentBucketLatencyCount;
+        private readonly Queue<(long sum, int count)> _latencyHistoryBuckets = new();
+        private long _lastKnownAverageLatency;
         
+        public long GetAverageLatency()
+        {
+            lock (_lock)
+            {
+                var totalLatencySum = _latencyHistoryBuckets.Sum(x => x.sum);
+                var totalLatencyCount = _latencyHistoryBuckets.Sum(x => x.count);
+                
+                if (totalLatencyCount > 0)
+                {
+                    _lastKnownAverageLatency = totalLatencySum / totalLatencyCount;
+                }
+                
+                return _lastKnownAverageLatency;
+            }
+        }
+
+        public void AddLatency(int ms)
+        {
+            lock (_lock)
+            {
+                _currentBucketLatencySum += ms;
+                _currentBucketLatencyCount++;
+            }
+        }
+
         public void AddBytes(long bytes)
         {
             lock (_lock)
@@ -129,28 +182,46 @@ public class BandwidthService
         {
             lock (_lock)
             {
-                // Rotate the bucket
+                // Rotate the buckets
                 _historyBuckets.Enqueue(_currentBucketBytes);
                 _currentBucketBytes = 0;
 
-                // Keep only last 5 seconds
-                while (_historyBuckets.Count > 5)
+                _latencyHistoryBuckets.Enqueue((_currentBucketLatencySum, _currentBucketLatencyCount));
+                _currentBucketLatencySum = 0;
+                _currentBucketLatencyCount = 0;
+
+                // Keep only last 15 seconds (smoothed)
+                while (_historyBuckets.Count > 15)
                 {
                     _historyBuckets.Dequeue();
                 }
+                while (_latencyHistoryBuckets.Count > 15)
+                {
+                    _latencyHistoryBuckets.Dequeue();
+                }
 
                 var recentBytes = _historyBuckets.Sum();
-                // Average over the window (5s), or actual elapsed if less than 5s to avoid slow startup ramp-up
+                // Average over the window, or actual elapsed if less than window to avoid slow startup ramp-up
                 var duration = Math.Max(1, _historyBuckets.Count); 
                 
                 // Calculate speed (bytes per second)
                 var speed = (long)(recentBytes / (double)duration);
+
+                // Calculate average latency
+                var totalLatencySum = _latencyHistoryBuckets.Sum(x => x.sum);
+                var totalLatencyCount = _latencyHistoryBuckets.Sum(x => x.count);
+                
+                if (totalLatencyCount > 0)
+                {
+                    _lastKnownAverageLatency = totalLatencySum / totalLatencyCount;
+                }
                 
                 return new ProviderBandwidthSnapshot
                 {
                     ProviderIndex = index,
                     TotalBytes = _totalBytes,
-                    CurrentSpeed = speed
+                    CurrentSpeed = speed,
+                    AverageLatency = _lastKnownAverageLatency
                 };
             }
         }
@@ -162,4 +233,5 @@ public class ProviderBandwidthSnapshot
     public int ProviderIndex { get; set; }
     public long TotalBytes { get; set; }
     public long CurrentSpeed { get; set; }
+    public long AverageLatency { get; set; }
 }

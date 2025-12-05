@@ -17,4 +17,6 @@ public interface INntpClient: IDisposable
     Task<UsenetArticleHeaders> GetArticleHeadersAsync(string segmentId, CancellationToken cancellationToken);
     Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken);
     Task WaitForReady(CancellationToken cancellationToken);
+    Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken);
+    Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken cancellationToken);
 }

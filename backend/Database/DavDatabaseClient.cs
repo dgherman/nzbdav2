@@ -122,6 +122,16 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
         return queueItems.CountAsync(cancellationToken: ct);
     }
 
+    public Task<QueueItem?> GetQueueItemById(Guid id, CancellationToken ct = default)
+    {
+        return Ctx.QueueItems.FirstOrDefaultAsync(x => x.Id == id, cancellationToken: ct);
+    }
+
+    public async Task SaveChanges(CancellationToken ct = default)
+    {
+        await ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+    }
+
     public async Task RemoveQueueItemsAsync(List<Guid> ids, CancellationToken ct = default)
     {
         await Ctx.QueueItems

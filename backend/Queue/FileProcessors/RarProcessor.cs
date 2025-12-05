@@ -6,6 +6,7 @@ using NzbWebDAV.Models;
 using NzbWebDAV.Queue.DeobfuscationSteps._3.GetFileInfos;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Utils;
+using Serilog;
 using SharpCompress.Common.Rar.Headers;
 using Usenet.Nzb;
 
@@ -21,8 +22,26 @@ public class RarProcessor(
 {
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
+        Log.Debug($"[RarProcessor] Initializing stream for {fileInfo.FileName}");
         await using var stream = await GetNzbFileStream().ConfigureAwait(false);
-        var headers = await RarUtil.GetRarHeadersAsync(stream, password, ct).ConfigureAwait(false);
+
+        // Create a linked token source with a timeout for the header parsing operation
+        using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        headerCts.CancelAfter(TimeSpan.FromSeconds(60));
+
+        Log.Debug($"[RarProcessor] Reading RAR headers for {fileInfo.FileName} (timeout 60s)...");
+        List<IRarHeader> headers;
+        try
+        {
+            headers = await RarUtil.GetRarHeadersAsync(stream, password, headerCts.Token).ConfigureAwait(false);
+            Log.Debug($"[RarProcessor] Successfully read {headers.Count} RAR headers for {fileInfo.FileName}");
+        }
+        catch (OperationCanceledException) when (headerCts.IsCancellationRequested && !ct.IsCancellationRequested)
+        {
+            Log.Error($"[RarProcessor] Timeout reading RAR headers for {fileInfo.FileName}");
+            throw new TimeoutException("Timed out while reading RAR headers (limit: 60s). This usually indicates a corrupt or malformed archive.");
+        }
+
         var archiveName = GetArchiveName();
         var partNumber = GetPartNumber(headers);
         return new Result()

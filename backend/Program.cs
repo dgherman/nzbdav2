@@ -55,9 +55,16 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2025-11-29-NO-RESERVED");
-        Log.Warning("  FIX: Removed reserved connections - queue no longer waits");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-04-QUEUE-REORDER");
+        Log.Warning("  FEATURE: Queue items can now be reordered via UI (move to top/bottom)");
         Log.Warning("═══════════════════════════════════════════════════════════════");
+
+        // Run repair simulation if requested
+        if (args.Contains("--simulate-repair"))
+        {
+            await RepairSimulation.RunAsync().ConfigureAwait(false);
+            return;
+        }
 
         // initialize database
         await using var databaseContext = new DavDatabaseContext();

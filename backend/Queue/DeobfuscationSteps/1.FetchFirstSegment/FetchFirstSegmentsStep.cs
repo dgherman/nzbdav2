@@ -7,6 +7,7 @@ using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using Usenet.Nzb;
 using Usenet.Yenc;
+using Serilog;
 
 namespace NzbWebDAV.Queue.DeobfuscationSteps._1.FetchFirstSegment;
 
@@ -35,6 +36,7 @@ public static class FetchFirstSegmentsStep
         CancellationToken cancellationToken = default
     )
     {
+        // Log.Debug($"[FetchFirst] Fetching first segment for {nzbFile.FileName}"); // Optional: uncomment if needed, but might be spammy
         try
         {
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -74,6 +76,7 @@ public static class FetchFirstSegmentsStep
         }
         catch (UsenetArticleNotFoundException)
         {
+            Log.Debug($"[FetchFirst] Missing first segment for {nzbFile.FileName}");
             return new NzbFileWithFirstSegment
             {
                 NzbFile = nzbFile,

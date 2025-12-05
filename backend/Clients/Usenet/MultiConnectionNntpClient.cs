@@ -33,6 +33,9 @@ public class MultiConnectionNntpClient(
     private readonly BandwidthService? _bandwidthService = bandwidthService;
     private readonly int _providerIndex = providerIndex;
 
+    public long AverageLatency => _bandwidthService?.GetAverageLatency(_providerIndex) ?? 0;
+    public int ProviderIndex => _providerIndex;
+
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
         throw new NotSupportedException("Please connect within the connectionFactory");
@@ -45,17 +48,17 @@ public class MultiConnectionNntpClient(
 
     public Task<NntpStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return RunWithConnection(connection => connection.StatAsync(segmentId, cancellationToken), cancellationToken);
+        return RunWithConnection((connection, ct) => connection.StatAsync(segmentId, ct), cancellationToken);
     }
 
     public Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken)
     {
-        return RunWithConnection(connection => connection.DateAsync(cancellationToken), cancellationToken);
+        return RunWithConnection((connection, ct) => connection.DateAsync(ct), cancellationToken);
     }
 
     public Task<UsenetArticleHeaders> GetArticleHeadersAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return RunWithConnection(connection => connection.GetArticleHeadersAsync(segmentId, cancellationToken),
+        return RunWithConnection((connection, ct) => connection.GetArticleHeadersAsync(segmentId, ct),
             cancellationToken);
     }
 
@@ -63,7 +66,7 @@ public class MultiConnectionNntpClient(
         CancellationToken cancellationToken)
     {
         var stream = await RunStreamWithConnection(
-            connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
+            (connection, ct) => connection.GetSegmentStreamAsync(segmentId, includeHeaders, ct),
             cancellationToken).ConfigureAwait(false);
 
         if (_bandwidthService != null && _providerIndex >= 0)
@@ -77,13 +80,13 @@ public class MultiConnectionNntpClient(
 
     public Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return RunWithConnection(connection => connection.GetSegmentYencHeaderAsync(segmentId, cancellationToken),
+        return RunWithConnection((connection, ct) => connection.GetSegmentYencHeaderAsync(segmentId, ct),
             cancellationToken);
     }
 
     public Task<long> GetFileSizeAsync(NzbFile file, CancellationToken cancellationToken)
     {
-        return RunWithConnection(connection => connection.GetFileSizeAsync(file, cancellationToken), cancellationToken);
+        return RunWithConnection((connection, ct) => connection.GetFileSizeAsync(file, ct), cancellationToken);
     }
 
     public async Task WaitForReady(CancellationToken cancellationToken)
@@ -92,9 +95,19 @@ public class MultiConnectionNntpClient(
             await _connectionPool.GetConnectionLockAsync(cancellationToken).ConfigureAwait(false);
     }
 
+    public Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
+    {
+        return RunWithConnection((connection, ct) => connection.GroupAsync(group, ct), cancellationToken);
+    }
+
+    public Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken cancellationToken)
+    {
+        return RunWithConnection((connection, ct) => connection.DownloadArticleBodyAsync(group, articleId, ct), cancellationToken);
+    }
+
     private async Task<YencHeaderStream> RunStreamWithConnection
     (
-        Func<INntpClient, Task<YencHeaderStream>> task,
+        Func<INntpClient, CancellationToken, Task<YencHeaderStream>> task,
         CancellationToken cancellationToken,
         int retries = 5
     )
@@ -108,16 +121,48 @@ public class MultiConnectionNntpClient(
             globalPermit = await _globalLimiter.AcquirePermitAsync(usageType, cancellationToken).ConfigureAwait(false);
         }
 
+        // Create timeout cancellation token that will cancel after 90 seconds
+        // IMPORTANT: Create this BEFORE acquiring connection lock so timeout includes lock wait time
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(90));
+
+        // Propagate the connection usage context to the new linked token
+        var originalUsageContext = cancellationToken.GetContext<ConnectionUsageContext>();
+        IDisposable? timeoutContextScope = null;
+        if (originalUsageContext.UsageType != ConnectionUsageType.Unknown)
+        {
+            timeoutContextScope = timeoutCts.Token.SetScopedContext(originalUsageContext);
+        }
+
         ConnectionLock<INntpClient>? connectionLock = null;
         bool success = false;
+        var startTime = System.Diagnostics.Stopwatch.StartNew();
 
         try
         {
-            connectionLock = await _connectionPool.GetConnectionLockAsync(cancellationToken).ConfigureAwait(false);
-            
+            connectionLock = await _connectionPool.GetConnectionLockAsync(timeoutCts.Token).ConfigureAwait(false);
+
             try
             {
-                var stream = await task(connectionLock.Connection).ConfigureAwait(false);
+                var operationStart = System.Diagnostics.Stopwatch.StartNew();
+
+                YencHeaderStream stream;
+                try
+                {
+                    // Pass the timeout token to the task - it will flow through to NNTP I/O operations
+                    stream = await task(connectionLock.Connection, timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+                {
+                    Serilog.Log.Warning("[MultiConnectionNntpClient] Stream operation timed out after 90 seconds");
+                    throw new TimeoutException("GetSegmentStream operation timed out after 90 seconds");
+                }
+
+                // Record latency metrics
+                if (_bandwidthService != null && _providerIndex >= 0)
+                {
+                    _bandwidthService.RecordLatency(_providerIndex, (int)operationStart.ElapsedMilliseconds);
+                }
 
                 // Create a callback stream that will handle the cleanup of the connection lock and global permit
                 // when the stream is disposed.
@@ -129,7 +174,14 @@ public class MultiConnectionNntpClient(
                         {
                             // We assume connection is not "disposed" (replaced) because if it was, we would have caught exception below
                             // Wait for connection to be ready before returning to pool
-                            await connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken()).ConfigureAwait(false);
+                            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
+                            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                            await connectionLock.Connection.WaitForReady(timeoutCts.Token).ConfigureAwait(false);
+                        }
+                        catch (OperationCanceledException)
+                        {
+                            Serilog.Log.Warning("[MultiConnectionNntpClient] Connection cleanup timed out - forcing disposal to release resources.");
+                            connectionLock.Replace();
                         }
                         finally
                         {
@@ -162,8 +214,15 @@ public class MultiConnectionNntpClient(
                 throw;
             }
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        {
+            var elapsedSeconds = startTime.Elapsed.TotalSeconds;
+            Serilog.Log.Warning("[MultiConnectionNntpClient] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", elapsedSeconds);
+            throw new TimeoutException($"GetSegmentStream operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
+        }
         finally
         {
+            timeoutContextScope?.Dispose(); // Dispose the scoped context if it was created
             // If we failed to create the stream (success == false), we must cleanup here.
             if (!success)
             {
@@ -179,7 +238,7 @@ public class MultiConnectionNntpClient(
 
     private async Task<T> RunWithConnection<T>
     (
-        Func<INntpClient, Task<T>> task,
+        Func<INntpClient, CancellationToken, Task<T>> task,
         CancellationToken cancellationToken,
         int retries = 5
     )
@@ -193,13 +252,46 @@ public class MultiConnectionNntpClient(
             globalPermit = await _globalLimiter.AcquirePermitAsync(usageType, cancellationToken).ConfigureAwait(false);
         }
 
+        // Create timeout cancellation token that will cancel after 90 seconds
+        // IMPORTANT: Create this BEFORE acquiring connection lock so timeout includes lock wait time
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(90));
+
+        // Propagate the connection usage context to the new linked token
+        var originalUsageContext = cancellationToken.GetContext<ConnectionUsageContext>();
+        IDisposable? timeoutContextScope = null;
+        if (originalUsageContext.UsageType != ConnectionUsageType.Unknown)
+        {
+            timeoutContextScope = timeoutCts.Token.SetScopedContext(originalUsageContext);
+        }
+
+        var startTime = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            var connectionLock = await _connectionPool.GetConnectionLockAsync(cancellationToken).ConfigureAwait(false);
+            var connectionLock = await _connectionPool.GetConnectionLockAsync(timeoutCts.Token).ConfigureAwait(false);
             var isDisposed = false;
             try
             {
-                return await task(connectionLock.Connection).ConfigureAwait(false);
+                var operationStart = System.Diagnostics.Stopwatch.StartNew();
+                T result;
+                try
+                {
+                    // Pass the timeout token to the task - it will flow through to NNTP I/O operations
+                    result = await task(connectionLock.Connection, timeoutCts.Token).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+                {
+                    Serilog.Log.Warning("[MultiConnectionNntpClient] RunWithConnection: Operation timed out after 90 seconds");
+                    throw new TimeoutException("NNTP operation timed out after 90 seconds");
+                }
+
+                // Record latency metrics
+                if (_bandwidthService != null && _providerIndex >= 0)
+                {
+                    _bandwidthService.RecordLatency(_providerIndex, (int)operationStart.ElapsedMilliseconds);
+                }
+
+                return result;
             }
             catch (Exception ex) when (ex is NntpException or ObjectDisposedException or IOException or SocketException or TimeoutException)
             {
@@ -231,8 +323,15 @@ public class MultiConnectionNntpClient(
                         .ContinueWith(_ => connectionLock.Dispose());
             }
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+        {
+            var elapsedSeconds = startTime.Elapsed.TotalSeconds;
+            Serilog.Log.Warning("[MultiConnectionNntpClient] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", elapsedSeconds);
+            throw new TimeoutException($"NNTP operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
+        }
         finally
         {
+            timeoutContextScope?.Dispose(); // Dispose the scoped context if it was created
             // Release global permit
             globalPermit?.Dispose();
         }

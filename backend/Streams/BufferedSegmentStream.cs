@@ -33,6 +33,8 @@ public class BufferedSegmentStream : Stream
         CancellationToken cancellationToken,
         ConnectionUsageContext? usageContext = null)
     {
+        Log.Debug("[BufferedStream] Initializing BufferedSegmentStream for {SegmentCount} segments, file size: {FileSize}. Concurrent connections: {ConcurrentConnections}, Buffer segment count: {BufferSegmentCount}", 
+            segmentIds.Length, fileSize, concurrentConnections, bufferSegmentCount);
         // Ensure buffer is large enough to prevent thrashing with high concurrency
         bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 5);
 
@@ -114,72 +116,76 @@ public class BufferedSegmentStream : Stream
                 .Select(async workerId =>
                 {
                     Log.Debug($"[BufferedStream] Worker {workerId} started");
-                    await foreach (var (index, segmentId) in segmentQueue.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+                    var segmentCount = 0;
+                    try
                     {
-                        var stream = await client.GetSegmentStreamAsync(segmentId, false, ct)
-                            .ConfigureAwait(false);
-
-                        // Rent a buffer and read the segment into it
-                        // We need to read the entire stream, so we use a MemoryStream as an intermediate
-                        // if we don't know the size, OR if we do know the size, we can rent directly.
-                        // Assuming average segment size is reasonable (e.g. 700KB), but it can vary.
-                        // Since we need to store it in 'PooledSegmentData', let's read fully.
-                        // To avoid allocating a new array, we can use a rented buffer, 
-                        // but we need to know the length.
-                        // Typically Usenet segments are a known size, but here we just have a stream.
-                        // Let's read into a rented buffer, resizing if necessary (or just use a large enough initial buffer).
-                        // A safer approach for unknown stream length without re-allocation is tricky with just one buffer.
-                        // However, typical segments are < 1MB. 
-                        
-                        // Let's use a recyclable memory stream approach or just simple array resizing manually with pool.
-                        // For simplicity and performance, let's assume a reasonable max segment size 
-                        // or just read into a temporary memory stream and THEN copy to a rented array of exact size?
-                        // No, that defeats the purpose. 
-                        
-                        // Better approach: Use the stream length if available? 
-                        // The underlying stream from UsenetClient likely doesn't support Length.
-                        
-                        // Let's buffer into a rented array. Start with 1MB (typical max article size is often 700KB-1MB).
-                        var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024); 
-                        var totalRead = 0;
-                        
-                        try 
+                        await foreach (var (index, segmentId) in segmentQueue.Reader.ReadAllAsync(ct).ConfigureAwait(false))
                         {
-                            while (true)
+                            segmentCount++;
+                            Log.Debug($"[BufferedStream] Worker {workerId} processing segment {index}: {segmentId} (#{segmentCount})");
+                            
+                            Stream? stream = null;
+                            try
                             {
-                                if (totalRead == buffer.Length)
+                                var multiClient = GetMultiProviderClient(client);
+                                if (multiClient != null)
                                 {
-                                    // Resize
-                                    var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
-                                    Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
-                                    ArrayPool<byte>.Shared.Return(buffer);
-                                    buffer = newBuffer;
+                                    stream = await multiClient.GetBalancedSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
+                                }
+                                else
+                                {
+                                    stream = await client.GetSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
                                 }
                                 
-                                var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
-                                if (read == 0) break;
-                                totalRead += read;
+                                Log.Debug($"[BufferedStream] Worker {workerId} obtained stream for segment {index}: {segmentId}");
+
+                                // Rent a buffer and read the segment into it
+                                var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024); 
+                                var totalRead = 0;
+                                
+                                try 
+                                {
+                                    while (true)
+                                    {
+                                        if (totalRead == buffer.Length)
+                                        {
+                                            // Resize
+                                            var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
+                                            Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
+                                            ArrayPool<byte>.Shared.Return(buffer);
+                                            buffer = newBuffer;
+                                        }
+                                        
+                                        var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
+                                        if (read == 0) break;
+                                        totalRead += read;
+                                    }
+
+                                    var segmentData = new PooledSegmentData(segmentId, buffer, totalRead);
+
+                                    // Store in dictionary temporarily
+                                    fetchedSegments[index] = segmentData;
+                                }
+                                catch
+                                {
+                                    ArrayPool<byte>.Shared.Return(buffer);
+                                    throw;
+                                }
                             }
-                            
-                            await stream.DisposeAsync().ConfigureAwait(false);
+                            finally
+                            {
+                                if (stream != null)
+                                    await stream.DisposeAsync().ConfigureAwait(false);
+                            }
 
-                            var segmentData = new PooledSegmentData(segmentId, buffer, totalRead);
-
-                            // Store in dictionary temporarily
-                            fetchedSegments[index] = segmentData;
-                        }
-                        catch
-                        {
-                            ArrayPool<byte>.Shared.Return(buffer);
-                            throw;
-                        }
-
-                        // Try to write any consecutive segments to the buffer channel in order
+                            // Try to write any consecutive segments to the buffer channel in order
+                        Log.Debug($"[BufferedStream] Worker {workerId} waiting for write lock for segment {index}");
                         await writeLock.WaitAsync(ct).ConfigureAwait(false);
                         try
                         {
                             while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
                             {
+                                Log.Debug($"[BufferedStream] Worker {workerId} writing segment {nextIndexToWrite} to buffer channel: {orderedSegment.SegmentId}");
                                 await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
                                 nextIndexToWrite++;
                             }
@@ -187,13 +193,44 @@ public class BufferedSegmentStream : Stream
                         finally
                         {
                             writeLock.Release();
+                            Log.Debug($"[BufferedStream] Worker {workerId} released write lock");
                         }
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments (operation exceeded 90 seconds)");
+                        throw;
+                    }
+                    catch (TimeoutException ex)
+                    {
+                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments: {ex.Message}");
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error($"[BufferedStream] Worker {workerId} encountered error after processing {segmentCount} segments: {ex.GetType().Name} - {ex.Message}");
+                        throw;
+                    }
+                    finally
+                    {
+                        Log.Debug($"[BufferedStream] Worker {workerId} completed. Total segments processed: {segmentCount}");
                     }
                 })
                 .ToList();
 
             // Wait for all workers to complete
-            await Task.WhenAll(workers).ConfigureAwait(false);
+            Log.Debug($"[BufferedStream] Waiting for {workers.Count} workers to complete...");
+            var workerCompletionTask = Task.WhenAll(workers);
+            var timeoutTask = Task.Delay(TimeSpan.FromMinutes(2), ct);
+            var completedTask = await Task.WhenAny(workerCompletionTask, timeoutTask).ConfigureAwait(false);
+
+            if (completedTask == timeoutTask)
+            {
+                Log.Warning($"[BufferedStream] Workers have not completed after 2 minutes. Still waiting...");
+                await workerCompletionTask.ConfigureAwait(false);
+            }
+            Log.Debug($"[BufferedStream] All {workers.Count} workers completed");
 
             // Ensure all segments were written (shouldn't have any left)
             await writeLock.WaitAsync(ct).ConfigureAwait(false);
@@ -239,10 +276,14 @@ public class BufferedSegmentStream : Stream
                 if (!_bufferChannel.Reader.TryRead(out _currentSegment))
                 {
                     if (!await _bufferChannel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+                    {
                         break; // No more segments
+                    }
 
                     if (!_bufferChannel.Reader.TryRead(out _currentSegment))
+                    {
                         break;
+                    }
                 }
 
                 _currentSegmentPosition = 0;
@@ -271,7 +312,6 @@ public class BufferedSegmentStream : Stream
                 _currentSegment = null;
             }
         }
-
         return totalRead;
     }
 
@@ -293,6 +333,7 @@ public class BufferedSegmentStream : Stream
 
     public override long Seek(long offset, SeekOrigin origin)
     {
+        Log.Debug("[BufferedStream] Seek method called, but seeking is not supported. Throwing NotSupportedException.");
         throw new NotSupportedException("Seeking is not supported.");
     }
 
@@ -303,6 +344,7 @@ public class BufferedSegmentStream : Stream
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
+        Log.Debug("[BufferedStream] Disposing BufferedSegmentStream. Disposing: {Disposing}", disposing);
         if (disposing)
         {
             _cts.Cancel();
@@ -326,6 +368,7 @@ public class BufferedSegmentStream : Stream
     public override async ValueTask DisposeAsync()
     {
         if (_disposed) return;
+        Log.Debug("[BufferedStream] Disposing BufferedSegmentStream asynchronously.");
 
         _cts.Cancel();
         _bufferChannel.Writer.TryComplete();
@@ -373,6 +416,20 @@ public class BufferedSegmentStream : Stream
                 ArrayPool<byte>.Shared.Return(_buffer);
                 _buffer = null;
             }
+        }
+    }
+
+    private static MultiProviderNntpClient? GetMultiProviderClient(INntpClient client)
+    {
+        while (true)
+        {
+            if (client is MultiProviderNntpClient multiProviderClient) return multiProviderClient;
+            if (client is WrappingNntpClient wrappingClient)
+            {
+                client = wrappingClient.InnerClient;
+                continue;
+            }
+            return null;
         }
     }
 }

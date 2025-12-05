@@ -16,6 +16,7 @@ public class WebsocketTopic
     // Eventful topics
     public static readonly WebsocketTopic QueueItemAdded = new("qa", TopicType.Event);
     public static readonly WebsocketTopic QueueItemRemoved = new("qr", TopicType.Event);
+    public static readonly WebsocketTopic QueueItemPriorityChanged = new("qpc", TopicType.Event);
     public static readonly WebsocketTopic HistoryItemAdded = new("ha", TopicType.Event);
     public static readonly WebsocketTopic HistoryItemRemoved = new("hr", TopicType.Event);
 
