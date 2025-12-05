@@ -166,13 +166,14 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
     {
         // Balanced strategy for BufferedStream:
         // 1. Prioritize Pooled providers.
-        // 2. Within Pooled, prefer lower latency.
-        // 3. Prefer available connections.
+        // 2. Within Pooled, prioritize those with available connections.
+        // 3. Then prefer lower latency.
         // 4. Fallback to Backups.
 
         var pooled = providers
             .Where(x => x.ProviderType == ProviderType.Pooled)
-            .OrderBy(x => x.AverageLatency)
+            .OrderByDescending(x => x.AvailableConnections > 0)
+            .ThenBy(x => x.AverageLatency)
             .ThenByDescending(x => x.AvailableConnections)
             .ToList();
 
