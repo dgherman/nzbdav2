@@ -59,6 +59,20 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                     const bw = bandwidth.find(b => b.providerIndex === index);
                     const conns = connections[index] || [];
                     
+                    // Group connections by type and details
+                    const groupedConns: { usageType: number; details: string | null; count: number }[] = [];
+                    const connMap = new Map<string, number>();
+
+                    for (const c of conns) {
+                        const key = `${c.usageType}|${c.details || ""}`;
+                        if (connMap.has(key)) {
+                            groupedConns[connMap.get(key)!].count++;
+                        } else {
+                            connMap.set(key, groupedConns.length);
+                            groupedConns.push({ ...c, count: 1 });
+                        }
+                    }
+
                     return (
                         <Col key={index}>
                             <Card bg="dark" text="white" className="h-100 border-secondary">
@@ -85,12 +99,15 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                     </Row>
                                     <div>
                                         <div className="text-muted small text-uppercase">Active Operations</div>
-                                        {conns.length === 0 ? (
+                                        {groupedConns.length === 0 ? (
                                             <div className="text-muted fst-italic">Idle</div>
                                         ) : (
                                             <div className="font-mono small mt-1" style={{ maxHeight: "150px", overflowY: "auto" }}>
-                                                {conns.slice(0, 10).map((c, i) => (
+                                                {groupedConns.slice(0, 10).map((c, i) => (
                                                     <div key={i} className="text-truncate d-flex align-items-center gap-2 mb-1" title={c.details || ""}>
+                                                        {c.count > 1 && (
+                                                            <span className="text-warning fw-bold" style={{fontSize: '0.7rem'}}>({c.count})</span>
+                                                        )}
                                                         <Badge bg={getTypeColor(c.usageType)} style={{fontSize: '0.6rem', minWidth: '50px'}}>
                                                             {getTypeLabel(c.usageType)}
                                                         </Badge>
@@ -99,9 +116,9 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                                         </span>
                                                     </div>
                                                 ))}
-                                                {conns.length > 10 && (
+                                                {groupedConns.length > 10 && (
                                                     <div className="text-muted fst-italic text-center small">
-                                                        + {conns.length - 10} more...
+                                                        + {groupedConns.length - 10} more types...
                                                     </div>
                                                 )}
                                             </div>
