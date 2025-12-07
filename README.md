@@ -39,6 +39,7 @@ This fork introduces significant architectural and feature improvements over the
 ### 📊 Advanced UI Dashboard
 *   **Real-Time Monitoring**: Live visualization of bandwidth usage and active connections.
 *   **Granular Connection Insights**: See exactly what each connection is doing (Buffering, Streaming, Repairing) and details about the file being accessed, including its **Usenet age** (e.g., "5d ago").
+*   **Server Identification**: Provider cards now display the specific server host address (e.g., `news.example.com`) instead of generic labels, making it easier to track performance across different backbones.
 *   **Interactive System Logs**: A built-in log console with per-level filtering (Debug, Info, Error) and optimized memory storage (10k records per level) for easier troubleshooting.
 
 ### 🛠️ Modern Tech Stack
@@ -264,4 +265,17 @@ volumes:
 <img width="300" alt="queue and history" src="https://github.com/user-attachments/assets/4f69f8dd-0dba-47b4-b02f-3e83ead293db" />
 <img width="300" alt="dav-explorer" src="https://github.com/user-attachments/assets/54a1d49b-8a8d-4306-bcda-9740bd5c9f52" />
 <img width="300" alt="health-page" src="https://github.com/user-attachments/assets/709b81c2-550b-47d0-ad50-65dc184cd3fa" />
+
+# Changelog
+
+## v0.1.0 (2025-12-06)
+*   **Smart Buffering Engine**: Added `BufferedSegmentStream` for read-ahead buffering and optimized seeking.
+*   **Intelligent Connection Management**: Implemented priority queuing for streaming vs. background tasks and smart load balancing.
+*   **UI Stats Dashboard**:
+    *   Added real-time bandwidth and connection monitoring.
+    *   Added granular connection details including file age (e.g., "5d ago").
+    *   Updated provider cards to display specific server host addresses.
+    *   Added an idle latency check (ping) for inactive servers.
+*   **System Logs**: Enhanced log console with per-level filtering and optimized storage (10k limit per level).
+*   **Tech Stack**: Upgraded backend to .NET 9.0 and frontend to React Router v7.
 

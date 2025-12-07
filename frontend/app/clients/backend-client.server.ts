@@ -388,5 +388,6 @@ export type ProviderBandwidthSnapshot = {
     providerIndex: number,
     totalBytes: number,
     currentSpeed: number,
-    averageLatency: number
+    averageLatency: number,
+    host?: string
 }

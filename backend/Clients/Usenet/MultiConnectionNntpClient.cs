@@ -14,27 +14,75 @@ using Usenet.Yenc;
 
 namespace NzbWebDAV.Clients.Usenet;
 
-public class MultiConnectionNntpClient(
-    ConnectionPool<INntpClient> connectionPool, 
-    ProviderType type, 
-    GlobalOperationLimiter? globalLimiter = null,
-    BandwidthService? bandwidthService = null,
-    int providerIndex = -1) : INntpClient
+public class MultiConnectionNntpClient : INntpClient
 {
-    public ProviderType ProviderType { get; } = type;
+    public ProviderType ProviderType { get; }
     public int LiveConnections => _connectionPool.LiveConnections;
     public int IdleConnections => _connectionPool.IdleConnections;
     public int ActiveConnections => _connectionPool.ActiveConnections;
     public int AvailableConnections => _connectionPool.AvailableConnections;
     public int RemainingSemaphoreSlots => _connectionPool.RemainingSemaphoreSlots;
 
-    private ConnectionPool<INntpClient> _connectionPool = connectionPool;
-    private readonly GlobalOperationLimiter? _globalLimiter = globalLimiter;
-    private readonly BandwidthService? _bandwidthService = bandwidthService;
-    private readonly int _providerIndex = providerIndex;
+    private ConnectionPool<INntpClient> _connectionPool;
+    private readonly GlobalOperationLimiter? _globalLimiter;
+    private readonly BandwidthService? _bandwidthService;
+    private readonly int _providerIndex;
+    private DateTimeOffset _lastActivity = DateTimeOffset.UtcNow;
+    private readonly Timer? _latencyMonitorTimer;
 
     public long AverageLatency => _bandwidthService?.GetAverageLatency(_providerIndex) ?? 0;
     public int ProviderIndex => _providerIndex;
+
+    public MultiConnectionNntpClient(
+        ConnectionPool<INntpClient> connectionPool,
+        ProviderType type,
+        GlobalOperationLimiter? globalLimiter = null,
+        BandwidthService? bandwidthService = null,
+        int providerIndex = -1)
+    {
+        _connectionPool = connectionPool;
+        ProviderType = type;
+        _globalLimiter = globalLimiter;
+        _bandwidthService = bandwidthService;
+        _providerIndex = providerIndex;
+
+        if (_providerIndex >= 0 && _bandwidthService != null && type != ProviderType.Disabled)
+        {
+            _latencyMonitorTimer = new Timer(CheckLatency, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+        }
+    }
+
+    private void CheckLatency(object? state)
+    {
+        if (DateTimeOffset.UtcNow - _lastActivity <= TimeSpan.FromSeconds(30)) return;
+        
+        try
+        {
+            // We can't easily wait for this in a void timer callback, but we can fire and forget
+            // However, we want to ensure we don't pile up checks if they are slow.
+            // Since DateAsync uses connection pool, it will just wait/timeout if busy.
+            // We use a separate async void wrapper or Task.Run to handle the async nature.
+            Task.Run(async () =>
+            {
+                try
+                {
+                    // Use a short timeout for the ping
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                    // Set context to Unknown so it doesn't look like a real user request, 
+                    // or maybe "HealthCheck"? Let's stick to default/unknown for now or just minimal impact.
+                    await DateAsync(cts.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Debug(ex, "[MultiConnectionNntpClient] Latency check (ping) failed for provider {ProviderIndex}", _providerIndex);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Error(ex, "[MultiConnectionNntpClient] Error initiating latency check");
+        }
+    }
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
@@ -222,6 +270,7 @@ public class MultiConnectionNntpClient(
         }
         finally
         {
+            _lastActivity = DateTimeOffset.UtcNow;
             timeoutContextScope?.Dispose(); // Dispose the scoped context if it was created
             // If we failed to create the stream (success == false), we must cleanup here.
             if (!success)
@@ -331,6 +380,7 @@ public class MultiConnectionNntpClient(
         }
         finally
         {
+            _lastActivity = DateTimeOffset.UtcNow;
             timeoutContextScope?.Dispose(); // Dispose the scoped context if it was created
             // Release global permit
             globalPermit?.Dispose();
@@ -346,6 +396,7 @@ public class MultiConnectionNntpClient(
 
     public void Dispose()
     {
+        _latencyMonitorTimer?.Dispose();
         _connectionPool.Dispose();
         GC.SuppressFinalize(this);
     }

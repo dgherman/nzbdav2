@@ -109,10 +109,16 @@ public class BandwidthService
 
     public List<ProviderBandwidthSnapshot> GetBandwidthStats()
     {
+        var config = _configManager.GetUsenetProviderConfig();
         var snapshots = new List<ProviderBandwidthSnapshot>();
         foreach (var (index, stats) in _providerStats)
         {
-            snapshots.Add(stats.GetSnapshot(index));
+            var snapshot = stats.GetSnapshot(index);
+            if (index >= 0 && index < config.Providers.Count)
+            {
+                snapshot.Host = config.Providers[index].Host;
+            }
+            snapshots.Add(snapshot);
         }
         return snapshots;
     }
@@ -234,4 +240,5 @@ public class ProviderBandwidthSnapshot
     public long TotalBytes { get; set; }
     public long CurrentSpeed { get; set; }
     public long AverageLatency { get; set; }
+    public string? Host { get; set; }
 }

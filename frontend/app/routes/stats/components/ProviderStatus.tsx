@@ -77,7 +77,9 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                         <Col key={index}>
                             <Card bg="dark" text="white" className="h-100 border-secondary">
                                 <Card.Header className="d-flex justify-content-between align-items-center">
-                                    <span className="fw-bold">Provider {index + 1}</span>
+                                    <span className="fw-bold text-truncate" title={bw?.host || `Provider ${index + 1}`} style={{maxWidth: '70%'}}>
+                                        {bw?.host || `Provider ${index + 1}`}
+                                    </span>
                                     <Badge bg={conns.length > 0 ? "success" : "secondary"}>
                                         {conns.length} Conns
                                     </Badge>
