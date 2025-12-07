@@ -265,6 +265,26 @@ class BackendClient {
         if (!response.ok) throw new Error(`Failed to get missing articles: ${(await response.json()).error}`);
         return response.json();
     }
+
+    public async clearMissingArticles(): Promise<void> {
+        const url = process.env.BACKEND_URL + `/api/stats/missing-articles`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, {
+            method: "DELETE",
+            headers: { "x-api-key": apiKey }
+        });
+        if (!response.ok) throw new Error(`Failed to clear missing articles: ${(await response.json()).error}`);
+    }
+
+    public async clearDeletedFiles(): Promise<void> {
+        const url = process.env.BACKEND_URL + `/api/stats/deleted-files`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, {
+            method: "DELETE",
+            headers: { "x-api-key": apiKey }
+        });
+        if (!response.ok) throw new Error(`Failed to clear deleted files: ${(await response.json()).error}`);
+    }
 }
 
 export const backendClient = new BackendClient();

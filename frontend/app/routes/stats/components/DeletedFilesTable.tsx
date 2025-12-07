@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Table, Pagination } from "react-bootstrap";
+import { Table, Pagination, Button } from "react-bootstrap";
+import { Form } from "react-router";
 import type { HealthCheckResult } from "~/clients/backend-client.server";
 
 interface Props {
@@ -10,14 +11,29 @@ export function DeletedFilesTable({ files }: Props) {
     const [page, setPage] = useState(1);
     const pageSize = 10;
     const totalPages = Math.ceil(files.length / pageSize);
-    
+
     const paginatedFiles = files.slice((page - 1) * pageSize, page * pageSize);
 
     return (
         <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
             <div className="d-flex justify-content-between align-items-center mb-3">
-                <h4 className="m-0">Deleted Files</h4>
-                <small className="text-muted">Total: {files.length}</small>
+                <div className="d-flex align-items-center gap-3">
+                    <h4 className="m-0">Deleted Files</h4>
+                    <small className="text-muted">Total: {files.length}</small>
+                </div>
+                {files.length > 0 && (
+                    <Form method="post">
+                        <input type="hidden" name="action" value="clear-deleted-files" />
+                        <Button
+                            type="submit"
+                            variant="outline-danger"
+                            size="sm"
+                            title="Clear all deleted files from the log"
+                        >
+                            Clear Log
+                        </Button>
+                    </Form>
+                )}
             </div>
             
             <div className="table-responsive mb-3">

@@ -35,6 +35,7 @@ public class MultiConnectionNntpClient : INntpClient
 
     public long AverageLatency => _bandwidthService?.GetAverageLatency(_providerIndex) ?? 0;
     public int ProviderIndex => _providerIndex;
+    public string Host => _host;
 
     public MultiConnectionNntpClient(
         ConnectionPool<INntpClient> connectionPool,
@@ -210,8 +211,8 @@ public class MultiConnectionNntpClient : INntpClient
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
                 {
-                    Serilog.Log.Warning("[MultiConnectionNntpClient] Stream operation timed out after 90 seconds");
-                    throw new TimeoutException("GetSegmentStream operation timed out after 90 seconds");
+                    Serilog.Log.Warning("[MultiConnectionNntpClient] Stream operation timed out after 90 seconds on provider {Host}", _host);
+                    throw new TimeoutException($"GetSegmentStream operation timed out after 90 seconds on provider {_host}");
                 }
 
                 // Record latency metrics
@@ -340,8 +341,8 @@ public class MultiConnectionNntpClient : INntpClient
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
                 {
-                    Serilog.Log.Warning("[MultiConnectionNntpClient] RunWithConnection: Operation timed out after 90 seconds");
-                    throw new TimeoutException("NNTP operation timed out after 90 seconds");
+                    Serilog.Log.Warning("[MultiConnectionNntpClient] RunWithConnection: Operation timed out after 90 seconds on provider {Host}", _host);
+                    throw new TimeoutException($"NNTP operation timed out after 90 seconds on provider {_host}");
                 }
 
                 // Record latency metrics

@@ -23,8 +23,23 @@ export async function loader({ request }: Route.LoaderArgs) {
         backendClient.getDeletedFiles(50),
         backendClient.getMissingArticles(50)
     ]);
-    
+
     return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, range };
+}
+
+export async function action({ request }: Route.ActionArgs) {
+    if (!await isAuthenticated(request)) throw new Response("Unauthorized", { status: 401 });
+
+    const formData = await request.formData();
+    const actionType = formData.get("action");
+
+    if (actionType === "clear-missing-articles") {
+        await backendClient.clearMissingArticles();
+    } else if (actionType === "clear-deleted-files") {
+        await backendClient.clearDeletedFiles();
+    }
+
+    return { success: true };
 }
 
 export default function StatsPage({ loaderData }: Route.ComponentProps) {

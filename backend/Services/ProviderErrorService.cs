@@ -64,7 +64,7 @@ public class ProviderErrorService
         {
             using var scope = _scopeFactory.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
-            
+
             return dbContext.MissingArticleEvents
                 .AsNoTracking()
                 .OrderByDescending(x => x.Timestamp)
@@ -75,6 +75,23 @@ public class ProviderErrorService
         {
             Log.Error(ex, "Failed to retrieve missing article events");
             return new List<MissingArticleEvent>();
+        }
+    }
+
+    public async Task ClearAllErrors()
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+
+            await dbContext.MissingArticleEvents.ExecuteDeleteAsync().ConfigureAwait(false);
+            Log.Information("Cleared all missing article events from database");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "Failed to clear missing article events");
+            throw;
         }
     }
 }

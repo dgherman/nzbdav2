@@ -198,18 +198,18 @@ public class MultiProviderNntpClient : INntpClient
 
     private void RecordMissingArticle(int providerIndex, string segmentId, CancellationToken ct)
     {
-        if (_providerErrorService == null) return;
-        
         var context = ct.GetContext<ConnectionUsageContext>();
-        var filename = context.Details ?? "Unknown";
-        
-        // Try to extract just the filename if details has extra info like (5d ago)
-        if (filename.Contains(" ("))
-        {
-            filename = filename.Substring(0, filename.LastIndexOf(" ("));
-        }
+        var filename = context.DetailsObject?.Text ?? context.Details ?? "Unknown";
 
-        _providerErrorService.RecordError(providerIndex, filename, segmentId, "Article not found");
+        var providerHost = providerIndex >= 0 && providerIndex < Providers.Count
+            ? Providers[providerIndex].Host
+            : $"Provider {providerIndex}";
+
+        Serilog.Log.Information("[MissingArticle] Article not found on provider {Provider}: segment {SegmentId}, file: {Filename}",
+            providerHost, segmentId ?? "(empty)", filename);
+
+        if (_providerErrorService == null) return;
+        _providerErrorService.RecordError(providerIndex, filename, segmentId ?? "", "Article not found");
     }
 
     private IEnumerable<MultiConnectionNntpClient> GetOrderedProviders(MultiConnectionNntpClient? preferredProvider)

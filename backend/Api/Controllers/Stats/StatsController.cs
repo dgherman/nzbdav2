@@ -129,4 +129,27 @@ public class StatsController(
             return Task.FromResult<IActionResult>(Ok(errors));
         });
     }
+
+    [HttpDelete("missing-articles")]
+    public Task<IActionResult> ClearMissingArticles()
+    {
+        return ExecuteSafely(async () =>
+        {
+            await providerErrorService.ClearAllErrors();
+            return Ok(new { message = "Missing articles log cleared successfully" });
+        });
+    }
+
+    [HttpDelete("deleted-files")]
+    public Task<IActionResult> ClearDeletedFiles()
+    {
+        return ExecuteSafely(async () =>
+        {
+            await dbContext.HealthCheckResults
+                .Where(x => x.RepairStatus == HealthCheckResult.RepairAction.Deleted)
+                .ExecuteDeleteAsync();
+
+            return Ok(new { message = "Deleted files log cleared successfully" });
+        });
+    }
 }

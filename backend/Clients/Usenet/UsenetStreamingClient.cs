@@ -227,7 +227,7 @@ public class UsenetStreamingClient
                 _providerErrorService
             ))
             .ToList();
-        return new MultiProviderNntpClient(providerClients);
+        return new MultiProviderNntpClient(providerClients, _providerErrorService);
     }
 
     private MultiConnectionNntpClient CreateProviderClient

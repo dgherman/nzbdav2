@@ -200,7 +200,9 @@ public class HealthCheckService
             // perform health check
             Log.Debug($"[HealthCheck] Verifying segments for {davItem.Name}...");
             var progress = progressHook.ToPercentage(segments.Count);
-            await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, ct).ConfigureAwait(false);
+            using var healthCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Name }));
+            await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token).ConfigureAwait(false);
             Log.Debug($"[HealthCheck] Segments verified for {davItem.Name}. Updating database...");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");

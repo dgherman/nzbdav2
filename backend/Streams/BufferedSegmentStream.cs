@@ -209,14 +209,18 @@ public class BufferedSegmentStream : Stream
                         }
                         }
                     }
-                    catch (OperationCanceledException)
+                    catch (OperationCanceledException ex)
                     {
-                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments (operation exceeded 90 seconds)");
+                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments (operation exceeded 90 seconds, operation: GetSegmentStream): {ex.Message}");
                         throw;
                     }
                     catch (TimeoutException ex)
                     {
-                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments: {ex.Message}");
+                        // Extract provider info from exception message (format: "... on provider hostname")
+                        var providerInfo = ex.Message.Contains(" on provider ")
+                            ? ex.Message.Substring(ex.Message.LastIndexOf(" on provider ") + 13)
+                            : "unknown";
+                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments (operation: GetSegmentStream, provider: {providerInfo})");
                         throw;
                     }
                     catch (Exception ex)
