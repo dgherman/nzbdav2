@@ -140,10 +140,12 @@ public class NzbFileStream(
         if (shouldUseBufferedStreaming && concurrentConnections >= 3 && fileSegmentIds.Length > concurrentConnections)
         {
             // Set BufferedStreaming context - this will be the ONLY ConnectionUsageContext
+            var detailsObj = new ConnectionUsageDetails { Text = _usageContext.Details ?? "" };
             var bufferedContext = new ConnectionUsageContext(
                 ConnectionUsageType.BufferedStreaming,
-                _usageContext.Details
+                detailsObj
             );
+            
             var remainingSegments = fileSegmentIds[firstSegmentIndex..];
             Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}",
                 remainingSegments.Length, fileSize - firstSegmentIndex * (fileSize / fileSegmentIds.Length), concurrentConnections, bufferSize);

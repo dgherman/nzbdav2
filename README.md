@@ -24,6 +24,27 @@ https://github.com/user-attachments/assets/be3e59bc-99df-440d-8144-43b030a4eaa4
 * 🧩 **SABnzbd-Compatible API** - *Use NzbDav as a drop-in replacement for sabnzbd.*
 * 🙌 **Sonarr/Radarr Integration** - *Configure it once, and leave it unattended.*
 
+# Fork Enhancements
+
+This fork introduces significant architectural and feature improvements over the original implementation:
+
+### 🚀 Smart Buffering Engine
+*   **Read-Ahead Buffering**: Implements a custom `BufferedSegmentStream` that pre-fetches segments into memory, ensuring smooth playback and eliminating stutter during high-bitrate streams.
+*   **Optimized Seeking**: Intelligent segment seeking and stream management for faster seek times.
+
+### 🧠 Intelligent Connection Management
+*   **Priority Queuing**: Dynamically prioritizes active streaming connections over background maintenance tasks (like health checks and queue repairs) to prevent playback interruptions.
+*   **Load Balancing**: Smart distribution of requests across available Usenet providers and connections.
+
+### 📊 Advanced UI Dashboard
+*   **Real-Time Monitoring**: Live visualization of bandwidth usage and active connections.
+*   **Granular Connection Insights**: See exactly what each connection is doing (Buffering, Streaming, Repairing) and details about the file being accessed, including its **Usenet age** (e.g., "5d ago").
+*   **Interactive System Logs**: A built-in log console with per-level filtering (Debug, Info, Error) and optimized memory storage (10k records per level) for easier troubleshooting.
+
+### 🛠️ Modern Tech Stack
+*   **Backend**: Upgrade to **.NET 9.0** for improved performance and resource efficiency.
+*   **Frontend**: Rebuilt using **React Router v7** with Server-Side Rendering (SSR), React 19, and Bootstrap 5/Tailwind for a snappy, modern user experience.
+
 
 # Getting Started
 
@@ -32,7 +53,14 @@ The easiest way to get started is by using the official Docker image.
 To try it out, run the following command to pull and run the image with port `3000` exposed:
 
 ```bash
-docker run --rm -it -p 3000:3000 nzbdav/nzbdav:alpha
+nzbdav/nzbdav:alpha
+
+If you are developing or prefer to build the image locally:
+
+```bash
+docker build -t local/nzbdav:3 .
+```
+
 ```
 
 And if you would like to persist saved settings, attach a volume at `/config`

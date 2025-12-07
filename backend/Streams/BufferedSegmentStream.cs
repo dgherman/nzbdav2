@@ -18,6 +18,7 @@ public class BufferedSegmentStream : Stream
     private readonly CancellationTokenSource _cts = new();
     private readonly CancellationTokenSource _linkedCts;
     private readonly IDisposable[] _contextScopes;
+    private readonly ConnectionUsageContext? _usageContext;
 
     private PooledSegmentData? _currentSegment;
     private int _currentSegmentPosition;
@@ -33,6 +34,7 @@ public class BufferedSegmentStream : Stream
         CancellationToken cancellationToken,
         ConnectionUsageContext? usageContext = null)
     {
+        _usageContext = usageContext;
         Log.Debug("[BufferedStream] Initializing BufferedSegmentStream for {SegmentCount} segments, file size: {FileSize}. Concurrent connections: {ConcurrentConnections}, Buffer segment count: {BufferSegmentCount}", 
             segmentIds.Length, fileSize, concurrentConnections, bufferSegmentCount);
         // Ensure buffer is large enough to prevent thrashing with high concurrency
@@ -127,14 +129,24 @@ public class BufferedSegmentStream : Stream
                             Stream? stream = null;
                             try
                             {
+                                var fetchHeaders = index == 0;
                                 var multiClient = GetMultiProviderClient(client);
                                 if (multiClient != null)
                                 {
-                                    stream = await multiClient.GetBalancedSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
+                                    stream = await multiClient.GetBalancedSegmentStreamAsync(segmentId, fetchHeaders, ct).ConfigureAwait(false);
                                 }
                                 else
                                 {
-                                    stream = await client.GetSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
+                                    stream = await client.GetSegmentStreamAsync(segmentId, fetchHeaders, ct).ConfigureAwait(false);
+                                }
+                                
+                                if (fetchHeaders && stream is YencHeaderStream yencStream && yencStream.ArticleHeaders != null)
+                                {
+                                    FileDate = yencStream.ArticleHeaders.Date;
+                                    if (_usageContext?.DetailsObject != null)
+                                    {
+                                        _usageContext.Value.DetailsObject.FileDate = FileDate;
+                                    }
                                 }
                                 
                                 Log.Debug($"[BufferedStream] Worker {workerId} obtained stream for segment {index}: {segmentId}");
@@ -324,6 +336,11 @@ public class BufferedSegmentStream : Stream
     public override bool CanSeek => false;
     public override bool CanWrite => false;
     public override long Length { get; }
+    
+    /// <summary>
+    /// The date of the file on the Usenet server, populated when the first segment is fetched.
+    /// </summary>
+    public DateTimeOffset? FileDate { get; private set; }
 
     public override long Position
     {
