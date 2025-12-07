@@ -284,3 +284,9 @@ volumes:
 *   **Connection Status Badges**: Added visual indicators ("Backup", "Secondary") to active connections to show when a provider is being used as a fallback or for load-balancing retries.
 *   **Persistent Logging**: Missing article events are now saved to the database to survive restarts.
 
+## v0.1.2 (2025-12-07)
+*   **Latency Measurement Refinement**: Switched latency calculation to an Exponential Moving Average (EMA) for smoother, more stable readings, especially during periods of sparse activity. Latency is now recorded for lightweight NNTP operations only and includes periodic ping checks for active providers to ensure continuous measurement.
+*   **Improved Timeout Logging**: Timeout messages in the logs now include the specific provider's server address, instead of just its index, for easier identification and debugging.
+*   **Connection Status Accuracy**: Corrected logic for "Backup" and "Secondary" connection badges to accurately reflect provider usage during fallback and load-balancing scenarios.
+*   **Missing Article Events Persistence**: Ensured missing article events are persisted to the database, preventing loss of data on application restart.
+
