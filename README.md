@@ -279,3 +279,8 @@ volumes:
 *   **System Logs**: Enhanced log console with per-level filtering and optimized storage (10k limit per level).
 *   **Tech Stack**: Upgraded backend to .NET 9.0 and frontend to React Router v7.
 
+## v0.1.1 (2025-12-07)
+*   **Missing Articles Log**: Added a persistent log and UI table to track missing article events, useful for diagnosing provider retention issues.
+*   **Connection Status Badges**: Added visual indicators ("Backup", "Secondary") to active connections to show when a provider is being used as a fallback or for load-balancing retries.
+*   **Persistent Logging**: Missing article events are now saved to the database to survive restarts.
+
