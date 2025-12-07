@@ -290,3 +290,11 @@ volumes:
 *   **Connection Status Accuracy**: Corrected logic for "Backup" and "Secondary" connection badges to accurately reflect provider usage during fallback and load-balancing scenarios.
 *   **Missing Article Events Persistence**: Ensured missing article events are persisted to the database, preventing loss of data on application restart.
 
+## v0.1.3 (2025-12-08)
+*   **Missing Articles Logging Fix**: Fixed critical bug where missing articles were not being logged to the database due to `ProviderErrorService` not being passed to `MultiProviderNntpClient`.
+*   **Enhanced Missing Articles Detection**: Added Info level logging when missing articles are detected, including provider hostname, segment ID, and filename for better diagnostics.
+*   **Improved Timeout Diagnostics**: Timeout logs now correctly show provider server addresses by embedding the information in exception messages, resolving issues with context disposal during exception unwinding.
+*   **Expandable Missing Articles Table**: Reimplemented the Missing Articles UI table with grouping by provider and filename, featuring expandable tree view to show individual segment details and segment count badges.
+*   **Log Management**: Added "Clear Log" buttons to both Missing Articles and Deleted Files tables, with backend DELETE endpoints (`/api/stats/missing-articles` and `/api/stats/deleted-files`) for easy log maintenance.
+*   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
+
