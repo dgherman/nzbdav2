@@ -4,6 +4,7 @@ using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
+using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
 using Serilog;
 using Usenet.Nntp.Responses;
@@ -12,9 +13,16 @@ using Usenet.Yenc;
 
 namespace NzbWebDAV.Clients.Usenet;
 
-public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) : INntpClient
+public class MultiProviderNntpClient : INntpClient
 {
-    public IReadOnlyList<MultiConnectionNntpClient> Providers => providers;
+    public IReadOnlyList<MultiConnectionNntpClient> Providers { get; }
+    private readonly ProviderErrorService? _providerErrorService;
+
+    public MultiProviderNntpClient(List<MultiConnectionNntpClient> providers, ProviderErrorService? providerErrorService = null)
+    {
+        Providers = providers;
+        _providerErrorService = providerErrorService;
+    }
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
@@ -31,7 +39,8 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         return RunFromPoolWithBackup(
             connection => connection.StatAsync(segmentId, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
-            cancellationToken);
+            cancellationToken,
+            segmentId);
     }
 
     public Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken)
@@ -47,7 +56,8 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         return RunFromPoolWithBackup(
             connection => connection.GetArticleHeadersAsync(segmentId, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
-            cancellationToken);
+            cancellationToken,
+            segmentId);
     }
 
     public Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders,
@@ -56,7 +66,8 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         return RunFromPoolWithBackup(
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
-            cancellationToken);
+            cancellationToken,
+            segmentId);
     }
 
     public Task<YencHeaderStream> GetBalancedSegmentStreamAsync(string segmentId, bool includeHeaders,
@@ -65,7 +76,8 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         return RunFromPoolWithBackup(
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
             GetBalancedProviders(),
-            cancellationToken);
+            cancellationToken,
+            segmentId);
     }
 
     public Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
@@ -73,7 +85,8 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         return RunFromPoolWithBackup(
             connection => connection.GetSegmentYencHeaderAsync(segmentId, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
-            cancellationToken);
+            cancellationToken,
+            segmentId);
     }
 
     public Task<long> GetFileSizeAsync(NzbFile file, CancellationToken cancellationToken)
@@ -109,16 +122,40 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
     (
         Func<INntpClient, Task<T>> task,
         IEnumerable<MultiConnectionNntpClient> orderedProviders,
-        CancellationToken cancellationToken
+        CancellationToken cancellationToken,
+        string? segmentId = null
     )
     {
         ExceptionDispatchInfo? lastException = null;
         var lastSuccessfulProviderContext = cancellationToken.GetContext<LastSuccessfulProviderContext>();
         var lastSuccessfulProvider = lastSuccessfulProviderContext?.Provider;
         T? result = default;
+        int attempts = 0;
+
         foreach (var provider in orderedProviders)
         {
             cancellationToken.ThrowIfCancellationRequested();
+
+            var ctx = cancellationToken.GetContext<ConnectionUsageContext>();
+            if (ctx.DetailsObject != null)
+            {
+                if (provider.ProviderType != ProviderType.Pooled)
+                {
+                    ctx.DetailsObject.IsBackup = true;
+                    ctx.DetailsObject.IsSecondary = false;
+                }
+                else if (attempts > 0)
+                {
+                    ctx.DetailsObject.IsSecondary = true;
+                    ctx.DetailsObject.IsBackup = false;
+                }
+                else
+                {
+                    ctx.DetailsObject.IsSecondary = false;
+                    ctx.DetailsObject.IsBackup = false;
+                }
+            }
+            attempts++;
 
             if (lastException is not null && lastException.SourceException is not UsenetArticleNotFoundException)
             {
@@ -130,11 +167,21 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
             {
                 result = await task.Invoke(provider).ConfigureAwait(false);
                 if (result is NntpStatResponse r && r.ResponseType != NntpStatResponseType.ArticleExists)
+                {
+                    // Record missing article
+                    RecordMissingArticle(provider.ProviderIndex, segmentId ?? r.MessageId.Value, cancellationToken);
                     throw new UsenetArticleNotFoundException(r.MessageId.Value);
+                }
 
                 if (lastSuccessfulProviderContext is not null && lastSuccessfulProvider != provider)
                     lastSuccessfulProviderContext.Provider = provider;
                 return result;
+            }
+            catch (UsenetArticleNotFoundException e)
+            {
+                // Explicitly caught to record it
+                RecordMissingArticle(provider.ProviderIndex, e.SegmentId, cancellationToken);
+                lastException = ExceptionDispatchInfo.Capture(e);
             }
             catch (Exception e) when (e is not OperationCanceledException and not TaskCanceledException)
             {
@@ -149,9 +196,25 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         throw new Exception("There are no usenet providers configured.");
     }
 
+    private void RecordMissingArticle(int providerIndex, string segmentId, CancellationToken ct)
+    {
+        if (_providerErrorService == null) return;
+        
+        var context = ct.GetContext<ConnectionUsageContext>();
+        var filename = context.Details ?? "Unknown";
+        
+        // Try to extract just the filename if details has extra info like (5d ago)
+        if (filename.Contains(" ("))
+        {
+            filename = filename.Substring(0, filename.LastIndexOf(" ("));
+        }
+
+        _providerErrorService.RecordError(providerIndex, filename, segmentId, "Article not found");
+    }
+
     private IEnumerable<MultiConnectionNntpClient> GetOrderedProviders(MultiConnectionNntpClient? preferredProvider)
     {
-        return providers
+        return Providers
             .Where(x => x.ProviderType != ProviderType.Disabled)
             .OrderBy(x => x.ProviderType)
             .ThenByDescending(x => x.IdleConnections)
@@ -170,14 +233,14 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
         // 3. Then prefer lower latency.
         // 4. Fallback to Backups.
 
-        var pooled = providers
+        var pooled = Providers
             .Where(x => x.ProviderType == ProviderType.Pooled)
             .OrderByDescending(x => x.AvailableConnections > 0)
             .ThenBy(x => x.AverageLatency)
             .ThenByDescending(x => x.AvailableConnections)
             .ToList();
 
-        var others = providers
+        var others = Providers
             .Where(x => x.ProviderType != ProviderType.Pooled && x.ProviderType != ProviderType.Disabled)
             .OrderBy(x => x.ProviderType) // Backup vs BackupOnly
             .ThenByDescending(x => x.IdleConnections);
@@ -187,7 +250,7 @@ public class MultiProviderNntpClient(List<MultiConnectionNntpClient> providers) 
 
     public void Dispose()
     {
-        foreach (var provider in providers)
+        foreach (var provider in Providers)
             provider.Dispose();
         GC.SuppressFinalize(this);
     }

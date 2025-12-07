@@ -6,6 +6,7 @@ import { backendClient } from "~/clients/backend-client.server";
 import { BandwidthTable } from "./components/BandwidthTable";
 import { ProviderStatus } from "./components/ProviderStatus";
 import { DeletedFilesTable } from "./components/DeletedFilesTable";
+import { MissingArticlesTable } from "./components/MissingArticlesTable";
 import { LogsConsole } from "./components/LogsConsole";
 import { isAuthenticated } from "~/auth/authentication.server";
 
@@ -15,18 +16,19 @@ export async function loader({ request }: Route.LoaderArgs) {
     const url = new URL(request.url);
     const range = url.searchParams.get("range") || "1h";
 
-    const [connections, bandwidthHistory, currentBandwidth, deletedFiles] = await Promise.all([
+    const [connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles] = await Promise.all([
         backendClient.getActiveConnections(),
         backendClient.getBandwidthHistory(range),
         backendClient.getCurrentBandwidth(),
-        backendClient.getDeletedFiles(50)
+        backendClient.getDeletedFiles(50),
+        backendClient.getMissingArticles(50)
     ]);
     
-    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, range };
+    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, range };
 }
 
 export default function StatsPage({ loaderData }: Route.ComponentProps) {
-    const { connections, bandwidthHistory, currentBandwidth, deletedFiles, range } = loaderData;
+    const { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, range } = loaderData;
     const [searchParams, setSearchParams] = useSearchParams();
     const revalidator = useRevalidator();
     const [key, setKey] = useState('stats');
@@ -80,10 +82,15 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
 
                     <div className="row">
                         <div className="col-lg-6">
-                            <BandwidthTable data={bandwidthHistory} range={range} />
+                            <BandwidthTable data={bandwidthHistory} range={range} providers={currentBandwidth} />
                         </div>
                         <div className="col-lg-6">
                             <DeletedFilesTable files={deletedFiles} />
+                        </div>
+                    </div>
+                    <div className="row">
+                        <div className="col-12">
+                            <MissingArticlesTable events={missingArticles} providers={currentBandwidth} />
                         </div>
                     </div>
                 </Tab>

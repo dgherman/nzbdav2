@@ -60,11 +60,11 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                     const conns = connections[index] || [];
                     
                     // Group connections by type and details
-                    const groupedConns: { usageType: number; details: string | null; count: number }[] = [];
+                    const groupedConns: { usageType: number; details: string | null; isBackup?: boolean; isSecondary?: boolean; count: number }[] = [];
                     const connMap = new Map<string, number>();
 
                     for (const c of conns) {
-                        const key = `${c.usageType}|${c.details || ""}`;
+                        const key = `${c.usageType}|${c.details || ""}|${c.isBackup}|${c.isSecondary}`;
                         if (connMap.has(key)) {
                             groupedConns[connMap.get(key)!].count++;
                         } else {
@@ -106,14 +106,24 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                         ) : (
                                             <div className="font-mono small mt-1" style={{ maxHeight: "150px", overflowY: "auto" }}>
                                                 {groupedConns.slice(0, 10).map((c, i) => (
-                                                    <div key={i} className="text-truncate d-flex align-items-center gap-2 mb-1" title={c.details || ""}>
+                                                    <div key={i} className="d-flex align-items-start gap-2 mb-1" title={c.details || ""}>
                                                         {c.count > 1 && (
-                                                            <span className="text-warning fw-bold" style={{fontSize: '0.7rem'}}>({c.count})</span>
+                                                            <span className="text-warning fw-bold flex-shrink-0" style={{fontSize: '0.7rem', marginTop: '2px'}}>({c.count})</span>
                                                         )}
-                                                        <Badge bg={getTypeColor(c.usageType)} style={{fontSize: '0.6rem', minWidth: '50px'}}>
+                                                        <Badge bg={getTypeColor(c.usageType)} className="flex-shrink-0" style={{fontSize: '0.6rem', minWidth: '50px', marginTop: '2px'}}>
                                                             {getTypeLabel(c.usageType)}
                                                         </Badge>
-                                                        <span style={{fontSize: '0.8rem'}}>
+                                                        {c.isBackup && (
+                                                            <Badge bg="danger" className="flex-shrink-0" style={{fontSize: '0.6rem', marginTop: '2px'}}>
+                                                                Backup
+                                                            </Badge>
+                                                        )}
+                                                        {c.isSecondary && (
+                                                            <Badge bg="warning" text="dark" className="flex-shrink-0" style={{fontSize: '0.6rem', marginTop: '2px'}}>
+                                                                Secondary
+                                                            </Badge>
+                                                        )}
+                                                        <span style={{fontSize: '0.8rem', wordBreak: 'break-word'}}>
                                                             {c.details || "No details"}
                                                         </span>
                                                     </div>

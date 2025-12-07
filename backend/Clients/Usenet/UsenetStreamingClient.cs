@@ -19,17 +19,20 @@ public class UsenetStreamingClient
     private readonly WebsocketManager _websocketManager;
     private readonly ConfigManager _configManager;
     private readonly BandwidthService _bandwidthService;
+    private readonly ProviderErrorService _providerErrorService;
     private ConnectionPoolStats? _connectionPoolStats;
 
     public UsenetStreamingClient(
         ConfigManager configManager, 
         WebsocketManager websocketManager,
-        BandwidthService bandwidthService)
+        BandwidthService bandwidthService,
+        ProviderErrorService providerErrorService)
     {
         // initialize private members
         _websocketManager = websocketManager;
         _configManager = configManager;
         _bandwidthService = bandwidthService;
+        _providerErrorService = providerErrorService;
 
         // get connection settings from config-manager
         var providerConfig = configManager.GetUsenetProviderConfig();
@@ -220,7 +223,8 @@ public class UsenetStreamingClient
                 connectionPoolStats,
                 index,
                 pooledSemaphore,
-                globalLimiter
+                globalLimiter,
+                _providerErrorService
             ))
             .ToList();
         return new MultiProviderNntpClient(providerClients);
@@ -232,7 +236,8 @@ public class UsenetStreamingClient
         ConnectionPoolStats connectionPoolStats,
         int providerIndex,
         ExtendedSemaphoreSlim pooledSemaphore,
-        GlobalOperationLimiter globalLimiter
+        GlobalOperationLimiter globalLimiter,
+        ProviderErrorService providerErrorService
     )
     {
         var connectionPool = CreateNewConnectionPool(
@@ -243,7 +248,7 @@ public class UsenetStreamingClient
             connectionPoolStats: connectionPoolStats,
             providerIndex: providerIndex
         );
-        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter, _bandwidthService, providerIndex);
+        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter, _bandwidthService, providerErrorService, providerIndex);
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection

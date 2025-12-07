@@ -280,7 +280,8 @@ public class HealthCheckService
     {
         try
         {
-            var failureReason = "File had missing articles" + (failureDetails != null ? $" ({failureDetails})" : "") + ".";
+            var providerCount = _configManager.GetUsenetProviderConfig().Providers.Count;
+            var failureReason = $"File had missing articles - Checked all {providerCount} providers" + (failureDetails != null ? $" ({failureDetails})" : "") + ".";
 
             // if the file extension has been marked as ignored,
             // then don't bother trying to repair it. We can simply delete it.

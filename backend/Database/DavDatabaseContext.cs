@@ -32,10 +32,26 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<HealthCheckStat> HealthCheckStats => Set<HealthCheckStat>();
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
     public DbSet<BandwidthSample> BandwidthSamples => Set<BandwidthSample>();
+    public DbSet<MissingArticleEvent> MissingArticleEvents => Set<MissingArticleEvent>();
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
     {
+        // MissingArticleEvent
+        b.Entity<MissingArticleEvent>(e =>
+        {
+            e.ToTable("MissingArticleEvents");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedOnAdd();
+            e.Property(i => i.Timestamp)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+            e.HasIndex(i => i.Timestamp);
+        });
+
         // BandwidthSample
         b.Entity<BandwidthSample>(e =>
         {

@@ -4,6 +4,8 @@ public class ConnectionUsageDetails
 {
     public string Text { get; init; } = "";
     public DateTimeOffset? FileDate { get; set; }
+    public bool IsBackup { get; set; }
+    public bool IsSecondary { get; set; }
 
     public override string ToString()
     {
@@ -27,6 +29,8 @@ public readonly struct ConnectionUsageContext
     private readonly string? _detailsStr;
 
     public string? Details => _detailsObj?.ToString() ?? _detailsStr;
+    public bool IsBackup => _detailsObj?.IsBackup ?? false;
+    public bool IsSecondary => _detailsObj?.IsSecondary ?? false;
     
     public ConnectionUsageDetails? DetailsObject => _detailsObj;
 

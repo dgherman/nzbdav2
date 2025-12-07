@@ -15,7 +15,8 @@ namespace NzbWebDAV.Api.Controllers.Stats;
 public class StatsController(
     UsenetStreamingClient streamingClient,
     DavDatabaseContext dbContext,
-    BandwidthService bandwidthService
+    BandwidthService bandwidthService,
+    ProviderErrorService providerErrorService
 ) : ControllerBase
 {
     private void EnsureAuthenticated()
@@ -116,6 +117,16 @@ public class StatsController(
                 .ToListAsync();
 
             return Ok(deleted);
+        });
+    }
+
+    [HttpGet("missing-articles")]
+    public Task<IActionResult> GetMissingArticles([FromQuery] int limit = 100)
+    {
+        return ExecuteSafely(() =>
+        {
+            var errors = providerErrorService.GetErrors(limit);
+            return Task.FromResult<IActionResult>(Ok(errors));
         });
     }
 }

@@ -26,6 +26,7 @@ public class MultiConnectionNntpClient : INntpClient
     private ConnectionPool<INntpClient> _connectionPool;
     private readonly GlobalOperationLimiter? _globalLimiter;
     private readonly BandwidthService? _bandwidthService;
+    private readonly ProviderErrorService? _providerErrorService;
     private readonly int _providerIndex;
     private DateTimeOffset _lastActivity = DateTimeOffset.UtcNow;
     private readonly Timer? _latencyMonitorTimer;
@@ -38,12 +39,14 @@ public class MultiConnectionNntpClient : INntpClient
         ProviderType type,
         GlobalOperationLimiter? globalLimiter = null,
         BandwidthService? bandwidthService = null,
+        ProviderErrorService? providerErrorService = null,
         int providerIndex = -1)
     {
         _connectionPool = connectionPool;
         ProviderType = type;
         _globalLimiter = globalLimiter;
         _bandwidthService = bandwidthService;
+        _providerErrorService = providerErrorService;
         _providerIndex = providerIndex;
 
         if (_providerIndex >= 0 && _bandwidthService != null && type != ProviderType.Disabled)

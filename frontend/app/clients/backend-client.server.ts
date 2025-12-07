@@ -257,6 +257,14 @@ class BackendClient {
         if (!response.ok) throw new Error(`Failed to get deleted files: ${(await response.json()).error}`);
         return response.json();
     }
+
+    public async getMissingArticles(limit: number = 100): Promise<MissingArticleEvent[]> {
+        const url = process.env.BACKEND_URL + `/api/stats/missing-articles?limit=${limit}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get missing articles: ${(await response.json()).error}`);
+        return response.json();
+    }
 }
 
 export const backendClient = new BackendClient();
@@ -365,7 +373,9 @@ export enum RepairAction {
 
 export type ConnectionUsageContext = {
     usageType: ConnectionUsageType,
-    details: string | null
+    details: string | null,
+    isBackup?: boolean,
+    isSecondary?: boolean
 }
 
 export enum ConnectionUsageType {
@@ -390,4 +400,12 @@ export type ProviderBandwidthSnapshot = {
     currentSpeed: number,
     averageLatency: number,
     host?: string
+}
+
+export type MissingArticleEvent = {
+    timestamp: string,
+    providerIndex: number,
+    filename: string,
+    segmentId: string,
+    error: string
 }

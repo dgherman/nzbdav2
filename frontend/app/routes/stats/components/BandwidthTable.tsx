@@ -1,12 +1,13 @@
 import { Table } from "react-bootstrap";
-import type { BandwidthSample } from "~/clients/backend-client.server";
+import type { BandwidthSample, ProviderBandwidthSnapshot } from "~/clients/backend-client.server";
 
 interface Props {
     data: BandwidthSample[];
     range: string;
+    providers: ProviderBandwidthSnapshot[];
 }
 
-export function BandwidthTable({ data, range }: Props) {
+export function BandwidthTable({ data, range, providers }: Props) {
     // Group by provider
     const providerTotals = data.reduce((acc, sample) => {
         acc[sample.providerIndex] = (acc[sample.providerIndex] || 0) + sample.bytes;
@@ -22,6 +23,11 @@ export function BandwidthTable({ data, range }: Props) {
     };
 
     const totalUsage = Object.values(providerTotals).reduce((a, b) => a + b, 0);
+
+    const getProviderName = (index: number) => {
+        const provider = providers.find(p => p.providerIndex === index);
+        return provider?.host || `Provider ${index + 1}`;
+    };
 
     return (
         <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
@@ -46,17 +52,22 @@ export function BandwidthTable({ data, range }: Props) {
                                 </td>
                             </tr>
                         ) : (
-                            Object.entries(providerTotals).map(([index, bytes]) => (
-                                <tr key={index}>
-                                    <td>Provider {parseInt(index) + 1}</td>
-                                    <td className="text-end font-mono text-info">
-                                        {formatBytes(bytes)}
-                                    </td>
-                                    <td className="text-end font-mono text-muted">
-                                        {totalUsage > 0 ? ((bytes / totalUsage) * 100).toFixed(1) : "0.0"}%
-                                    </td>
-                                </tr>
-                            ))
+                            Object.entries(providerTotals).map(([indexStr, bytes]) => {
+                                const index = parseInt(indexStr);
+                                return (
+                                    <tr key={index}>
+                                        <td className="text-truncate" style={{maxWidth: '200px'}} title={getProviderName(index)}>
+                                            {getProviderName(index)}
+                                        </td>
+                                        <td className="text-end font-mono text-info">
+                                            {formatBytes(bytes)}
+                                        </td>
+                                        <td className="text-end font-mono text-muted">
+                                            {totalUsage > 0 ? ((bytes / totalUsage) * 100).toFixed(1) : "0.0"}%
+                                        </td>
+                                    </tr>
+                                );
+                            })
                         )}
                     </tbody>
                 </Table>
