@@ -69,7 +69,7 @@ public class HealthCheckService
                 using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
                 cts.CancelAfter(TimeSpan.FromMinutes(20)); // Timeout after 20 minutes per file to prevent blocking
                 
-                using var _1 = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck));
+                using var _1 = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check" }));
 
                 // get the davItem to health-check
                 await using var dbContext = new DavDatabaseContext();
@@ -236,7 +236,7 @@ public class HealthCheckService
 
             // when usenet article is missing, perform repairs
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, davItem.Path));
+            using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path }));
             await Repair(davItem, dbClient, cts2.Token, failureDetails).ConfigureAwait(false);
         }
     }

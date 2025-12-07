@@ -33,7 +33,7 @@ public class TestUsenetThroughputController(ConfigManager configManager) : BaseA
         );
 
         // No global limiter for this isolated test
-        var client = new MultiConnectionNntpClient(pool, connectionDetails.Type, null, null, null, -1);
+        var client = new MultiConnectionNntpClient(pool, connectionDetails.Type, null, null, null, -1, connectionDetails.Host);
 
         try
         {

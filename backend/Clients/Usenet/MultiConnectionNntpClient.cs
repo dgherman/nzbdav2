@@ -28,7 +28,9 @@ public class MultiConnectionNntpClient : INntpClient
     private readonly BandwidthService? _bandwidthService;
     private readonly ProviderErrorService? _providerErrorService;
     private readonly int _providerIndex;
+    private readonly string _host;
     private DateTimeOffset _lastActivity = DateTimeOffset.UtcNow;
+    private DateTimeOffset _lastLatencyRecordTime = DateTimeOffset.MinValue;
     private readonly Timer? _latencyMonitorTimer;
 
     public long AverageLatency => _bandwidthService?.GetAverageLatency(_providerIndex) ?? 0;
@@ -40,7 +42,8 @@ public class MultiConnectionNntpClient : INntpClient
         GlobalOperationLimiter? globalLimiter = null,
         BandwidthService? bandwidthService = null,
         ProviderErrorService? providerErrorService = null,
-        int providerIndex = -1)
+        int providerIndex = -1,
+        string? host = null)
     {
         _connectionPool = connectionPool;
         ProviderType = type;
@@ -48,6 +51,7 @@ public class MultiConnectionNntpClient : INntpClient
         _bandwidthService = bandwidthService;
         _providerErrorService = providerErrorService;
         _providerIndex = providerIndex;
+        _host = host ?? $"Provider {providerIndex}";
 
         if (_providerIndex >= 0 && _bandwidthService != null && type != ProviderType.Disabled)
         {
@@ -57,7 +61,7 @@ public class MultiConnectionNntpClient : INntpClient
 
     private void CheckLatency(object? state)
     {
-        if (DateTimeOffset.UtcNow - _lastActivity <= TimeSpan.FromSeconds(30)) return;
+        if (DateTimeOffset.UtcNow - _lastLatencyRecordTime <= TimeSpan.FromSeconds(45)) return;
         
         try
         {
@@ -77,7 +81,7 @@ public class MultiConnectionNntpClient : INntpClient
                 }
                 catch (Exception ex)
                 {
-                    Serilog.Log.Debug(ex, "[MultiConnectionNntpClient] Latency check (ping) failed for provider {ProviderIndex}", _providerIndex);
+                    Serilog.Log.Debug(ex, "[MultiConnectionNntpClient] Latency check (ping) failed for provider {Host}", _host);
                 }
             });
         }
@@ -118,7 +122,7 @@ public class MultiConnectionNntpClient : INntpClient
     {
         var stream = await RunStreamWithConnection(
             (connection, ct) => connection.GetSegmentStreamAsync(segmentId, includeHeaders, ct),
-            cancellationToken).ConfigureAwait(false);
+            cancellationToken, recordLatency: false).ConfigureAwait(false);
 
         if (_bandwidthService != null && _providerIndex >= 0)
         {
@@ -132,12 +136,12 @@ public class MultiConnectionNntpClient : INntpClient
     public Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
     {
         return RunWithConnection((connection, ct) => connection.GetSegmentYencHeaderAsync(segmentId, ct),
-            cancellationToken);
+            cancellationToken, recordLatency: false);
     }
 
     public Task<long> GetFileSizeAsync(NzbFile file, CancellationToken cancellationToken)
     {
-        return RunWithConnection((connection, ct) => connection.GetFileSizeAsync(file, ct), cancellationToken);
+        return RunWithConnection((connection, ct) => connection.GetFileSizeAsync(file, ct), cancellationToken, recordLatency: false);
     }
 
     public async Task WaitForReady(CancellationToken cancellationToken)
@@ -153,14 +157,15 @@ public class MultiConnectionNntpClient : INntpClient
 
     public Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken cancellationToken)
     {
-        return RunWithConnection((connection, ct) => connection.DownloadArticleBodyAsync(group, articleId, ct), cancellationToken);
+        return RunWithConnection((connection, ct) => connection.DownloadArticleBodyAsync(group, articleId, ct), cancellationToken, recordLatency: false);
     }
 
     private async Task<YencHeaderStream> RunStreamWithConnection
     (
         Func<INntpClient, CancellationToken, Task<YencHeaderStream>> task,
         CancellationToken cancellationToken,
-        int retries = 5
+        int retries = 5,
+        bool recordLatency = true
     )
     {
         // Acquire global operation permit first (if global limiter is configured)
@@ -210,9 +215,10 @@ public class MultiConnectionNntpClient : INntpClient
                 }
 
                 // Record latency metrics
-                if (_bandwidthService != null && _providerIndex >= 0)
+                if (recordLatency && _bandwidthService != null && _providerIndex >= 0)
                 {
                     _bandwidthService.RecordLatency(_providerIndex, (int)operationStart.ElapsedMilliseconds);
+                    _lastLatencyRecordTime = DateTimeOffset.UtcNow;
                 }
 
                 // Create a callback stream that will handle the cleanup of the connection lock and global permit
@@ -259,7 +265,7 @@ public class MultiConnectionNntpClient : INntpClient
                     // Release global permit before retry (we'll acquire a new one)
                     globalPermit?.Dispose();
                     globalPermit = null;
-                    return await RunStreamWithConnection(task, cancellationToken, retries - 1).ConfigureAwait(false);
+                    return await RunStreamWithConnection(task, cancellationToken, retries - 1, recordLatency).ConfigureAwait(false);
                 }
 
                 throw;
@@ -268,8 +274,8 @@ public class MultiConnectionNntpClient : INntpClient
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
         {
             var elapsedSeconds = startTime.Elapsed.TotalSeconds;
-            Serilog.Log.Warning("[MultiConnectionNntpClient] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", elapsedSeconds);
-            throw new TimeoutException($"GetSegmentStream operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
+            Serilog.Log.Warning("[MultiConnectionNntpClient] [{Host}] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", _host, elapsedSeconds);
+            throw new TimeoutException($"[{_host}] GetSegmentStream operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
         }
         finally
         {
@@ -292,7 +298,8 @@ public class MultiConnectionNntpClient : INntpClient
     (
         Func<INntpClient, CancellationToken, Task<T>> task,
         CancellationToken cancellationToken,
-        int retries = 5
+        int retries = 5,
+        bool recordLatency = true
     )
     {
         // Acquire global operation permit first (if global limiter is configured)
@@ -338,9 +345,10 @@ public class MultiConnectionNntpClient : INntpClient
                 }
 
                 // Record latency metrics
-                if (_bandwidthService != null && _providerIndex >= 0)
+                if (recordLatency && _bandwidthService != null && _providerIndex >= 0)
                 {
                     _bandwidthService.RecordLatency(_providerIndex, (int)operationStart.ElapsedMilliseconds);
+                    _lastLatencyRecordTime = DateTimeOffset.UtcNow;
                 }
 
                 return result;
@@ -358,7 +366,7 @@ public class MultiConnectionNntpClient : INntpClient
                     // Release global permit before retry (we'll acquire a new one)
                     globalPermit?.Dispose();
                     globalPermit = null;
-                    return await RunWithConnection<T>(task, cancellationToken, retries - 1).ConfigureAwait(false);
+                    return await RunWithConnection<T>(task, cancellationToken, retries - 1, recordLatency).ConfigureAwait(false);
                 }
 
                 throw;
@@ -378,8 +386,8 @@ public class MultiConnectionNntpClient : INntpClient
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
         {
             var elapsedSeconds = startTime.Elapsed.TotalSeconds;
-            Serilog.Log.Warning("[MultiConnectionNntpClient] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", elapsedSeconds);
-            throw new TimeoutException($"NNTP operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
+            Serilog.Log.Warning("[MultiConnectionNntpClient] [{Host}] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", _host, elapsedSeconds);
+            throw new TimeoutException($"[{_host}] NNTP operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
         }
         finally
         {

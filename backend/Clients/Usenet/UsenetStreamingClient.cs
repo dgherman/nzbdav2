@@ -248,7 +248,7 @@ public class UsenetStreamingClient
             connectionPoolStats: connectionPoolStats,
             providerIndex: providerIndex
         );
-        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter, _bandwidthService, providerErrorService, providerIndex);
+        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter, _bandwidthService, providerErrorService, providerIndex, connectionDetails.Host);
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection

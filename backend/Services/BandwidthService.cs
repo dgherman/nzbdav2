@@ -133,25 +133,15 @@ public class BandwidthService
         private long _currentBucketBytes;
         private readonly Queue<long> _historyBuckets = new();
 
-        // Latency tracking
-        private long _currentBucketLatencySum;
-        private int _currentBucketLatencyCount;
-        private readonly Queue<(long sum, int count)> _latencyHistoryBuckets = new();
-        private long _lastKnownAverageLatency;
+        // Latency tracking (Exponential Moving Average)
+        private double _latencyEma;
+        private const double Alpha = 0.05; // Smoothing factor (lower = smoother)
         
         public long GetAverageLatency()
         {
             lock (_lock)
             {
-                var totalLatencySum = _latencyHistoryBuckets.Sum(x => x.sum);
-                var totalLatencyCount = _latencyHistoryBuckets.Sum(x => x.count);
-                
-                if (totalLatencyCount > 0)
-                {
-                    _lastKnownAverageLatency = totalLatencySum / totalLatencyCount;
-                }
-                
-                return _lastKnownAverageLatency;
+                return (long)_latencyEma;
             }
         }
 
@@ -159,8 +149,14 @@ public class BandwidthService
         {
             lock (_lock)
             {
-                _currentBucketLatencySum += ms;
-                _currentBucketLatencyCount++;
+                if (_latencyEma == 0)
+                {
+                    _latencyEma = ms;
+                }
+                else
+                {
+                    _latencyEma = (ms * Alpha) + (_latencyEma * (1.0 - Alpha));
+                }
             }
         }
 
@@ -188,22 +184,14 @@ public class BandwidthService
         {
             lock (_lock)
             {
-                // Rotate the buckets
+                // Rotate the buckets for bandwidth
                 _historyBuckets.Enqueue(_currentBucketBytes);
                 _currentBucketBytes = 0;
-
-                _latencyHistoryBuckets.Enqueue((_currentBucketLatencySum, _currentBucketLatencyCount));
-                _currentBucketLatencySum = 0;
-                _currentBucketLatencyCount = 0;
 
                 // Keep only last 15 seconds (smoothed)
                 while (_historyBuckets.Count > 15)
                 {
                     _historyBuckets.Dequeue();
-                }
-                while (_latencyHistoryBuckets.Count > 15)
-                {
-                    _latencyHistoryBuckets.Dequeue();
                 }
 
                 var recentBytes = _historyBuckets.Sum();
@@ -213,21 +201,12 @@ public class BandwidthService
                 // Calculate speed (bytes per second)
                 var speed = (long)(recentBytes / (double)duration);
 
-                // Calculate average latency
-                var totalLatencySum = _latencyHistoryBuckets.Sum(x => x.sum);
-                var totalLatencyCount = _latencyHistoryBuckets.Sum(x => x.count);
-                
-                if (totalLatencyCount > 0)
-                {
-                    _lastKnownAverageLatency = totalLatencySum / totalLatencyCount;
-                }
-                
                 return new ProviderBandwidthSnapshot
                 {
                     ProviderIndex = index,
                     TotalBytes = _totalBytes,
                     CurrentSpeed = speed,
-                    AverageLatency = _lastKnownAverageLatency
+                    AverageLatency = (long)_latencyEma
                 };
             }
         }
