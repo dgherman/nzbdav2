@@ -205,9 +205,6 @@ public class MultiProviderNntpClient : INntpClient
             ? Providers[providerIndex].Host
             : $"Provider {providerIndex}";
 
-        Serilog.Log.Information("[MissingArticle] Article not found on provider {Provider}: segment {SegmentId}, file: {Filename}",
-            providerHost, segmentId ?? "(empty)", filename);
-
         if (_providerErrorService == null) return;
         _providerErrorService.RecordError(providerIndex, filename, segmentId ?? "", "Article not found");
     }

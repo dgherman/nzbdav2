@@ -58,18 +58,19 @@ public class ProviderErrorService
         });
     }
 
-    public List<MissingArticleEvent> GetErrors(int limit = 100)
+    public async Task<List<MissingArticleEvent>> GetErrorsAsync(int limit = 100)
     {
         try
         {
             using var scope = _scopeFactory.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
 
-            return dbContext.MissingArticleEvents
+            return await dbContext.MissingArticleEvents
                 .AsNoTracking()
                 .OrderByDescending(x => x.Timestamp)
                 .Take(limit)
-                .ToList();
+                .ToListAsync()
+                .ConfigureAwait(false);
         }
         catch (Exception ex)
         {

@@ -376,7 +376,8 @@ export type HealthCheckResult = {
     path: string,
     result: HealthResult,
     repairStatus: RepairAction,
-    message: string | null
+    message: string | null,
+    jobName?: string | null
 }
 
 export enum HealthResult {

@@ -116,17 +116,39 @@ public class StatsController(
                 .Take(limit)
                 .ToListAsync();
 
-            return Ok(deleted);
+            var response = deleted.Select(x =>
+            {
+                var parts = x.Path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                // Expected path: /content/{Category}/{JobName}/{FileName}
+                // parts[0] = content
+                // parts[1] = Category
+                // parts[2] = JobName
+                var jobName = parts.Length >= 3 ? parts[2] : null;
+
+                return new
+                {
+                    x.Id,
+                    x.CreatedAt,
+                    x.DavItemId,
+                    x.Path,
+                    x.Result,
+                    x.RepairStatus,
+                    x.Message,
+                    JobName = jobName
+                };
+            });
+
+            return Ok(response);
         });
     }
 
     [HttpGet("missing-articles")]
     public Task<IActionResult> GetMissingArticles([FromQuery] int limit = 100)
     {
-        return ExecuteSafely(() =>
+        return ExecuteSafely(async () =>
         {
-            var errors = providerErrorService.GetErrors(limit);
-            return Task.FromResult<IActionResult>(Ok(errors));
+            var errors = await providerErrorService.GetErrorsAsync(limit);
+            return Ok(errors);
         });
     }
 

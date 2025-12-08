@@ -41,7 +41,7 @@ export function DeletedFilesTable({ files }: Props) {
                     <thead>
                         <tr className="text-xs text-muted">
                             <th>Date</th>
-                            <th>Path</th>
+                            <th>File / NZB Name</th>
                             <th>Message</th>
                         </tr>
                     </thead>
@@ -59,7 +59,14 @@ export function DeletedFilesTable({ files }: Props) {
                                         {new Date(file.createdAt).toLocaleString()}
                                     </td>
                                     <td className="font-mono truncate max-w-xs text-light" title={file.path}>
-                                        {file.path.split('/').pop()}
+                                        {file.jobName ? (
+                                            <div className="d-flex flex-column">
+                                                <span>{file.jobName}</span>
+                                                <small className="text-muted" style={{fontSize: '0.75em'}}>{file.path.split('/').pop()}</small>
+                                            </div>
+                                        ) : (
+                                            file.path.split('/').pop()
+                                        )}
                                     </td>
                                     <td className="text-muted truncate max-w-md" title={file.message || ""}>
                                         {file.message}
