@@ -73,7 +73,7 @@ docker run --rm -it \
   -e PUID=1000 \
   -e PGID=1000 \
   -p 3000:3000 \
-  nzbdav/nzbdav:alpha
+  local/nzbdav:3
 ```
 After starting the container, be sure to navigate to the Settings page on the UI to finish setting up your usenet connection settings.
 
@@ -298,3 +298,8 @@ volumes:
 *   **Log Management**: Added "Clear Log" buttons to both Missing Articles and Deleted Files tables, with backend DELETE endpoints (`/api/stats/missing-articles` and `/api/stats/deleted-files`) for easy log maintenance.
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
+
+## v0.1.4 (2025-12-08)
+*   **Performance Optimization**: Addressed slow UI loading for stats pages by refactoring backend services to use asynchronous database queries and enabling SQLite WAL (Write-Ahead Logging) mode for improved concurrency.
+*   **Deleted Files UI Improvements**: The "Deleted Files" table now identifies and displays the original NZB/Job name for files with obfuscated filenames, making it easier to track which content was removed.
+*   **Log Noise Reduction**: Reduced excessive logging for missing articles in the backend.
