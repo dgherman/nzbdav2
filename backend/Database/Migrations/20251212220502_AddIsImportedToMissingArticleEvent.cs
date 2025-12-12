@@ -1,11 +1,11 @@
-﻿using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
 namespace NzbWebDAV.Database.Migrations
 {
     /// <inheritdoc />
-    public partial class AddIsImportedColumn : Migration
+    public partial class AddIsImportedToMissingArticleEvent : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
