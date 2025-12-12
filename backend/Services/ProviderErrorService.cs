@@ -8,19 +8,36 @@ using Serilog;
 
 namespace NzbWebDAV.Services;
 
-public class ProviderErrorService
+public class ProviderErrorService : IDisposable
 {
     private readonly IServiceScopeFactory _scopeFactory;
     private readonly ConcurrentQueue<MissingArticleEvent> _buffer = new();
-    private readonly Timer _persistenceTimer;
+    private readonly CancellationTokenSource _cts = new();
+    private readonly Task _persistenceTask;
 
     public ProviderErrorService(IServiceScopeFactory scopeFactory)
     {
         _scopeFactory = scopeFactory;
-        _persistenceTimer = new Timer(PersistEvents, null, TimeSpan.FromSeconds(10), TimeSpan.FromSeconds(10));
+        _persistenceTask = Task.Run(PersistenceLoop);
     }
 
-    private async void PersistEvents(object? state)
+    private async Task PersistenceLoop()
+    {
+        try
+        {
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
+            while (await timer.WaitForNextTickAsync(_cts.Token))
+            {
+                await PersistEvents();
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Ignore cancellation
+        }
+    }
+
+    private async Task PersistEvents()
     {
         if (_buffer.IsEmpty) return;
 
@@ -292,5 +309,12 @@ public class ProviderErrorService
             Log.Error(ex, "Failed to clear missing article events");
             throw;
         }
+    }
+
+    public void Dispose()
+    {
+        _cts.Cancel();
+        _cts.Dispose();
+        GC.SuppressFinalize(this);
     }
 }
