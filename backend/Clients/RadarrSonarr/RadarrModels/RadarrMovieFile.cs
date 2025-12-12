@@ -1,4 +1,4 @@
-﻿using System.Text.Json.Serialization;
+using System.Text.Json.Serialization;
 
 namespace NzbWebDAV.Clients.RadarrSonarr.RadarrModels;
 
@@ -9,6 +9,9 @@ public class RadarrMovieFile
 
     [JsonPropertyName("path")]
     public string? Path { get; set; }
+
+    [JsonPropertyName("sceneName")]
+    public string? SceneName { get; set; }
 
     [JsonPropertyName("mediaInfo")]
     public RadarrMediaInfo? MediaInfo { get; set; }

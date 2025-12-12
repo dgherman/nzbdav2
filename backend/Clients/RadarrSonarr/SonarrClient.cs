@@ -40,11 +40,36 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         var mediaIds = await GetMediaIds(symlinkOrStrmPath);
         if (mediaIds == null) return false;
 
-        // delete the episode-file
+        // 1. Get Scene Name (Original Release Name)
+        var episodeFile = await GetEpisodeFile(mediaIds.Value.episodeFileId);
+        var sceneName = episodeFile.SceneName;
+        var seriesId = episodeFile.SeriesId;
+
+        // 2. Delete the episode-file
         if (await DeleteEpisodeFile(mediaIds.Value.episodeFileId) != HttpStatusCode.OK)
             throw new Exception($"Failed to delete episode file `{symlinkOrStrmPath}` from sonarr instance `{Host}`.");
 
-        // trigger a new search for each episode
+        // 3. Try to find the "grab" event in history and mark it as failed (this handles blacklist + search)
+        if (!string.IsNullOrEmpty(sceneName))
+        {
+            var history = await GetHistoryAsync(seriesId: seriesId);
+            var grabEvent = history.Records
+                .FirstOrDefault(x => 
+                    x.SourceTitle.Equals(sceneName, StringComparison.OrdinalIgnoreCase) &&
+                    x.Data.TryGetValue("protocol", out var protocol) &&
+                    protocol.Equals("usenet", StringComparison.OrdinalIgnoreCase)
+                );
+            
+            if (grabEvent != null)
+            {
+                if (await MarkHistoryFailedAsync(grabEvent.Id))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // 4. Fallback: Trigger a new search for each episode
         await SearchEpisodesAsync(mediaIds.Value.episodeIds);
         return true;
     }

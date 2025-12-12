@@ -29,9 +29,35 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         var mediaIds = await GetMediaIds(symlinkOrStrmPath);
         if (mediaIds == null) return false;
 
+        // 1. Get Scene Name (Original Release Name) from the file before deleting
+        var movie = await GetMovieAsync(mediaIds.Value.movieId);
+        var sceneName = movie.MovieFile?.SceneName;
+
+        // 2. Delete the file
         if (await DeleteMovieFile(mediaIds.Value.movieFileId) != HttpStatusCode.OK)
             throw new Exception($"Failed to delete movie file `{symlinkOrStrmPath}` from radarr instance `{Host}`.");
 
+        // 3. Try to find the "grab" event in history and mark it as failed (this handles blacklist + search)
+        if (!string.IsNullOrEmpty(sceneName))
+        {
+            var history = await GetHistoryAsync(movieId: mediaIds.Value.movieId);
+            var grabEvent = history.Records
+                .FirstOrDefault(x => 
+                    x.SourceTitle.Equals(sceneName, StringComparison.OrdinalIgnoreCase) &&
+                    x.Data.TryGetValue("protocol", out var protocol) &&
+                    protocol.Equals("usenet", StringComparison.OrdinalIgnoreCase)
+                );
+            
+            if (grabEvent != null)
+            {
+                if (await MarkHistoryFailedAsync(grabEvent.Id))
+                {
+                    return true;
+                }
+            }
+        }
+
+        // 4. Fallback: Just trigger a standard search if history lookup failed
         await SearchMovieAsync(mediaIds.Value.movieId);
         return true;
     }

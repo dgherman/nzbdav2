@@ -168,8 +168,6 @@ public class MultiProviderNntpClient : INntpClient
                 result = await task.Invoke(provider).ConfigureAwait(false);
                 if (result is NntpStatResponse r && r.ResponseType != NntpStatResponseType.ArticleExists)
                 {
-                    // Record missing article
-                    RecordMissingArticle(provider.ProviderIndex, segmentId ?? r.MessageId.Value, cancellationToken);
                     throw new UsenetArticleNotFoundException(r.MessageId.Value);
                 }
 
