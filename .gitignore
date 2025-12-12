@@ -23,3 +23,4 @@ nuget
 
 *.md
 !README.md
+!STREAMING_ANALYSIS.md
