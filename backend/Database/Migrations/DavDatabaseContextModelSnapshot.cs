@@ -288,9 +288,6 @@ namespace NzbWebDAV.Database.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
-                    b.Property<bool>("IsImported")
-                        .HasColumnType("INTEGER");
-
                     b.Property<string>("JobName")
                         .IsRequired()
                         .HasColumnType("TEXT");

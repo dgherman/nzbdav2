@@ -668,27 +668,19 @@ class BackendClient {
 
     
 
-                    totalEvents: number;
+            totalEvents: number;
 
     
 
-                    providerCounts: Record<number, number>;
+            providerCounts: Record<number, number>;
 
     
 
-                    hasBlockingMissingArticles: boolean;
+            hasBlockingMissingArticles: boolean;
 
     
 
-                    isImported: boolean;
-
-    
-
-                }
-
-    
-
-            
+        }
 
     
 

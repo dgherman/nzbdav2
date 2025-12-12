@@ -63,7 +63,7 @@ public class ProviderErrorService
         return "Uncategorized";
     }
 
-    public void RecordError(int providerIndex, string filename, string segmentId, string error, bool isImported = false)
+    public void RecordError(int providerIndex, string filename, string segmentId, string error)
     {
         var jobName = ExtractJobName(filename);
         _buffer.Enqueue(new MissingArticleEvent
@@ -73,8 +73,7 @@ public class ProviderErrorService
             Filename = filename,
             SegmentId = segmentId,
             Error = error,
-            JobName = jobName,
-            IsImported = isImported
+            JobName = jobName
         });
     }
 
@@ -167,7 +166,7 @@ public class ProviderErrorService
             // We fetch SegmentId and ProviderIndex to calculate stats and blocking status
             var details = await baseQuery
                 .Where(x => filenames.Contains(x.Filename))
-                .Select(x => new { x.Filename, x.ProviderIndex, x.SegmentId, x.IsImported })
+                .Select(x => new { x.Filename, x.ProviderIndex, x.SegmentId })
                 .ToListAsync()
                 .ConfigureAwait(false);
 
@@ -190,8 +189,7 @@ public class ProviderErrorService
                     LatestTimestamp = f.MaxDate,
                     TotalEvents = f.TotalEvents,
                     ProviderCounts = providerCounts,
-                    HasBlockingMissingArticles = hasBlocking,
-                    IsImported = fileEvents.Any(x => x.IsImported)
+                    HasBlockingMissingArticles = hasBlocking
                 };
             }).ToList();
 
