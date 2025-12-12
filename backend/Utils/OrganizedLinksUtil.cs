@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
+using Serilog;
 
 namespace NzbWebDAV.Utils;
 
@@ -11,27 +12,43 @@ namespace NzbWebDAV.Utils;
 public static class OrganizedLinksUtil
 {
     private static readonly ConcurrentDictionary<Guid, string> Cache = new();
-    private static volatile bool _isCacheInitialized = false;
+    private static volatile LinkCacheStatus _status = LinkCacheStatus.NotInitialized;
     private static readonly SemaphoreSlim _initLock = new(1, 1);
+
+    public static LinkCacheStatus Status => _status;
 
     /// <summary>
     /// Initializes the link cache by scanning the library asynchronously.
     /// </summary>
     public static async Task InitializeAsync(ConfigManager configManager)
     {
-        if (_isCacheInitialized) return;
+        if (_status != LinkCacheStatus.NotInitialized) return;
+        
+        Log.Information("[OrganizedLinksUtil] Starting link cache initialization...");
+        _status = LinkCacheStatus.Initializing;
+
         await _initLock.WaitAsync().ConfigureAwait(false);
         try
         {
-            if (_isCacheInitialized) return;
+            if (_status != LinkCacheStatus.Initializing) return; // Re-check if status changed while waiting for lock
+
+            // The actual heavy work is done here
             await Task.Run(() =>
             {
+                var scannedLinks = 0;
                 foreach (var davItemLink in GetLibraryDavItemLinks(configManager))
                 {
                     Cache[davItemLink.DavItemId] = davItemLink.LinkPath;
+                    scannedLinks++;
                 }
+                Log.Information($"[OrganizedLinksUtil] Link cache initialized with {scannedLinks} links.");
             }).ConfigureAwait(false);
-            _isCacheInitialized = true;
+            _status = LinkCacheStatus.Initialized;
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[OrganizedLinksUtil] Error initializing link cache.");
+            _status = LinkCacheStatus.Error;
         }
         finally
         {
@@ -51,6 +68,13 @@ public static class OrganizedLinksUtil
         if (Cache.TryGetValue(targetDavItem.Id, out var link) && Verify(link, targetDavItem, configManager))
         {
             return link;
+        }
+
+        // If cache is not initialized yet, we must not block by scanning for the IsImported status in HealthCheck.
+        // Repair logic can still trigger a scan because it's less frequent and needs accuracy.
+        if (!allowScan && (_status == LinkCacheStatus.NotInitialized || _status == LinkCacheStatus.Initializing))
+        {
+            return null;
         }
 
         return allowScan ? SearchForLink(targetDavItem, configManager) : null;
@@ -154,4 +178,12 @@ public static class OrganizedLinksUtil
         public Guid DavItemId;
         public SymlinkAndStrmUtil.ISymlinkOrStrmInfo SymlinkOrStrmInfo;
     }
+}
+
+public enum LinkCacheStatus
+{
+    NotInitialized,
+    Initializing,
+    Initialized,
+    Error
 }
