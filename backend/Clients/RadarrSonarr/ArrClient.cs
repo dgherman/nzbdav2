@@ -49,6 +49,24 @@ public class ArrClient(string host, string apiKey)
     public Task<ArrCommand> CommandAsync(object command) =>
         Post<ArrCommand>($"/command", command);
 
+    public Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null)
+    {
+        var query = "";
+        if (movieId.HasValue) query = $"?movieId={movieId.Value}&eventType=grab";
+        if (seriesId.HasValue) query = $"?seriesId={seriesId.Value}&eventType=grab";
+        return Get<ArrHistory>($"/history{query}");
+    }
+
+    public async Task<bool> MarkHistoryFailedAsync(int historyId)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, GetRequestUri($"/history/failed"));
+        var body = new { id = historyId };
+        var jsonBody = JsonSerializer.Serialize(body);
+        request.Content = new StringContent(jsonBody, new MediaTypeHeaderValue("application/json"));
+        using var response = await SendAsync(request);
+        return response.IsSuccessStatusCode;
+    }
+
     protected Task<T> Get<T>(string path) =>
         GetRoot<T>($"{BasePath}{path}");
 

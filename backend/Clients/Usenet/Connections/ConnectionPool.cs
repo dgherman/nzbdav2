@@ -78,10 +78,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     {
         var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
 
-        if (usageContext.UsageType == ConnectionUsageType.Unknown)
-        {
-            Serilog.Log.Warning("Connection acquired with Unknown usage context.");
-        }
 
         // Determine if we need to reserve slots for higher-priority traffic (Streaming)
         // Background tasks (Queue, HealthCheck, Repair) must leave some capacity available.

@@ -113,14 +113,9 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                                         <Badge bg={getTypeColor(c.usageType)} className="flex-shrink-0" style={{fontSize: '0.6rem', minWidth: '50px', marginTop: '2px'}}>
                                                             {getTypeLabel(c.usageType)}
                                                         </Badge>
-                                                        {c.isBackup && (
-                                                            <Badge bg="danger" className="flex-shrink-0" style={{fontSize: '0.6rem', marginTop: '2px'}}>
-                                                                Backup
-                                                            </Badge>
-                                                        )}
-                                                        {c.isSecondary && (
+                                                        {(c.isBackup || c.isSecondary) && (
                                                             <Badge bg="warning" text="dark" className="flex-shrink-0" style={{fontSize: '0.6rem', marginTop: '2px'}}>
-                                                                Secondary
+                                                                Retry
                                                             </Badge>
                                                         )}
                                                         <span style={{fontSize: '0.8rem', wordBreak: 'break-word'}}>
