@@ -94,6 +94,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                             <th>Job Name</th>
                             <th>Filename</th>
                             <th>Status</th>
+                            <th>Imported</th>
                             <th>Count</th>
                             <th style={{ width: "80px" }}>Actions</th>
                         </tr>
@@ -101,7 +102,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                     <tbody>
                         {items.length === 0 ? (
                             <tr>
-                                <td colSpan={6} className="text-center py-4 text-muted">
+                                <td colSpan={7} className="text-center py-4 text-muted">
                                     No missing articles logged
                                 </td>
                             </tr>
@@ -129,6 +130,9 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                                                     {isCritical ? "Broken (All)" : "Partial"}
                                                 </span>
                                             </OverlayTrigger>
+                                        </td>
+                                        <td className="text-center">
+                                            {item.isImported ? "✅" : ""}
                                         </td>
                                         <td>
                                             <span className="badge bg-secondary">

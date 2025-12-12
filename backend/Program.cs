@@ -146,6 +146,8 @@ class Program
             
             await app.Services.GetRequiredService<ProviderErrorService>()
                 .BackfillJobNamesAsync(app.Lifetime.ApplicationStopping);
+
+            await OrganizedLinksUtil.InitializeAsync(app.Services.GetRequiredService<ConfigManager>());
         }, app.Lifetime.ApplicationStopping);
 
         // run

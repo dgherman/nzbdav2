@@ -22,4 +22,6 @@ public class MissingArticleEvent
     public string JobName { get; set; } = string.Empty;
 
     public string Error { get; set; } = string.Empty;
+
+    public bool IsImported { get; set; }
 }

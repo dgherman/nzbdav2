@@ -1,4 +1,5 @@
-﻿using NzbWebDAV.Config;
+using System.Collections.Concurrent;
+using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 
@@ -9,19 +10,50 @@ namespace NzbWebDAV.Utils;
 /// </summary>
 public static class OrganizedLinksUtil
 {
-    private static readonly Dictionary<Guid, string> Cache = new();
+    private static readonly ConcurrentDictionary<Guid, string> Cache = new();
+    private static volatile bool _isCacheInitialized = false;
+    private static readonly SemaphoreSlim _initLock = new(1, 1);
+
+    /// <summary>
+    /// Initializes the link cache by scanning the library asynchronously.
+    /// </summary>
+    public static async Task InitializeAsync(ConfigManager configManager)
+    {
+        if (_isCacheInitialized) return;
+        await _initLock.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_isCacheInitialized) return;
+            await Task.Run(() =>
+            {
+                foreach (var davItemLink in GetLibraryDavItemLinks(configManager))
+                {
+                    Cache[davItemLink.DavItemId] = davItemLink.LinkPath;
+                }
+            }).ConfigureAwait(false);
+            _isCacheInitialized = true;
+        }
+        finally
+        {
+            _initLock.Release();
+        }
+    }
 
     /// <summary>
     /// Searches organized media library for a symlink or strm pointing to the given target
     /// </summary>
     /// <param name="targetDavItem">The given target</param>
     /// <param name="configManager">The application config</param>
+    /// <param name="allowScan">If true, allows scanning the filesystem on cache miss (slow). If false, returns null on cache miss.</param>
     /// <returns>The path to a symlink or strm in the organized media library that points to the given target.</returns>
-    public static string? GetLink(DavItem targetDavItem, ConfigManager configManager)
+    public static string? GetLink(DavItem targetDavItem, ConfigManager configManager, bool allowScan = true)
     {
-        return !TryGetLinkFromCache(targetDavItem, configManager, out var linkFromCache)
-            ? SearchForLink(targetDavItem, configManager)
-            : linkFromCache;
+        if (Cache.TryGetValue(targetDavItem.Id, out var link) && Verify(link, targetDavItem, configManager))
+        {
+            return link;
+        }
+
+        return allowScan ? SearchForLink(targetDavItem, configManager) : null;
     }
 
     /// <summary>
@@ -34,17 +66,6 @@ public static class OrganizedLinksUtil
         var libraryRoot = configManager.GetLibraryDir()!;
         var allSymlinksAndStrms = SymlinkAndStrmUtil.GetAllSymlinksAndStrms(libraryRoot);
         return GetDavItemLinks(allSymlinksAndStrms, configManager);
-    }
-
-    private static bool TryGetLinkFromCache
-    (
-        DavItem targetDavItem,
-        ConfigManager configManager,
-        out string? linkFromCache
-    )
-    {
-        return Cache.TryGetValue(targetDavItem.Id, out linkFromCache)
-               && Verify(linkFromCache, targetDavItem, configManager);
     }
 
     private static bool Verify(string linkFromCache, DavItem targetDavItem, ConfigManager configManager)

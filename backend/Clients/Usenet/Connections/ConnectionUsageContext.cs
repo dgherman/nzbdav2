@@ -6,6 +6,7 @@ public class ConnectionUsageDetails
     public DateTimeOffset? FileDate { get; set; }
     public bool IsBackup { get; set; }
     public bool IsSecondary { get; set; }
+    public bool IsImported { get; set; }
 
     public override string ToString()
     {
@@ -31,6 +32,7 @@ public readonly struct ConnectionUsageContext
     public string? Details => _detailsObj?.ToString() ?? _detailsStr;
     public bool IsBackup => _detailsObj?.IsBackup ?? false;
     public bool IsSecondary => _detailsObj?.IsSecondary ?? false;
+    public bool IsImported => _detailsObj?.IsImported ?? false;
     
     public ConnectionUsageDetails? DetailsObject => _detailsObj;
 
