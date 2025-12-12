@@ -139,41 +139,118 @@ export default function Health({ loaderData }: Route.ComponentProps) {
         return connect();
     }, [onWebsocketMessage]);
 
-    return (
-        <div className={styles.container}>
-            <div className={styles.section}>
-                <HealthStats stats={historyStats} />
-            </div>
-            {isEnabled && pendingCount > 20 &&
-                <Alert className={styles.alert} variant={'warning'}>
-                    <b>Attention</b>
-                    <ul className={styles.list}>
-                        <li className={styles.listItem}>
-                            You have ~{pendingCount} files pending health check.
-                        </li>
-                        <li className={styles.listItem}>
-                            The queue will run an initial health check of these files.
-                        </li>
-                        <li className={styles.listItem}>
-                            Under normal operation, health checks will occur much less frequently.
-                        </li>
-                    </ul>
-                </Alert>
+        const onRunHealthCheck = useCallback(async (id: string) => {
+
+            if (!confirm("Run health check now?")) return;
+
+            
+
+            try {
+
+                const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
+
+                if (!response.ok) throw new Error(await response.text());
+
+                
+
+                // Refresh the queue locally to show "ASAP" or similar, although websocket updates should handle it
+
+                setQueueItems(items => items.map(item => 
+
+                    item.id === id 
+
+                    ? { ...item, nextHealthCheck: new Date().toISOString() } // Temporarily show as now/ASAP
+
+                    : item
+
+                ));
+
+            } catch (e) {
+
+                alert(`Failed to start health check: ${e}`);
+
             }
-            <div className={styles.section}>
-                <HealthTable 
-                    isEnabled={isEnabled} 
-                    healthCheckItems={queueItems} 
-                    totalCount={uncheckedCount}
-                    page={page}
-                    pageSize={30}
-                    search={search}
-                    showAll={showAll}
-                    onPageChange={setPage}
-                    onSearchChange={(s) => { setSearch(s); setPage(0); }}
-                    onShowAllChange={(val) => { setShowAll(val); setPage(0); }}
-                />
+
+        }, [setQueueItems]);
+
+    
+
+        return (
+
+            <div className={styles.container}>
+
+                <div className={styles.section}>
+
+                    <HealthStats stats={historyStats} />
+
+                </div>
+
+                {isEnabled && pendingCount > 20 &&
+
+                    <Alert className={styles.alert} variant={'warning'}>
+
+                        <b>Attention</b>
+
+                        <ul className={styles.list}>
+
+                            <li className={styles.listItem}>
+
+                                You have ~{pendingCount} files pending health check.
+
+                            </li>
+
+                            <li className={styles.listItem}>
+
+                                The queue will run an initial health check of these files.
+
+                            </li>
+
+                            <li className={styles.listItem}>
+
+                                Under normal operation, health checks will occur much less frequently.
+
+                            </li>
+
+                        </ul>
+
+                    </Alert>
+
+                }
+
+                <div className={styles.section}>
+
+                    <HealthTable 
+
+                        isEnabled={isEnabled} 
+
+                        healthCheckItems={queueItems} 
+
+                        totalCount={uncheckedCount}
+
+                        page={page}
+
+                        pageSize={30}
+
+                        search={search}
+
+                        showAll={showAll}
+
+                        onPageChange={setPage}
+
+                        onSearchChange={(s) => { setSearch(s); setPage(0); }}
+
+                        onShowAllChange={(val) => { setShowAll(val); setPage(0); }}
+
+                        onRunHealthCheck={onRunHealthCheck}
+
+                    />
+
+                </div>
+
             </div>
-        </div>
-    );
-}
+
+        );
+
+    }
+
+    

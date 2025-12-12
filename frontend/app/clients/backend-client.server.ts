@@ -250,16 +250,16 @@ class BackendClient {
         return response.json();
     }
 
-    public async getDeletedFiles(limit: number = 100): Promise<HealthCheckResult[]> {
-        const url = process.env.BACKEND_URL + `/api/stats/deleted-files?limit=${limit}`;
+    public async getDeletedFiles(page: number = 1, pageSize: number = 50, search: string = ""): Promise<{ items: HealthCheckResult[], totalCount: number }> {
+        const url = process.env.BACKEND_URL + `/api/stats/deleted-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await fetch(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get deleted files: ${(await response.json()).error}`);
         return response.json();
     }
 
-    public async getMissingArticles(limit: number = 100): Promise<MissingArticleEvent[]> {
-        const url = process.env.BACKEND_URL + `/api/stats/missing-articles?limit=${limit}`;
+        public async getMissingArticles(page: number = 1, pageSize: number = 10, search: string = ""): Promise<{ items: MissingArticleItem[], totalCount: number }> {
+        const url = process.env.BACKEND_URL + `/api/stats/missing-articles?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await fetch(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get missing articles: ${(await response.json()).error}`);
@@ -267,166 +267,421 @@ class BackendClient {
     }
 
     public async clearMissingArticles(): Promise<void> {
-        const url = process.env.BACKEND_URL + `/api/stats/missing-articles`;
-        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
-            method: "DELETE",
-            headers: { "x-api-key": apiKey }
-        });
-        if (!response.ok) throw new Error(`Failed to clear missing articles: ${(await response.json()).error}`);
+
+            const url = process.env.BACKEND_URL + `/api/stats/missing-articles`;
+
+            const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+
+            const response = await fetch(url, {
+
+                method: "DELETE",
+
+                headers: { "x-api-key": apiKey }
+
+            });
+
+            if (!response.ok) throw new Error(`Failed to clear missing articles: ${(await response.json()).error}`);
+
+        }
+
+    
+
+        public async clearDeletedFiles(): Promise<void> {
+
+            const url = process.env.BACKEND_URL + `/api/stats/deleted-files`;
+
+            const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+
+            const response = await fetch(url, {
+
+                method: "DELETE",
+
+                headers: { "x-api-key": apiKey }
+
+            });
+
+            if (!response.ok) throw new Error(`Failed to clear deleted files: ${(await response.json()).error}`);
+
+        }
+
+        public async triggerRepair(filePath: string): Promise<void> {
+            const url = process.env.BACKEND_URL + `/api/stats/repair`;
+            const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+
+            const response = await fetch(url, {
+                method: "POST",
+                headers: { 
+                    "x-api-key": apiKey,
+                    "Content-Type": "application/json" 
+                },
+                body: JSON.stringify({ filePath })
+            });
+
+            if (!response.ok) throw new Error(`Failed to trigger repair: ${(await response.json()).error}`);
+        }
+
     }
 
-    public async clearDeletedFiles(): Promise<void> {
-        const url = process.env.BACKEND_URL + `/api/stats/deleted-files`;
-        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
-            method: "DELETE",
-            headers: { "x-api-key": apiKey }
-        });
-        if (!response.ok) throw new Error(`Failed to clear deleted files: ${(await response.json()).error}`);
+    
+
+    export const backendClient = new BackendClient();
+
+    
+
+    export type QueueResponse = {
+
+        slots: QueueSlot[],
+
+        noofslots: number,
+
     }
-}
 
-export const backendClient = new BackendClient();
+    
 
-export type QueueResponse = {
-    slots: QueueSlot[],
-    noofslots: number,
-}
+    export type QueueSlot = {
 
-export type QueueSlot = {
-    nzo_id: string,
-    priority: string,
-    filename: string,
-    cat: string,
-    percentage: string,
-    true_percentage: string,
-    status: string,
-    mb: string,
-    mbleft: string,
-}
+        nzo_id: string,
 
-export type HistoryResponse = {
-    slots: HistorySlot[],
-    noofslots: number,
-}
+        priority: string,
 
-export type HistorySlot = {
-    nzo_id: string,
-    nzb_name: string,
-    name: string,
-    category: string,
-    status: string,
-    bytes: number,
-    storage: string,
-    download_time: number,
-    fail_message: string,
-}
+        filename: string,
 
-export type DirectoryItem = {
-    name: string,
-    isDirectory: boolean,
-    size: number | null | undefined,
-}
+        cat: string,
 
-export type ConfigItem = {
-    configName: string,
-    configValue: string,
-}
+        percentage: string,
 
-export type TestUsenetConnectionRequest = {
-    host: string,
-    port: string,
-    useSsl: string,
-    user: string,
-    pass: string
-}
+        true_percentage: string,
 
-export type HealthCheckQueueResponse = {
-    uncheckedCount: number,
-    pendingCount: number,
-    items: HealthCheckQueueItem[]
-}
+        status: string,
 
-export type HealthCheckQueueItem = {
-    id: string,
-    name: string,
-    path: string,
-    releaseDate: string | null,
-    lastHealthCheck: string | null,
-    nextHealthCheck: string | null,
-    progress: number,
-}
+        mb: string,
 
-export type HealthCheckHistoryResponse = {
-    stats: HealthCheckStats[],
-    items: HealthCheckResult[]
-}
+        mbleft: string,
 
-export type HealthCheckStats = {
-    result: HealthResult,
-    repairStatus: RepairAction,
-    count: number
-}
+    }
 
-export type HealthCheckResult = {
-    id: string,
-    createdAt: string,
-    davItemId: string,
-    path: string,
-    result: HealthResult,
-    repairStatus: RepairAction,
-    message: string | null,
-    jobName?: string | null
-}
+    
 
-export enum HealthResult {
-    Healthy = 0,
-    Unhealthy = 1,
-}
+    export type HistoryResponse = {
 
-export enum RepairAction {
-    None = 0,
-    Repaired = 1,
-    Deleted = 2,
-    ActionNeeded = 3,
-}
+        slots: HistorySlot[],
 
-export type ConnectionUsageContext = {
-    usageType: ConnectionUsageType,
-    details: string | null,
-    isBackup?: boolean,
-    isSecondary?: boolean
-}
+        noofslots: number,
 
-export enum ConnectionUsageType {
-    Unknown = 0,
-    Queue = 1,
-    Streaming = 2,
-    HealthCheck = 3,
-    Repair = 4,
-    BufferedStreaming = 5
-}
+    }
 
-export type BandwidthSample = {
-    id: number,
-    providerIndex: number,
-    timestamp: string,
-    bytes: number
-}
+    
 
-export type ProviderBandwidthSnapshot = {
-    providerIndex: number,
-    totalBytes: number,
-    currentSpeed: number,
-    averageLatency: number,
-    host?: string
-}
+    export type HistorySlot = {
 
-export type MissingArticleEvent = {
-    timestamp: string,
-    providerIndex: number,
-    filename: string,
-    segmentId: string,
-    error: string
-}
+        nzo_id: string,
+
+        nzb_name: string,
+
+        name: string,
+
+        category: string,
+
+        status: string,
+
+        bytes: number,
+
+        storage: string,
+
+        download_time: number,
+
+        fail_message: string,
+
+    }
+
+    
+
+    export type DirectoryItem = {
+
+        name: string,
+
+        isDirectory: boolean,
+
+        size: number | null | undefined,
+
+    }
+
+    
+
+    export type ConfigItem = {
+
+        configName: string,
+
+        configValue: string,
+
+    }
+
+    
+
+    export type TestUsenetConnectionRequest = {
+
+        host: string,
+
+        port: string,
+
+        useSsl: string,
+
+        user: string,
+
+        pass: string
+
+    }
+
+    
+
+    export type HealthCheckQueueResponse = {
+
+        uncheckedCount: number,
+
+        pendingCount: number,
+
+        items: HealthCheckQueueItem[]
+
+    }
+
+    
+
+    export type HealthCheckQueueItem = {
+
+        id: string,
+
+        name: string,
+
+        path: string,
+
+        releaseDate: string | null,
+
+        lastHealthCheck: string | null,
+
+        nextHealthCheck: string | null,
+
+        progress: number,
+
+    }
+
+    
+
+    export type HealthCheckHistoryResponse = {
+
+        stats: HealthCheckStats[],
+
+        items: HealthCheckResult[]
+
+    }
+
+    
+
+    export type HealthCheckStats = {
+
+        result: HealthResult,
+
+        repairStatus: RepairAction,
+
+        count: number
+
+    }
+
+    
+
+    export type HealthCheckResult = {
+
+        id: string,
+
+        createdAt: string,
+
+        davItemId: string,
+
+        path: string,
+
+        result: HealthResult,
+
+        repairStatus: RepairAction,
+
+        message: string | null,
+
+        jobName?: string | null
+
+    }
+
+    
+
+    export enum HealthResult {
+
+        Healthy = 0,
+
+        Unhealthy = 1,
+
+    }
+
+    
+
+    export enum RepairAction {
+
+        None = 0,
+
+        Repaired = 1,
+
+        Deleted = 2,
+
+        ActionNeeded = 3,
+
+    }
+
+    
+
+    export type ConnectionUsageContext = {
+
+        usageType: ConnectionUsageType,
+
+        details: string | null,
+
+        isBackup?: boolean,
+
+        isSecondary?: boolean
+
+    }
+
+    
+
+    export enum ConnectionUsageType {
+
+        Unknown = 0,
+
+        Queue = 1,
+
+        Streaming = 2,
+
+        HealthCheck = 3,
+
+        Repair = 4,
+
+        BufferedStreaming = 5
+
+    }
+
+    
+
+    export type BandwidthSample = {
+
+        id: number,
+
+        providerIndex: number,
+
+        timestamp: string,
+
+        bytes: number
+
+    }
+
+    
+
+    export type ProviderBandwidthSnapshot = {
+
+        providerIndex: number,
+
+        totalBytes: number,
+
+        currentSpeed: number,
+
+        averageLatency: number,
+
+        host?: string
+
+    }
+
+    
+
+        export type MissingArticleEvent = {
+
+    
+
+    
+
+    
+
+            timestamp: string,
+
+    
+
+    
+
+    
+
+            providerIndex: number,
+
+    
+
+    
+
+    
+
+            filename: string,
+
+    
+
+    
+
+    
+
+            segmentId: string,
+
+    
+
+    
+
+    
+
+            error: string
+
+    
+
+    
+
+    
+
+        }
+
+    
+
+    
+
+    
+
+        export type MissingArticleItem = {
+
+    
+
+            jobName: string;
+
+    
+
+            filename: string;
+
+    
+
+            latestTimestamp: string;
+
+    
+
+            totalEvents: number;
+
+    
+
+            providerCounts: Record<number, number>;
+
+    
+
+            hasBlockingMissingArticles: boolean;
+
+    
+
+        }
+
+    
+
+    

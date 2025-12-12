@@ -201,7 +201,7 @@ public class HealthCheckService
             Log.Debug($"[HealthCheck] Verifying segments for {davItem.Name}...");
             var progress = progressHook.ToPercentage(segments.Count);
             using var healthCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Name }));
+            using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Path }));
             await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token).ConfigureAwait(false);
             Log.Debug($"[HealthCheck] Segments verified for {davItem.Name}. Updating database...");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
@@ -276,6 +276,47 @@ public class HealthCheckService
         }
 
         return [];
+    }
+
+    public async Task TriggerManualRepairAsync(string filePath, DavDatabaseClient dbClient, CancellationToken ct)
+    {
+        Log.Information($"Manual repair triggered for file: {filePath}");
+        
+        // 1. Try exact match
+        var davItem = await dbClient.Ctx.Items.FirstOrDefaultAsync(x => x.Path == filePath, ct).ConfigureAwait(false);
+        
+        // 2. Try unescaped match
+        if (davItem == null)
+        {
+            var unescapedPath = Uri.UnescapeDataString(filePath);
+            if (unescapedPath != filePath)
+            {
+                davItem = await dbClient.Ctx.Items.FirstOrDefaultAsync(x => x.Path == unescapedPath, ct).ConfigureAwait(false);
+            }
+        }
+
+        // 3. Try match by filename (if unique)
+        if (davItem == null)
+        {
+            var fileName = Path.GetFileName(filePath);
+            var candidates = await dbClient.Ctx.Items.Where(x => x.Name == fileName).ToListAsync(ct).ConfigureAwait(false);
+            if (candidates.Count == 1)
+            {
+                davItem = candidates[0];
+                Log.Information($"Found item by filename match: {davItem.Path}");
+            }
+            else if (candidates.Count > 1)
+            {
+                throw new InvalidOperationException($"Multiple items found with filename '{fileName}'. Cannot determine target.");
+            }
+        }
+
+        if (davItem == null) throw new FileNotFoundException($"Item not found: {filePath}");
+
+        // when usenet article is missing, perform repairs
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var _ = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path }));
+        await Repair(davItem, dbClient, cts.Token, "Manual repair triggered by user").ConfigureAwait(false);
     }
 
     private async Task Repair(DavItem davItem, DavDatabaseClient dbClient, CancellationToken ct, string? failureDetails = null)

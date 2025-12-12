@@ -7,3 +7,7 @@
 /.react-router/
 /build/
 /dist-node/
+server.js
+server.d.ts
+vite.config.js
+vite.config.d.ts

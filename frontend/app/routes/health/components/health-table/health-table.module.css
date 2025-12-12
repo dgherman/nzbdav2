@@ -210,6 +210,16 @@
     width: 85px;
 }
 
+.actionButton {
+    transition: transform 0.2s, opacity 0.2s;
+    opacity: 0.8;
+    
+    &:hover {
+        opacity: 1;
+        transform: scale(1.2);
+    }
+}
+
 /* mobile */
 @media not (min-width: 900px) {
     .desktop {

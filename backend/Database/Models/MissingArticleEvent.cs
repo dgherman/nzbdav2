@@ -17,5 +17,7 @@ public class MissingArticleEvent
 
     public string SegmentId { get; set; } = string.Empty;
 
+    public string JobName { get; set; } = string.Empty;
+
     public string Error { get; set; } = string.Empty;
 }

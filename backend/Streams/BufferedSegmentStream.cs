@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Diagnostics;
 using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
@@ -119,11 +120,19 @@ public class BufferedSegmentStream : Stream
                 {
                     Log.Debug($"[BufferedStream] Worker {workerId} started");
                     var segmentCount = 0;
+                    var currentSegmentId = "none";
+                    var currentSegmentIndex = -1;
+                    var stopwatch = new Stopwatch();
+
                     try
                     {
                         await foreach (var (index, segmentId) in segmentQueue.Reader.ReadAllAsync(ct).ConfigureAwait(false))
                         {
                             segmentCount++;
+                            currentSegmentId = segmentId;
+                            currentSegmentIndex = index;
+                            stopwatch.Restart();
+
                             Log.Debug($"[BufferedStream] Worker {workerId} processing segment {index}: {segmentId} (#{segmentCount})");
                             
                             Stream? stream = null;
@@ -211,7 +220,12 @@ public class BufferedSegmentStream : Stream
                     }
                     catch (OperationCanceledException ex)
                     {
-                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments (operation exceeded 90 seconds, operation: GetSegmentStream): {ex.Message}");
+                        stopwatch.Stop();
+                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments. " +
+                            $"Segment: {currentSegmentIndex} ({currentSegmentId}). " +
+                            $"Elapsed: {stopwatch.Elapsed.TotalSeconds:F2}s. " +
+                            $"Parent Canceled: {ct.IsCancellationRequested}. " +
+                            $"Msg: {ex.Message}");
                         throw;
                     }
                     catch (TimeoutException ex)

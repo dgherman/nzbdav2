@@ -15,6 +15,7 @@ export type HealthTableProps = {
     onPageChange: (page: number) => void,
     onSearchChange: (search: string) => void,
     onShowAllChange: (showAll: boolean) => void,
+    onRunHealthCheck: (id: string) => void,
 }
 
 export function HealthTable({ 
@@ -27,7 +28,8 @@ export function HealthTable({
     showAll,
     onPageChange,
     onSearchChange,
-    onShowAllChange
+    onShowAllChange,
+    onRunHealthCheck
 }: HealthTableProps) {
 
     const totalPages = Math.ceil(totalCount / pageSize);
@@ -97,6 +99,7 @@ export function HealthTable({
                                     <th className={styles.desktop}>Created</th>
                                     <th className={styles.desktop}>Last Check</th>
                                     <th className={styles.desktop}>Next Check</th>
+                                    <th>Actions</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -107,7 +110,7 @@ export function HealthTable({
                                                 <div className={styles.name}><Truncate>{item.name}</Truncate></div>
                                                 <div className={styles.path}><Truncate>{item.path}</Truncate></div>
                                                 <div className={styles.mobile}>
-                                                    <DateDetailsTable item={item} />
+                                                    <DateDetailsTable item={item} onRunHealthCheck={onRunHealthCheck} />
                                                 </div>
                                             </div>
                                         </td>
@@ -122,6 +125,17 @@ export function HealthTable({
                                                 ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
                                                 : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
                                             }
+                                        </td>
+                                        <td>
+                                            <div 
+                                                className={styles.actionButton} 
+                                                onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
+                                                title="Run Health Check Now"
+                                                role="button"
+                                                style={{ cursor: 'pointer', fontSize: '1.2rem' }}
+                                            >
+                                                ▶️
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}
@@ -148,7 +162,7 @@ export function HealthTable({
     );
 }
 
-function DateDetailsTable({ item }: { item: HealthCheckQueueItem }) {
+function DateDetailsTable({ item, onRunHealthCheck }: { item: HealthCheckQueueItem, onRunHealthCheck: (id: string) => void }) {
     return (
         <div className={styles.dateDetailsTable}>
             <div className={styles.dateDetailsRow}>
@@ -170,6 +184,20 @@ function DateDetailsTable({ item }: { item: HealthCheckQueueItem }) {
                         ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
                         : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
                     }
+                </div>
+            </div>
+            <div className={styles.dateDetailsRow}>
+                <div className={styles.dateDetailsLabel}>Actions</div>
+                <div className={styles.dateDetailsValue}>
+                    <div 
+                        className={styles.actionButton} 
+                        onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
+                        title="Run Health Check Now"
+                        role="button"
+                        style={{ cursor: 'pointer', fontSize: '1.2rem' }}
+                    >
+                        ▶️
+                    </div>
                 </div>
             </div>
         </div>

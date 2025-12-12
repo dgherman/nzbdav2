@@ -138,6 +138,16 @@ class Program
         app.Services.GetRequiredService<HealthCheckService>();
         app.Services.GetRequiredService<BandwidthService>();
 
+        // Backfill JobNames for missing article events (Background, delayed)
+        _ = Task.Run(async () =>
+        {
+            // Wait for 2 minutes to allow application to start and pass health checks
+            await Task.Delay(TimeSpan.FromMinutes(2), app.Lifetime.ApplicationStopping);
+            
+            await app.Services.GetRequiredService<ProviderErrorService>()
+                .BackfillJobNamesAsync(app.Lifetime.ApplicationStopping);
+        }, app.Lifetime.ApplicationStopping);
+
         // run
         app.UseMiddleware<ExceptionMiddleware>();
         // ReservedConnectionsMiddleware removed - using GlobalOperationLimiter instead

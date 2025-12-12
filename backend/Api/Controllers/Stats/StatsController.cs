@@ -2,6 +2,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
+using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
@@ -10,13 +11,20 @@ using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Api.Controllers.Stats;
 
+public class RepairRequest
+{
+    public string FilePath { get; set; } = string.Empty;
+}
+
 [ApiController]
 [Route("api/stats")]
 public class StatsController(
     UsenetStreamingClient streamingClient,
     DavDatabaseContext dbContext,
     BandwidthService bandwidthService,
-    ProviderErrorService providerErrorService
+    ProviderErrorService providerErrorService,
+    HealthCheckService healthCheckService,
+    ConfigManager configManager
 ) : ControllerBase
 {
     private void EnsureAuthenticated()
@@ -36,6 +44,14 @@ public class StatsController(
         catch (UnauthorizedAccessException e)
         {
             return Unauthorized(new { error = e.Message });
+        }
+        catch (FileNotFoundException e)
+        {
+            return NotFound(new { error = e.Message });
+        }
+        catch (InvalidOperationException e)
+        {
+            return BadRequest(new { error = e.Message });
         }
         catch (Exception e)
         {
@@ -105,18 +121,28 @@ public class StatsController(
     }
 
     [HttpGet("deleted-files")]
-    public Task<IActionResult> GetDeletedFiles([FromQuery] int limit = 100)
+    public Task<IActionResult> GetDeletedFiles([FromQuery] int page = 1, [FromQuery] int pageSize = 50, [FromQuery] string? search = null)
     {
         return ExecuteSafely(async () =>
         {
-            var deleted = await dbContext.HealthCheckResults
+            var query = dbContext.HealthCheckResults
                 .AsNoTracking()
-                .Where(x => x.RepairStatus == HealthCheckResult.RepairAction.Deleted)
+                .Where(x => x.RepairStatus == HealthCheckResult.RepairAction.Deleted);
+
+            if (!string.IsNullOrWhiteSpace(search))
+            {
+                query = query.Where(x => x.Path.Contains(search) || x.Message.Contains(search));
+            }
+
+            var totalCount = await query.CountAsync();
+
+            var deleted = await query
                 .OrderByDescending(x => x.CreatedAt)
-                .Take(limit)
+                .Skip((page - 1) * pageSize)
+                .Take(pageSize)
                 .ToListAsync();
 
-            var response = deleted.Select(x =>
+            var items = deleted.Select(x =>
             {
                 var parts = x.Path.Split('/', StringSplitOptions.RemoveEmptyEntries);
                 // Expected path: /content/{Category}/{JobName}/{FileName}
@@ -138,17 +164,18 @@ public class StatsController(
                 };
             });
 
-            return Ok(response);
+            return Ok(new { items, totalCount });
         });
     }
 
     [HttpGet("missing-articles")]
-    public Task<IActionResult> GetMissingArticles([FromQuery] int limit = 100)
+    public Task<IActionResult> GetMissingArticles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null)
     {
         return ExecuteSafely(async () =>
         {
-            var errors = await providerErrorService.GetErrorsAsync(limit);
-            return Ok(errors);
+            var providerCount = configManager.GetUsenetProviderConfig().Providers.Count;
+            var (items, totalCount) = await providerErrorService.GetFileSummariesPagedAsync(page, pageSize, providerCount, search);
+            return Ok(new { items, totalCount });
         });
     }
 
@@ -172,6 +199,21 @@ public class StatsController(
                 .ExecuteDeleteAsync();
 
             return Ok(new { message = "Deleted files log cleared successfully" });
+        });
+    }
+
+    [HttpPost("repair")]
+    public Task<IActionResult> TriggerRepair([FromBody] RepairRequest request)
+    {
+        return ExecuteSafely(async () =>
+        {
+            if (string.IsNullOrWhiteSpace(request.FilePath))
+                return BadRequest(new { error = "FilePath is required" });
+                
+            var dbClient = new DavDatabaseClient(dbContext);
+            await healthCheckService.TriggerManualRepairAsync(request.FilePath, dbClient, CancellationToken.None);
+            await providerErrorService.ClearErrorsForFile(request.FilePath);
+            return Ok(new { message = "Repair triggered successfully" });
         });
     }
 }
