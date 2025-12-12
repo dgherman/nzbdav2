@@ -204,7 +204,7 @@ public class MultiProviderNntpClient : INntpClient
             : $"Provider {providerIndex}";
 
         if (_providerErrorService == null) return;
-        _providerErrorService.RecordError(providerIndex, filename, segmentId ?? "", "Article not found");
+        _providerErrorService.RecordError(providerIndex, filename, segmentId ?? "", "Article not found", context.IsImported);
     }
 
     private IEnumerable<MultiConnectionNntpClient> GetOrderedProviders(MultiConnectionNntpClient? preferredProvider)

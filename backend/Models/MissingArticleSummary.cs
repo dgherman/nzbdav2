@@ -8,6 +8,7 @@ public class MissingArticleItem
     public int TotalEvents { get; set; }
     public Dictionary<int, int> ProviderCounts { get; set; } = new();
     public bool HasBlockingMissingArticles { get; set; }
+    public bool IsImported { get; set; }
 }
 
 public class MissingArticleJobSummary
