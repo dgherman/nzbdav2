@@ -30,12 +30,12 @@ The upstream uses `MultiSegmentStream.cs` and `UnbufferedMultiSegmentStream.cs`.
 
 ## Part 2: General Upstream Improvements Analysis
 
-Beyond streaming, several recent upstream commits offer valuable improvements that should be integrated.
+Beyond streaming, several recent upstream commits offer valuable improvements.
 
 ### 1. Repair Retry Logic (`2926a3d`)
 *   **Upstream:** If a health check/repair operation throws an exception, it schedules a retry for 1 day later (`NextHealthCheck = Now + 1.Day`).
-*   **Local:** Currently, if a file enters the `ActionNeeded` state (failed repair), it is effectively removed from the health check loop forever (due to query filtering).
-*   **Recommendation:** **Strongly Recommend Adoption.** Transient errors (network blips, temporary provider issues) shouldn't permanently disqualify a file. The retry logic ensures self-healing over time.
+*   **Local:** Previously, if a file entered the `ActionNeeded` state (failed repair), it was effectively removed from the health check loop forever.
+*   **Status:** **Adopted.** The local codebase has been updated to remove the exclusion filter and schedule retries for `ActionNeeded` items.
 
 ### 2. Context Propagation (`e841071`)
 *   **Upstream:** Introduced `ContextualCancellationTokenSource` which automatically forwards contexts (like `DownloadPriorityContext`) when linking tokens.
@@ -49,17 +49,16 @@ Beyond streaming, several recent upstream commits offer valuable improvements th
 
 ### 4. Rar Exception Unwrapping (`72d7eb6`)
 *   **Upstream:** Added `TryGetInnerException` to `ExceptionExtensions` and uses it during Rar processing. This ensures that if a `UsenetArticleNotFoundException` causes a Rar unpack error, it is correctly identified as a missing article rather than a generic `InvalidOperationException`.
-*   **Local:** May swallow these inner exceptions, leading to generic "Unhealthy" states instead of "Missing Articles".
-*   **Recommendation:** **Adopt.** Improves diagnostic accuracy.
+*   **Local:** Was possibly swallowing these inner exceptions.
+*   **Status:** **Adopted.** `ExceptionExtensions` and `RarUtil` have been updated to unwrap these exceptions.
 
 ### 5. 7z Progress Tracking (`20b69b0`)
 *   **Upstream:** Added `MultiProgress` class to `ProgressExtensions` to handle progress reporting for nested parallel operations (like 7z extraction).
 *   **Local:** Standard progress reporting.
-*   **Recommendation:** **Adopt** if 7z support is a priority.
+*   **Recommendation:** **Adopt** if 7z support becomes a priority.
 
-## Summary of Actionable Items
+## Summary of Actions Taken
 
-1.  **Modify `HealthCheckService`** to implement the "Retry Daily" logic and remove the filter that excludes `ActionNeeded` items.
-2.  **Port `ContextualCancellationTokenSource`** (or equivalent helper) to simplify token management.
-3.  **Update `RarUtil`** to unwrap exceptions for better error reporting.
-4.  **Keep `BufferedSegmentStream`** as the default but consider porting `UnbufferedMultiSegmentStream` as an option.
+1.  **Modified `HealthCheckService`** to implement the "Retry Daily" logic.
+2.  **Updated `RarUtil` & `ExceptionExtensions`** to unwrap exceptions for better error reporting.
+3.  **Analyzed Streaming:** Confirmed local `BufferedSegmentStream` is preferred.
