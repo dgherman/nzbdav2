@@ -1,9 +1,11 @@
 using System.ComponentModel.DataAnnotations;
 using System.ComponentModel.DataAnnotations.Schema;
+using Microsoft.EntityFrameworkCore;
 
 namespace NzbWebDAV.Database.Models;
 
 [Table("MissingArticleEvents")]
+[Index(nameof(Filename), nameof(JobName), nameof(Timestamp))]
 public class MissingArticleEvent
 {
     [Key]
