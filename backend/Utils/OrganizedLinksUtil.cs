@@ -62,7 +62,7 @@ public static class OrganizedLinksUtil
         string? result = null;
         foreach (var davItemLink in GetLibraryDavItemLinks(configManager))
         {
-            Cache[targetDavItem.Id] = davItemLink.LinkPath;
+            Cache[davItemLink.DavItemId] = davItemLink.LinkPath;
             if (davItemLink.DavItemId == targetDavItem.Id)
                 result = davItemLink.LinkPath;
         }
