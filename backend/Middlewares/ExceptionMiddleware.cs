@@ -37,7 +37,8 @@ public class ExceptionMiddleware(RequestDelegate next)
             }
 
             var filePath = GetRequestFilePath(context);
-            Log.Error($"File `{filePath}` has missing articles: {e.Message}");
+            // Log only the message for expected UsenetArticleNotFoundException, without stack trace
+            Log.Error("File `{FilePath}` has missing articles: {ErrorMessage}", filePath, e.Message);
 
             if (context.Items["DavItem"] is DavItem davItem)
             {
@@ -79,6 +80,29 @@ public class ExceptionMiddleware(RequestDelegate next)
             var filePath = GetRequestFilePath(context);
             var seekPosition = context.Request.GetRange()?.Start?.ToString() ?? "unknown";
             Log.Error($"File `{filePath}` could not seek to byte position: {seekPosition}");
+        }
+        catch (System.TimeoutException e)
+        {
+            var filePath = GetRequestFilePath(context);
+            var seekPosition = context.Request.GetRange()?.Start?.ToString() ?? "0";
+
+            if (e.Message.Contains("Operation timed out on provider "))
+            {
+                // Log without stack trace for specific timeout messages
+                Log.Warning("Operation timed out on Usenet provider for file `{FilePath}` at seek position {SeekPosition}: {ErrorMessage}", filePath, seekPosition, e.Message);
+            }
+            else
+            {
+                // Log with stack trace for other TimeoutExceptions
+                Log.Error(e, "An unhandled timeout exception occurred for file `{FilePath}` at seek position {SeekPosition}.", filePath, seekPosition);
+            }
+
+            if (!context.Response.HasStarted)
+            {
+                context.Response.Clear();
+                context.Response.StatusCode = 500; // Internal Server Error
+                await context.Response.WriteAsync("An error occurred during processing.").ConfigureAwait(false);
+            }
         }
         catch (Exception e) when (IsDavItemRequest(context))
         {

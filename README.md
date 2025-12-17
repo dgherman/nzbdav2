@@ -299,6 +299,27 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.6 (2025-12-17)
+*   **Logging**: Suppressed stack traces for `System.TimeoutException` originating from Usenet provider timeouts to reduce log noise.
+
+## v0.1.5 (2025-12-16)
+*   **UI Improvements**: Renamed "Job Name" column to "Scene Name" in the Mapped Files table for clarity.
+*   **Performance**: The Mapped Files table now uses a persistent database table (`LocalLinks`), eliminating "Initializing" delays and high memory usage for large libraries. Deletions are automatically synchronized.
+*   **Accuracy**: The Missing Articles table now dynamically checks import status against the persistent mapped files table, ensuring the "Imported" badge is always up-to-date.
+*   **Log Management**: Added "Delete" button to the Missing Articles table to remove individual file entries from the log.
+*   **Fix**: Resolved a `NullReferenceException` in `ArrClient` when attempting to mark history items as failed if the grab event could not be found in history.
+*   **Media Management**: Added "Repair" button to the Mapped Files table, allowing manual triggering of file repair (delete & blacklist/search) directly from the mapping view.
+*   **Testing**: Added "Manual Repair / Blacklist" tool in Settings > Radarr/Sonarr to test blacklisting logic by manually triggering repair for a release name.
+*   **Robustness**: Enhanced repair logic (Health Check & Manual) to better handle Docker volume mapping discrepancies. It now attempts to find media items by filename or folder name if exact path matching fails.
+*   **UI Clarity**: Changed the "Imported" column in the Missing Articles table to "Mapped" with a badge indicator for better clarity on files used by Sonarr/Radarr.
+*   **Diagnostics**: Added a "NzbDav Path" column to the Missing Articles table, displaying the internal path (`/mnt/remote/nzbdav/.ids/...`) for easier debugging and reference.
+*   **UI Improvements**: Cells in the Missing Articles table (Job Name, Filename, NzbDav Path) are now expandable on click to view full text that doesn't fit the column width.
+*   **Maintenance**: Added "Connection Management" tools in Settings > Maintenance to forcefully reset active connections by type (Queue, Health Check, Streaming), useful for clearing stalled items.
+*   **Log Management**: Added "Orphaned (Empty ID)" filter to the Missing Articles table to easily find errors associated with deleted files. Also added "Delete Selected" functionality for bulk log cleanup.
+*   **Filtering**: Added a "Not Mapped" filter to the Missing Articles table to show files not linked in Sonarr/Radarr, and a "Blocked Only" checkbox for quick access to critical errors.
+*   **Bug Fix**: Corrected the internal path format in the Missing Articles table to correctly show the nested ID structure (e.g., `/.ids/1/2/3/4/5/uuid...`).
+*   **Optimization**: Renamed `BackfillIsImportedStatusAsync` to `BackfillDavItemIdsAsync` and streamlined the startup backfill process to focus on populating missing DavItem IDs for mapped files logic.
+*   **Diagnostics**: Enhanced logging in `ArrClient` (Sonarr/Radarr) to dump recent history records when a "grab event" cannot be found during the repair/blacklist process, aiding in troubleshooting matching issues.
 ## v0.1.4 (2025-12-08)
 *   **Performance Optimization**: Addressed slow UI loading for stats pages by refactoring backend services to use asynchronous database queries and enabling SQLite WAL (Write-Ahead Logging) mode for improved concurrency.
 *   **Deleted Files UI Improvements**: The "Deleted Files" table now identifies and displays the original NZB/Job name for files with obfuscated filenames, making it easier to track which content was removed.
