@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.16 (2025-12-17)
+*   **Logging**: Fixed excessive error logging of `System.TimeoutException` in `ThreadSafeNntpClient.GetSegmentStreamAsync`. This ensures that expected timeout errors (often transient) are rethrown to higher layers for handling without generating full stack traces in the low-level client logs.
+
 ## v0.1.15 (2025-12-17)
 *   **Logging**: Suppressed stack traces for `TimeoutException` in `BufferedSegmentStream`. This further reduces log noise for connection timeouts that bubble up from the low-level client, logging them as warnings instead of errors with full stack traces.
 

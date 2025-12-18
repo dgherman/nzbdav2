@@ -94,7 +94,7 @@ public class ThreadSafeNntpClient : INntpClient
                     // we just rethrow it. The caller (MultiProviderNntpClient) is responsible for handling this 
                     // (e.g. trying another provider). We don't want to log this as an error here because it's 
                     // a normal occurrence (or expected transient failure) in a multi-provider setup.
-                    if (ex is UsenetArticleNotFoundException || ex is System.IO.IOException)
+                    if (ex is UsenetArticleNotFoundException || ex is System.IO.IOException || ex is TimeoutException)
                     {
                         try
                         {
