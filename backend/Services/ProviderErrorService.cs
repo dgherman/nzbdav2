@@ -25,12 +25,20 @@ public class ProviderErrorService : IDisposable
 
     private async Task PersistenceLoop()
     {
+        var cleanupTickCounter = 0;
         try
         {
             using var timer = new PeriodicTimer(TimeSpan.FromSeconds(10));
             while (await timer.WaitForNextTickAsync(_cts.Token))
             {
                 await PersistEvents();
+
+                cleanupTickCounter++;
+                if (cleanupTickCounter >= 30) // Run cleanup every ~5 minutes (30 * 10s)
+                {
+                    cleanupTickCounter = 0;
+                    await CleanupOrphanedErrorsAsync(_cts.Token);
+                }
             }
         }
         catch (OperationCanceledException)
@@ -458,31 +466,45 @@ public class ProviderErrorService : IDisposable
             using var scope = _scopeFactory.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
 
-            Log.Information("[ProviderErrorService] Cleaning up orphaned missing article errors...");
+            // Log.Debug("[ProviderErrorService] Checking for orphaned missing article errors..."); // Debug log to avoid noise
 
-            // Find summaries where the corresponding file path no longer exists in DavItems
-            var orphans = await dbContext.MissingArticleSummaries
-                .Where(s => !dbContext.Items.Any(i => i.Path == s.Filename))
+            // 1. Identify orphans by Empty ID (Failed linkage)
+            // Since BackfillDavItemIdsAsync runs at startup, persistent Empty IDs mean the file is not in DB.
+            var emptyIdOrphans = await dbContext.MissingArticleSummaries
+                .Where(x => x.DavItemId == Guid.Empty)
+                .Select(x => x.Filename)
                 .ToListAsync(ct);
+                
+            // 2. Identify orphans by Deleted Item (ID exists but Item gone)
+            var deletedItemOrphans = await dbContext.MissingArticleSummaries
+                .Where(s => s.DavItemId != Guid.Empty && !dbContext.Items.Any(i => i.Id == s.DavItemId))
+                .Select(x => x.Filename)
+                .ToListAsync(ct);
+            
+            var allOrphanFilenames = emptyIdOrphans.Concat(deletedItemOrphans).Distinct().ToList();
 
-            if (orphans.Count > 0)
+            if (allOrphanFilenames.Count > 0)
             {
-                var filenames = orphans.Select(x => x.Filename).ToList();
+                Log.Information($"[ProviderErrorService] Found {allOrphanFilenames.Count} orphaned missing article summaries. Cleaning up...");
 
-                // Delete Summaries
-                dbContext.MissingArticleSummaries.RemoveRange(orphans);
-                await dbContext.SaveChangesAsync(ct);
+                // Batch deletion to avoid too many parameters in SQL
+                const int batchSize = 500;
+                for (int i = 0; i < allOrphanFilenames.Count; i += batchSize)
+                {
+                    var batch = allOrphanFilenames.Skip(i).Take(batchSize).ToList();
+                    
+                    // Delete Summaries
+                    await dbContext.MissingArticleSummaries
+                        .Where(x => batch.Contains(x.Filename))
+                        .ExecuteDeleteAsync(ct);
 
-                // Delete Events (Batching for safety if list is huge, though usually fine)
-                await dbContext.MissingArticleEvents
-                    .Where(x => filenames.Contains(x.Filename))
-                    .ExecuteDeleteAsync(ct);
+                    // Delete Events
+                    await dbContext.MissingArticleEvents
+                        .Where(x => batch.Contains(x.Filename))
+                        .ExecuteDeleteAsync(ct);
+                }
 
-                Log.Information($"[ProviderErrorService] Cleaned up {orphans.Count} orphaned missing article summaries.");
-            }
-            else
-            {
-                Log.Information("[ProviderErrorService] No orphaned missing article errors found.");
+                Log.Information($"[ProviderErrorService] Cleaned up orphans for {allOrphanFilenames.Count} files.");
             }
         }
         catch (Exception ex)

@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.9 (2025-12-17)
+*   **Maintenance**: Improved automatic cleanup of orphaned "Missing Article" logs. The system now periodically scans for and removes error logs associated with files that have been deleted or have invalid (Empty) Dav IDs, addressing the issue of persistent "00000000..." entries in the Missing Articles table.
+
 ## v0.1.8 (2025-12-17)
 *   **Performance**: Significantly improved loading performance of the 'Deleted Files' table by adding a database index on `HealthCheckResult` (`RepairStatus`, `CreatedAt`).
 
