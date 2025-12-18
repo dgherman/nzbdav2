@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.24 (2025-12-17)
+*   **Logging**: Fixed a build error by ensuring `global::Usenet.Exceptions.NntpException` is correctly referenced in `ThreadSafeNntpClient.GetSegmentStreamAsync` to suppress stack traces for 'Received invalid response' errors.
+
 ## v0.1.23 (2025-12-17)
 *   **Logging**: Fixed excessive error logging of `Usenet.Exceptions.NntpException` in `ThreadSafeNntpClient.GetSegmentStreamAsync`. This ensures that "Received invalid response" errors (often due to provider issues) are rethrown without generating full stack traces in the low-level client logs.
 
