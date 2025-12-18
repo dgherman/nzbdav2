@@ -299,6 +299,14 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.23 (2025-12-17)
+*   **Logging**: Fixed excessive error logging of `Usenet.Exceptions.NntpException` in `ThreadSafeNntpClient.GetSegmentStreamAsync`. This ensures that "Received invalid response" errors (often due to provider issues) are rethrown without generating full stack traces in the low-level client logs.
+
+## v0.1.22 (2025-12-17)
+*   **Tooling**: Enhanced `ArrHistoryTester` with verbose logging, including full JSON dumps of history events and debug-level traces of API calls, to aid in troubleshooting integration issues.
+*   **Fix**: Corrected Sonarr history API calls to use the valid `seriesId` (singular) parameter instead of `seriesIds`.
+*   **Fix**: Updated Sonarr and Radarr history lookups to request a larger `pageSize` (default 1000), ensuring grab events are found even in extensive history.
+
 ## v0.1.21 (2025-12-17)
 *   **Fix**: Resolved a race condition where a routine health check could overwrite and clear the "Urgent" status of a file that failed streaming, effectively ignoring the failure. The system now re-verifies the file's status before saving results.
 *   **Fix**: Corrected timeout handling for urgent health checks. If an urgent check times out, it is no longer rescheduled to the future (downgrading it to a routine check), but instead maintains its high priority to ensure a rigorous retry.
