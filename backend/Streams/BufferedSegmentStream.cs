@@ -289,7 +289,9 @@ public class BufferedSegmentStream : Stream
         }
         catch (Exception ex)
         {
-            var jobName = _usageContext?.DetailsObject?.Text != null ? Path.GetFileName(_usageContext.DetailsObject.Text) : "Unknown";
+            var jobName = (_usageContext.HasValue && _usageContext.Value.DetailsObject?.Text != null) 
+                ? Path.GetFileName(_usageContext.Value.DetailsObject.Text) 
+                : "Unknown";
 
             if (ex is UsenetArticleNotFoundException || (ex is AggregateException agg && agg.InnerExceptions.Any(e => e is UsenetArticleNotFoundException)))
             {

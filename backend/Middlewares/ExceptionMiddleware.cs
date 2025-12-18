@@ -37,18 +37,12 @@ public class ExceptionMiddleware(RequestDelegate next)
             }
 
             var filePath = GetRequestFilePath(context);
-            // Log only the message for expected UsenetArticleNotFoundException, without stack trace
+            
             if (context.Items["DavItem"] is DavItem davItem)
             {
+                // Log with Job Name context
                 Log.Error("File `{FilePath}` (Job: {JobName}) has missing articles: {ErrorMessage}", filePath, davItem.Name, e.Message);
-            }
-            else
-            {
-                Log.Error("File `{FilePath}` has missing articles: {ErrorMessage}", filePath, e.Message);
-            }
 
-            if (context.Items["DavItem"] is DavItem davItem)
-            {
                 try
                 {
                     using var scope = context.RequestServices.CreateScope();
@@ -74,6 +68,11 @@ public class ExceptionMiddleware(RequestDelegate next)
                 {
                     Log.Error(ex, "Failed to queue item for health check.");
                 }
+            }
+            else
+            {
+                // Log without Job Name context
+                Log.Error("File `{FilePath}` has missing articles: {ErrorMessage}", filePath, e.Message);
             }
         }
         catch (SeekPositionNotFoundException)
