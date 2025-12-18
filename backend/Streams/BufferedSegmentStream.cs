@@ -3,8 +3,10 @@ using System.Diagnostics;
 using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
+using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using Serilog;
+using System.IO;
 
 namespace NzbWebDAV.Streams;
 
@@ -287,14 +289,16 @@ public class BufferedSegmentStream : Stream
         }
         catch (Exception ex)
         {
+            var jobName = _usageContext?.DetailsObject?.Text != null ? Path.GetFileName(_usageContext.DetailsObject.Text) : "Unknown";
+
             if (ex is UsenetArticleNotFoundException || (ex is AggregateException agg && agg.InnerExceptions.Any(e => e is UsenetArticleNotFoundException)))
             {
                 // Log without stack trace for expected missing article errors
-                Log.Error($"[BufferedStream] Error in FetchSegmentsAsync: {ex.Message}");
+                Log.Error($"[BufferedStream] Error in FetchSegmentsAsync for Job: '{jobName}': {ex.Message}");
             }
             else
             {
-                Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync");
+                Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync for Job: '{JobName}'", jobName);
             }
             _bufferChannel.Writer.Complete(ex);
         }

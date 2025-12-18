@@ -38,7 +38,14 @@ public class ExceptionMiddleware(RequestDelegate next)
 
             var filePath = GetRequestFilePath(context);
             // Log only the message for expected UsenetArticleNotFoundException, without stack trace
-            Log.Error("File `{FilePath}` has missing articles: {ErrorMessage}", filePath, e.Message);
+            if (context.Items["DavItem"] is DavItem davItem)
+            {
+                Log.Error("File `{FilePath}` (Job: {JobName}) has missing articles: {ErrorMessage}", filePath, davItem.Name, e.Message);
+            }
+            else
+            {
+                Log.Error("File `{FilePath}` has missing articles: {ErrorMessage}", filePath, e.Message);
+            }
 
             if (context.Items["DavItem"] is DavItem davItem)
             {

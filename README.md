@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.11 (2025-12-17)
+*   **Logging**: Enhanced `UsenetArticleNotFoundException` log messages to include the relevant Job Name/Nzb Name. This provides better context for identifying which specific content is missing articles, across both API requests and streaming operations.
+
 ## v0.1.10 (2025-12-17)
 *   **Logging**: Suppressed stack traces for `UsenetArticleNotFoundException` in `BufferedSegmentStream`. This reduces log noise when all providers fail to find an article during streaming, while still logging the error message.
 
