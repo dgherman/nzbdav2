@@ -66,9 +66,9 @@ public class ExceptionMiddleware(RequestDelegate next)
                         .ConfigureAwait(false);
                         
                     if (rows > 0)
-                        Log.Information($"Bumping priority for item `{davItem.Name}` to immediate health check/repair.");
+                        Log.Information($"[HealthCheckTrigger] Item `{davItem.Name}` priority set to immediate health check/repair due to missing articles.");
                     else
-                        Log.Information($"Item `{davItem.Name}` is already at highest priority for health check.");
+                        Log.Information($"[HealthCheckTrigger] Item `{davItem.Name}` already at highest priority for health check due to missing articles.");
                 }
                 catch (Exception ex)
                 {
