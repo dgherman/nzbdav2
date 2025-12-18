@@ -90,10 +90,11 @@ public class ThreadSafeNntpClient : INntpClient
                 }
                 catch (Exception ex)
                 {
-                    // If the article is not found, we just rethrow it.
-                    // The caller (MultiProviderNntpClient) is responsible for handling this (e.g. trying another provider).
-                    // We don't want to log this as an error here because it's a normal occurrence in a multi-provider setup.
-                    if (ex is UsenetArticleNotFoundException)
+                    // If the article is not found, or if there's a network IO exception (e.g. connection aborted),
+                    // we just rethrow it. The caller (MultiProviderNntpClient) is responsible for handling this 
+                    // (e.g. trying another provider). We don't want to log this as an error here because it's 
+                    // a normal occurrence (or expected transient failure) in a multi-provider setup.
+                    if (ex is UsenetArticleNotFoundException || ex is System.IO.IOException)
                     {
                         try
                         {

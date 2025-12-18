@@ -299,8 +299,8 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
-## v0.1.13 (2025-12-17)
-*   **Logging**: Fixed excessive error logging by ensuring `UsenetArticleNotFoundException` is rethrown without logging in the low-level `ThreadSafeNntpClient`. This prevents stack traces from appearing in the logs for every missing article when expected failures are handled by the multi-provider client.
+## v0.1.14 (2025-12-17)
+*   **Logging**: Suppressed stack traces for `System.IO.IOException` (e.g., "Connection aborted") in `ThreadSafeNntpClient`. This reduces log noise for expected transient network issues during streaming.
 
 ## v0.1.13 (2025-12-17)
 *   **Logging**: Fixed excessive error logging by ensuring `UsenetArticleNotFoundException` is rethrown without logging in the low-level `ThreadSafeNntpClient`. This prevents stack traces from appearing in the logs for every missing article when expected failures are handled by the multi-provider client.
