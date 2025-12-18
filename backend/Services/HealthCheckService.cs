@@ -93,9 +93,14 @@ public class HealthCheckService
                     continue;
                 }
 
+                // Determine if this is an urgent health check (triggered by streaming failure) or a routine one.
+                // Urgent checks (MinValue) use HEAD for accuracy. Routine checks use STAT for speed.
+                var isUrgentCheck = davItem.NextHealthCheck == DateTimeOffset.MinValue;
+                var useHead = isUrgentCheck;
+
                 // perform the health check
-                Log.Information($"[HealthCheck] Processing item: {davItem.Name} ({davItem.Id})");
-                await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token).ConfigureAwait(false);
+                Log.Information($"[HealthCheck] Processing item: {davItem.Name} ({davItem.Id}). Type: {(isUrgentCheck ? "Urgent (HEAD)" : "Routine (STAT)")}");
+                await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token, useHead).ConfigureAwait(false);
                 
                 // Success! Remove from timeout tracking
                 _timeoutCounts.TryRemove(davItem.Id, out _);
@@ -187,7 +192,8 @@ public class HealthCheckService
         DavItem davItem,
         DavDatabaseClient dbClient,
         int concurrency,
-        CancellationToken ct
+        CancellationToken ct,
+        bool useHead
     )
     {
         List<string> segments = [];
@@ -209,12 +215,12 @@ public class HealthCheckService
             };
 
             // perform health check
-            Log.Debug($"[HealthCheck] Verifying segments for {davItem.Name}...");
+            Log.Debug($"[HealthCheck] Verifying segments for {davItem.Name} using {(useHead ? "HEAD" : "STAT")}...");
             var progress = progressHook.ToPercentage(segments.Count);
             var isImported = OrganizedLinksUtil.GetLink(davItem, _configManager, allowScan: false) != null;
             using var healthCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Path, IsImported = isImported }));
-            await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token).ConfigureAwait(false);
+            await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token, useHead).ConfigureAwait(false);
             Log.Debug($"[HealthCheck] Segments verified for {davItem.Name}. Updating database...");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");

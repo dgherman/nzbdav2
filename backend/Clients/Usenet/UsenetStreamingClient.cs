@@ -70,7 +70,8 @@ public class UsenetStreamingClient
         IEnumerable<string> segmentIds,
         int concurrency,
         IProgress<int>? progress = null,
-        CancellationToken cancellationToken = default
+        CancellationToken cancellationToken = default,
+        bool useHead = true
     )
     {
         // No need to copy ReservedPooledConnectionsContext - operation limits handle this now
@@ -88,15 +89,23 @@ public class UsenetStreamingClient
                 using var _ = segmentCts.Token.SetScopedContext(usageContext);
                 try
                 {
-                    // Use GetArticleHeadersAsync (HEAD) instead of StatAsync (STAT)
-                    // STAT can sometimes return false positives (ArticleExists) on some providers even if the body is missing.
-                    // HEAD is more reliable for verifying existence.
-                    await _client.GetArticleHeadersAsync(x, segmentCts.Token).ConfigureAwait(false);
+                    if (useHead)
+                    {
+                        // HEAD: More reliable, slower (downloads headers)
+                        await _client.GetArticleHeadersAsync(x, segmentCts.Token).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        // STAT: Faster, but can be inaccurate (only checks metadata existence)
+                        var result = await _client.StatAsync(x, segmentCts.Token).ConfigureAwait(false);
+                        if (result.ResponseType != NntpStatResponseType.ArticleExists)
+                            throw new UsenetArticleNotFoundException(x);
+                    }
                     return x;
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested && segmentCts.IsCancellationRequested)
                 {
-                    throw new TimeoutException($"Head timed out for segment {x}");
+                    throw new TimeoutException($"{(useHead ? "Head" : "Stat")} timed out for segment {x}");
                 }
             })
             .WithConcurrencyAsync(concurrency);

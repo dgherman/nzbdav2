@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.20 (2025-12-17)
+*   **Optimization**: Implemented a smart health check strategy. Routine scheduled health checks now use the faster `STAT` command, while urgent health checks triggered by streaming failures continue to use the more reliable `HEAD` command. This balances performance for maintenance with accuracy for repair.
+
 ## v0.1.19 (2025-12-17)
 *   **Fix**: Corrected Sonarr history API calls to use the valid `seriesId` (singular) parameter instead of `seriesIds`.
 *   **Fix**: Updated Sonarr and Radarr history lookups to request a larger `pageSize` (default 1000), ensuring grab events are found even in extensive history.
