@@ -31,12 +31,38 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<HealthCheckResult> HealthCheckResults => Set<HealthCheckResult>();
     public DbSet<HealthCheckStat> HealthCheckStats => Set<HealthCheckStat>();
     public DbSet<ConfigItem> ConfigItems => Set<ConfigItem>();
-    public DbSet<BandwidthSample> BandwidthSamples => Set<BandwidthSample>();
-    public DbSet<MissingArticleEvent> MissingArticleEvents => Set<MissingArticleEvent>();
+    public DbSet<MissingArticleEvent> MissingArticleEvents { get; set; }
+    public DbSet<MissingArticleSummary> MissingArticleSummaries { get; set; }
+    public DbSet<BandwidthSample> BandwidthSamples { get; set; }
+    public DbSet<LocalLink> LocalLinks { get; set; }
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
     {
+        // LocalLink
+        b.Entity<LocalLink>(e =>
+        {
+            e.ToTable("LocalLinks");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedOnAdd();
+            e.Property(i => i.LinkPath).IsRequired();
+            e.Property(i => i.DavItemId).IsRequired();
+            e.Property(i => i.CreatedAt)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+
+            e.HasIndex(i => i.LinkPath).IsUnique();
+            e.HasIndex(i => i.DavItemId).IsUnique(false);
+
+            e.HasOne(i => i.DavItem)
+                .WithMany()
+                .HasForeignKey(i => i.DavItemId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         // MissingArticleEvent
         b.Entity<MissingArticleEvent>(e =>
         {
@@ -391,6 +417,9 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.HasIndex(i => new { i.Result, i.RepairStatus, i.CreatedAt })
                 .IsUnique(false);
 
+            e.HasIndex(i => new { i.RepairStatus, i.CreatedAt })
+                .IsUnique(false);
+
             e.HasIndex(i => new { i.CreatedAt })
                 .IsUnique(false);
 
@@ -439,6 +468,27 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.HasKey(i => i.ConfigName);
             e.Property(i => i.ConfigValue)
                 .IsRequired();
+        });
+
+        // MissingArticleSummary
+        b.Entity<MissingArticleSummary>(e =>
+        {
+            e.ToTable("MissingArticleSummaries");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedOnAdd();
+            e.Property(i => i.FirstSeen)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+            e.Property(i => i.LastSeen)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+            e.HasIndex(i => i.LastSeen);
         });
     }
 }
