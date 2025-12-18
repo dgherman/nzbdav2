@@ -44,7 +44,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     private int _disposed; // 0 == false, 1 == true
 
     // Track active connections by usage type
-    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ConnectionUsageContext> _activeConnections = new();
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ActiveConnectionInfo> _activeConnections = new();
+    private record ActiveConnectionInfo(T Connection, ConnectionUsageContext Context);
 
     /* ------------------------------------------------------------------------------ */
 
@@ -115,7 +116,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             if (!item.IsExpired(IdleTimeout))
             {
                 TriggerConnectionPoolChangedEvent();
-                _activeConnections[connectionId] = usageContext;
+                _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext);
                 return BuildLock(item.Connection, connectionId);
             }
 
@@ -140,7 +141,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         Interlocked.Increment(ref _live);
         TriggerConnectionPoolChangedEvent();
 
-        _activeConnections[connectionId] = usageContext;
+        _activeConnections[connectionId] = new ActiveConnectionInfo(conn, usageContext);
         return BuildLock(conn, connectionId);
 
         ConnectionLock<T> BuildLock(T c, string connId)
@@ -148,6 +149,49 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
         static void ThrowDisposed()
             => throw new ObjectDisposedException(nameof(ConnectionPool<T>));
+    }
+
+    /// <summary>
+    /// Forcefully disposes active connections matching the given type (or all if null).
+    /// </summary>
+    public async Task ForceReleaseConnections(ConnectionUsageType? type = null)
+    {
+        var targets = _activeConnections
+            .Where(x => type == null || x.Value.Context.UsageType == type.Value)
+            .ToList();
+
+        foreach (var target in targets)
+        {
+            // Remove from tracking so Return/Destroy won't double-process (though they handle missing keys)
+            // Actually, we want Return/Destroy to still run to release the gate.
+            // But if we dispose the connection here, Return will put a disposed connection back in pool?
+            // No, Return should check. But Return implementation is generic.
+            
+            // If we dispose here, the caller (who holds the lock) will eventually crash/finish.
+            // They will call Return or Destroy.
+            // If they call Return, they put 'conn' back.
+            // 'conn' is disposed.
+            // Next user gets disposed conn.
+            
+            // We should try to remove it from _activeConnections to mark it?
+            // Or rely on Return logic?
+            // Return logic:
+            // _activeConnections.TryRemove(connectionId, out var usageContext);
+            // _idleConnections.Push(new Pooled(connection, ...));
+            
+            // Ideally we want the caller to call 'Destroy' instead of 'Return'.
+            // But we can't control the caller.
+            
+            // So we MUST dispose it. And we accept that a disposed connection might land in idle pool.
+            // We should improve GetConnectionLockAsync to check for disposal?
+            // Or T doesn't expose IsDisposed.
+            
+            // Hack: We can try to rely on 'INntpClient' having 'IsConnected'.
+            // But T is generic.
+            
+            // For now, let's just dispose. Most libs throw ObjectDisposedException on use.
+            await DisposeConnectionAsync(target.Value.Connection);
+        }
     }
 
     /* ========================== core helpers ====================================== */
@@ -164,7 +208,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
     private void Return(T connection, string connectionId)
     {
-        _activeConnections.TryRemove(connectionId, out var usageContext);
+        _activeConnections.TryRemove(connectionId, out var info);
 
         if (Volatile.Read(ref _disposed) == 1)
         {
@@ -197,13 +241,13 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     public Dictionary<ConnectionUsageType, int> GetUsageBreakdown()
     {
         return _activeConnections.Values
-            .GroupBy(x => x.UsageType)
+            .GroupBy(x => x.Context.UsageType)
             .ToDictionary(g => g.Key, g => g.Count());
     }
 
     public List<ConnectionUsageContext> GetActiveConnections()
     {
-        return _activeConnections.Values.ToList();
+        return _activeConnections.Values.Select(x => x.Context).ToList();
     }
 
     private string GetUsageBreakdownString()

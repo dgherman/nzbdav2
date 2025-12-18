@@ -13,7 +13,7 @@ namespace NzbWebDAV.Api.Controllers.Stats;
 
 public class RepairRequest
 {
-    public string FilePath { get; set; } = string.Empty;
+    public List<string> FilePaths { get; set; } = new();
 }
 
 [ApiController]
@@ -169,21 +169,27 @@ public class StatsController(
     }
 
     [HttpGet("missing-articles")]
-    public Task<IActionResult> GetMissingArticles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null)
+    public Task<IActionResult> GetMissingArticles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null, [FromQuery] bool? blocking = null, [FromQuery] bool? orphaned = null, [FromQuery] bool? isImported = null)
     {
         return ExecuteSafely(async () =>
         {
             var providerCount = configManager.GetUsenetProviderConfig().Providers.Count;
-            var (items, totalCount) = await providerErrorService.GetFileSummariesPagedAsync(page, pageSize, providerCount, search);
+            var (items, totalCount) = await providerErrorService.GetFileSummariesPagedAsync(page, pageSize, providerCount, search, blocking, orphaned, isImported);
             return Ok(new { items, totalCount });
         });
     }
 
     [HttpDelete("missing-articles")]
-    public Task<IActionResult> ClearMissingArticles()
+    public Task<IActionResult> ClearMissingArticles([FromQuery] string? filename = null)
     {
         return ExecuteSafely(async () =>
         {
+            if (!string.IsNullOrEmpty(filename))
+            {
+                await providerErrorService.ClearErrorsForFile(filename);
+                return Ok(new { message = $"Missing articles for '{filename}' cleared successfully" });
+            }
+
             await providerErrorService.ClearAllErrors();
             return Ok(new { message = "Missing articles log cleared successfully" });
         });
@@ -207,13 +213,25 @@ public class StatsController(
     {
         return ExecuteSafely(async () =>
         {
-            if (string.IsNullOrWhiteSpace(request.FilePath))
-                return BadRequest(new { error = "FilePath is required" });
+            if (request.FilePaths == null || request.FilePaths.Count == 0)
+                return BadRequest(new { error = "FilePaths is required" });
                 
-            var dbClient = new DavDatabaseClient(dbContext);
-            await healthCheckService.TriggerManualRepairAsync(request.FilePath, dbClient, CancellationToken.None);
-            await providerErrorService.ClearErrorsForFile(request.FilePath);
+            foreach (var filePath in request.FilePaths)
+            {
+                healthCheckService.TriggerManualRepairInBackground(filePath);
+                await providerErrorService.ClearErrorsForFile(filePath);
+            }
             return Ok(new { message = "Repair triggered successfully" });
+        });
+    }
+
+    [HttpGet("mapped-files")]
+    public Task<IActionResult> GetMappedFiles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null)
+    {
+        return ExecuteSafely(async () =>
+        {
+            var (items, totalCount) = await OrganizedLinksUtil.GetMappedFilesPagedAsync(dbContext, configManager, page, pageSize, search);
+            return Ok(new { items, totalCount });
         });
     }
 }

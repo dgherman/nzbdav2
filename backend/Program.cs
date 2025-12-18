@@ -141,13 +141,26 @@ class Program
         // Backfill JobNames for missing article events (Background, delayed)
         _ = Task.Run(async () =>
         {
-            // Wait for 2 minutes to allow application to start and pass health checks
-            await Task.Delay(TimeSpan.FromMinutes(2), app.Lifetime.ApplicationStopping);
+            // Wait for 10 seconds to allow application to start
+            await Task.Delay(TimeSpan.FromSeconds(10), app.Lifetime.ApplicationStopping);
             
-            await app.Services.GetRequiredService<ProviderErrorService>()
-                .BackfillJobNamesAsync(app.Lifetime.ApplicationStopping);
+            var providerErrorService = app.Services.GetRequiredService<ProviderErrorService>();
+            
+            // Critical for UI performance
+            await providerErrorService
+                .BackfillSummariesAsync(app.Lifetime.ApplicationStopping);
 
-            await OrganizedLinksUtil.InitializeAsync(app.Services.GetRequiredService<ConfigManager>());
+            await providerErrorService
+                .BackfillDavItemIdsAsync(app.Lifetime.ApplicationStopping);
+
+            await providerErrorService
+                .CleanupOrphanedErrorsAsync(app.Lifetime.ApplicationStopping);
+
+            // Start the OrganizedLinksUtil refresh service after initial setup
+            OrganizedLinksUtil.StartRefreshService(app.Services, app.Services.GetRequiredService<ConfigManager>(), app.Lifetime.ApplicationStopping);
+
+            // Initial call to InitializeAsync is part of the refresh service now,
+            // so we don't need a separate call here. The refresh service will trigger it.
         }, app.Lifetime.ApplicationStopping);
 
         // run

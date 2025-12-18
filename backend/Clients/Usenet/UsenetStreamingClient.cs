@@ -269,4 +269,13 @@ public class UsenetStreamingClient
             throw new CouldNotLoginToUsenetException("Could not login to usenet host. Check username and password.");
         return connection;
     }
+
+    public Task ResetConnections(ConnectionUsageType? type = null)
+    {
+        if (_client.InnerClient is MultiProviderNntpClient multiProvider)
+        {
+            return multiProvider.ForceReleaseConnections(type);
+        }
+        return Task.CompletedTask;
+    }
 }

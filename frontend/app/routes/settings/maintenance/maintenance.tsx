@@ -2,6 +2,7 @@ import { Accordion } from "react-bootstrap";
 import styles from "./maintenance.module.css"
 import { RemoveUnlinkedFiles } from "./remove-unlinked-files/remove-unlinked-files";
 import { ConvertStrmToSymlinks } from "./strm-to-symlinks/strm-to-symlinks";
+import { ConnectionManagement } from "./connection-management/connection-management";
 
 type MaintenanceProps = {
     savedConfig: Record<string, string>
@@ -11,6 +12,15 @@ export function Maintenance({ savedConfig }: MaintenanceProps) {
     return (
         <div className={styles.container}>
             <Accordion className={styles.accordion}>
+
+                <Accordion.Item className={styles.accordionItem} eventKey="connection-management">
+                    <Accordion.Header className={styles.accordionHeader}>
+                        Connection Management
+                    </Accordion.Header>
+                    <Accordion.Body className={styles.accordionBody}>
+                        <ConnectionManagement />
+                    </Accordion.Body>
+                </Accordion.Item>
 
                 <Accordion.Item className={styles.accordionItem} eventKey="remove-unlinked-files">
                     <Accordion.Header className={styles.accordionHeader}>

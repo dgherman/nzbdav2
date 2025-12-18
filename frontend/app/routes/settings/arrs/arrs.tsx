@@ -212,6 +212,17 @@ export function ArrsSettings({ config, setNewConfig }: ArrsSettingsProps) {
             <hr />
             <div className={styles.section}>
                 <div className={styles.sectionHeader}>
+                    <div>Manual Repair / Blacklist</div>
+                </div>
+                <p className={styles.alertMessage}>
+                    Manually trigger the repair process for a specific file or release name.
+                    This will delete the file from the NzbDav virtual filesystem and attempt to blacklist the release in Radarr/Sonarr, triggering a new search.
+                </p>
+                <RepairForm />
+            </div>
+            <hr />
+            <div className={styles.section}>
+                <div className={styles.sectionHeader}>
                     <div>Automatic Queue Management</div>
                 </div>
                 <p className={styles.alertMessage}>
@@ -333,6 +344,64 @@ function InstanceForm({ instance, index, type, onUpdate, onRemove }: InstanceFor
                         className={styles.input}
                         value={instance.ApiKey}
                         onChange={e => onUpdate(index, 'ApiKey', e.target.value)} />
+                </Form.Group>
+            </Card.Body>
+        </Card>
+    );
+}
+
+function RepairForm() {
+    const [filePath, setFilePath] = useState("");
+    const [status, setStatus] = useState<'idle' | 'loading' | 'success' | 'error'>('idle');
+    const [message, setMessage] = useState("");
+
+    const handleRepair = async () => {
+        if (!filePath.trim()) return;
+        setStatus('loading');
+        setMessage("");
+        try {
+            const response = await fetch('/api/stats/repair', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ filePaths: [filePath] })
+            });
+            
+            if (response.ok) {
+                setStatus('success');
+                setMessage("Repair triggered successfully. Check logs for details.");
+            } else {
+                const data = await response.json();
+                setStatus('error');
+                setMessage(`Error: ${data.error || response.statusText}`);
+            }
+        } catch (e) {
+            setStatus('error');
+            setMessage("Failed to trigger repair.");
+        }
+    };
+
+    return (
+        <Card className={styles.instanceCard}>
+             <Card.Body>
+                <Form.Group>
+                    <Form.Label>File Path or Release Name</Form.Label>
+                    <InputGroup className={styles.input}>
+                        <Form.Control
+                            type="text"
+                            placeholder="e.g. /content/Movies/MyMovie/movie.mkv or My.Movie.Release.Name"
+                            value={filePath}
+                            onChange={e => setFilePath(e.target.value)} 
+                        />
+                        <Button
+                            variant={status === 'success' ? 'success' : status === 'error' ? 'danger' : 'warning'}
+                            onClick={handleRepair}
+                            disabled={status === 'loading' || !filePath.trim()}
+                            className={styles.testButton}
+                        >
+                            {status === 'loading' ? <Spinner animation="border" size="sm" /> : 'Trigger Repair'}
+                        </Button>
+                    </InputGroup>
+                    {message && <Form.Text className={status === 'error' ? 'text-danger' : 'text-success'}>{message}</Form.Text>}
                 </Form.Group>
             </Card.Body>
         </Card>

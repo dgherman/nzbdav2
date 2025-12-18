@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database;
 
@@ -10,9 +11,11 @@ using NzbWebDAV.Database;
 namespace NzbWebDAV.Database.Migrations
 {
     [DbContext(typeof(DavDatabaseContext))]
-    partial class DavDatabaseContextModelSnapshot : ModelSnapshot
+    [Migration("20251213085123_FixMissingArticleSummaryDates")]
+    partial class FixMissingArticleSummaryDates
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.4");
@@ -199,8 +202,6 @@ namespace NzbWebDAV.Database.Migrations
                     b.HasIndex("DavItemId")
                         .HasFilter("\"RepairStatus\" = 3");
 
-                    b.HasIndex("RepairStatus", "CreatedAt");
-
                     b.HasIndex("Result", "RepairStatus", "CreatedAt");
 
                     b.ToTable("HealthCheckResults", (string)null);
@@ -276,32 +277,6 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("HistoryItems", (string)null);
                 });
 
-            modelBuilder.Entity("NzbWebDAV.Database.Models.LocalLink", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<long>("CreatedAt")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<Guid>("DavItemId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("LinkPath")
-                        .IsRequired()
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("DavItemId");
-
-                    b.HasIndex("LinkPath")
-                        .IsUnique();
-
-                    b.ToTable("LocalLinks", (string)null);
-                });
-
             modelBuilder.Entity("NzbWebDAV.Database.Models.MissingArticleEvent", b =>
                 {
                     b.Property<Guid>("Id")
@@ -346,9 +321,6 @@ namespace NzbWebDAV.Database.Migrations
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("DavItemId")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Filename")
@@ -489,17 +461,6 @@ namespace NzbWebDAV.Database.Migrations
                     b.HasOne("NzbWebDAV.Database.Models.DavItem", "DavItem")
                         .WithOne()
                         .HasForeignKey("NzbWebDAV.Database.Models.DavRarFile", "Id")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("DavItem");
-                });
-
-            modelBuilder.Entity("NzbWebDAV.Database.Models.LocalLink", b =>
-                {
-                    b.HasOne("NzbWebDAV.Database.Models.DavItem", "DavItem")
-                        .WithMany()
-                        .HasForeignKey("DavItemId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 

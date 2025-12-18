@@ -211,7 +211,7 @@ public class MultiConnectionNntpClient : INntpClient
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
                 {
-                    Serilog.Log.Warning("[MultiConnectionNntpClient] Stream operation timed out after 90 seconds on provider {Host}", _host);
+                    Serilog.Log.Debug("[MultiConnectionNntpClient] Stream operation timed out after 90 seconds on provider {Host}", _host);
                     throw new TimeoutException($"GetSegmentStream operation timed out after 90 seconds on provider {_host}");
                 }
 
@@ -275,7 +275,7 @@ public class MultiConnectionNntpClient : INntpClient
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
         {
             var elapsedSeconds = startTime.Elapsed.TotalSeconds;
-            Serilog.Log.Warning("[MultiConnectionNntpClient] [{Host}] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", _host, elapsedSeconds);
+            Serilog.Log.Debug("[MultiConnectionNntpClient] [{Host}] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", _host, elapsedSeconds);
             throw new TimeoutException($"[{_host}] GetSegmentStream operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
         }
         finally
@@ -341,7 +341,7 @@ public class MultiConnectionNntpClient : INntpClient
                 }
                 catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
                 {
-                    Serilog.Log.Warning("[MultiConnectionNntpClient] RunWithConnection: Operation timed out after 90 seconds on provider {Host}", _host);
+                    Serilog.Log.Debug("[MultiConnectionNntpClient] RunWithConnection: Operation timed out after 90 seconds on provider {Host}", _host);
                     throw new TimeoutException($"NNTP operation timed out after 90 seconds on provider {_host}");
                 }
 
@@ -387,7 +387,7 @@ public class MultiConnectionNntpClient : INntpClient
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
         {
             var elapsedSeconds = startTime.Elapsed.TotalSeconds;
-            Serilog.Log.Warning("[MultiConnectionNntpClient] [{Host}] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", _host, elapsedSeconds);
+            Serilog.Log.Debug("[MultiConnectionNntpClient] [{Host}] Operation timed out after {ElapsedSeconds:F1}s (limit: 90s). This usually indicates slow Usenet server response or connection lock contention.", _host, elapsedSeconds);
             throw new TimeoutException($"[{_host}] NNTP operation timed out after {elapsedSeconds:F1} seconds (limit: 90s)");
         }
         finally
@@ -397,6 +397,11 @@ public class MultiConnectionNntpClient : INntpClient
             // Release global permit
             globalPermit?.Dispose();
         }
+    }
+
+    public Task ForceReleaseConnections(ConnectionUsageType? type = null)
+    {
+        return _connectionPool.ForceReleaseConnections(type);
     }
 
     public void UpdateConnectionPool(ConnectionPool<INntpClient> connectionPool)

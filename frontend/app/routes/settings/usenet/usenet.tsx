@@ -178,7 +178,7 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                         onChange={(e) => handleStreamBufferSizeChange(e.target.value)}
                         style={{ maxWidth: '200px' }}
                     />
-                    <div className={styles["form-help"]}>
+                    <div>
                         Higher values increase RAM usage but may improve streaming stability. (Default: 100)
                     </div>
                 </div>

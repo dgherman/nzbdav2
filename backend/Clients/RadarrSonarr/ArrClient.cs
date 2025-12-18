@@ -1,6 +1,7 @@
 ﻿using System.Net;
 using System.Net.Http.Headers;
 using System.Text.Json;
+using Serilog;
 using NzbWebDAV.Clients.RadarrSonarr.BaseModels;
 using NzbWebDAV.Config;
 
@@ -8,6 +9,19 @@ namespace NzbWebDAV.Clients.RadarrSonarr;
 
 public class ArrClient(string host, string apiKey)
 {
+    // Define ArrEventType enum
+    public enum ArrEventType
+    {
+        Unknown = 0,
+        Grabbed = 1,
+        SeriesFolderImported = 2,
+        DownloadFolderImported = 3,
+        DownloadFailed = 4,
+        EpisodeFileDeleted = 5,
+        EpisodeFileRenamed = 6,
+        // ... add other relevant event types if needed
+    }
+
     protected static readonly HttpClient HttpClient = new HttpClient();
 
     public string Host { get; } = host;
@@ -49,11 +63,11 @@ public class ArrClient(string host, string apiKey)
     public Task<ArrCommand> CommandAsync(object command) =>
         Post<ArrCommand>($"/command", command);
 
-    public Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null)
+    public virtual Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null)
     {
         var query = "";
-        if (movieId.HasValue) query = $"?movieId={movieId.Value}&eventType=grab";
-        if (seriesId.HasValue) query = $"?seriesId={seriesId.Value}&eventType=grab";
+        if (movieId.HasValue) query = $"?movieId={movieId.Value}&eventType={(int)ArrEventType.Grabbed}";
+        if (seriesId.HasValue) query = $"?seriesId={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
         return Get<ArrHistory>($"/history{query}");
     }
 
@@ -76,7 +90,12 @@ public class ArrClient(string host, string apiKey)
         using var response = await SendAsync(request);
         
         if (!response.IsSuccessStatusCode)
-            throw new HttpRequestException($"Request to {rootPath} failed with status {response.StatusCode}");
+        {
+            // Log raw content on error to help debug JSON serialization issues
+            var errorContent = await response.Content.ReadAsStringAsync();
+            Log.Warning($"[ArrClient] Request to {rootPath} failed with status {response.StatusCode}. Response: {errorContent}");
+            throw new HttpRequestException($"Request to {rootPath} failed with status {response.StatusCode}. Content: {errorContent}");
+        }
 
         if (response.Content.Headers.ContentLength == 0)
             return default!;

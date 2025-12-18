@@ -258,17 +258,37 @@ class BackendClient {
         return response.json();
     }
 
-        public async getMissingArticles(page: number = 1, pageSize: number = 10, search: string = ""): Promise<{ items: MissingArticleItem[], totalCount: number }> {
-        const url = process.env.BACKEND_URL + `/api/stats/missing-articles?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
+    public async getMissingArticles(page: number = 1, pageSize: number = 10, search: string = "", blocking?: boolean, orphaned?: boolean, isImported?: boolean): Promise<{ items: MissingArticleItem[], totalCount: number }> {
+        let url = process.env.BACKEND_URL + `/api/stats/missing-articles?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
+        if (blocking !== undefined) {
+            url += `&blocking=${blocking}`;
+        }
+        if (orphaned !== undefined) {
+            url += `&orphaned=${orphaned}`;
+        }
+        if (isImported !== undefined) {
+            url += `&isImported=${isImported}`;
+        }
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await fetch(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get missing articles: ${(await response.json()).error}`);
         return response.json();
     }
 
-    public async clearMissingArticles(): Promise<void> {
+    public async getMappedFiles(page: number = 1, pageSize: number = 10, search: string = ""): Promise<{ items: MappedFile[], totalCount: number }> {
+        const url = process.env.BACKEND_URL + `/api/stats/mapped-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get mapped files: ${(await response.json()).error}`);
+        return response.json();
+    }
 
-            const url = process.env.BACKEND_URL + `/api/stats/missing-articles`;
+    public async clearMissingArticles(filename?: string): Promise<void> {
+
+            let url = process.env.BACKEND_URL + `/api/stats/missing-articles`;
+            if (filename) {
+                url += `?filename=${encodeURIComponent(filename)}`;
+            }
 
             const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
 
@@ -304,21 +324,34 @@ class BackendClient {
 
         }
 
-        public async triggerRepair(filePath: string): Promise<void> {
-            const url = process.env.BACKEND_URL + `/api/stats/repair`;
-            const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+    public async resetConnections(type?: number): Promise<void> {
+        const url = process.env.BACKEND_URL + "/api/maintenance/reset-connections";
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        
+        const response = await fetch(url, {
+            method: "POST",
+            headers: { 
+                "x-api-key": apiKey,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ type })
+        });
 
-            const response = await fetch(url, {
-                method: "POST",
-                headers: { 
-                    "x-api-key": apiKey,
-                    "Content-Type": "application/json" 
-                },
-                body: JSON.stringify({ filePath })
-            });
+        if (!response.ok) throw new Error(`Failed to reset connections: ${(await response.json()).error}`);
+    }
 
-            if (!response.ok) throw new Error(`Failed to trigger repair: ${(await response.json()).error}`);
-        }
+    public async triggerRepair(filePaths: string[]): Promise<void> {
+        const url = process.env.BACKEND_URL + `/api/stats/repair`;
+        const response = await fetch(url, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "X-Api-Key": process.env.FRONTEND_BACKEND_API_KEY || "",
+            },
+            body: JSON.stringify({ filePaths }),
+        });
+        if (!response.ok) throw new Error(`Failed to trigger repair: ${(await response.json()).error}`);
+    }
 
     }
 
@@ -652,35 +685,253 @@ class BackendClient {
 
     
 
-        export type MissingArticleItem = {
+                        export type MissingArticleItem = {
 
     
 
-            jobName: string;
+    
 
     
 
-            filename: string;
+                
 
     
 
-            latestTimestamp: string;
+    
 
     
 
-                    totalEvents: number;
+                            jobName: string;
 
     
 
-                    providerCounts: Record<number, number>;
+    
 
     
 
-                    hasBlockingMissingArticles: boolean;
+                
 
     
 
-                    isImported: boolean;
+    
+
+    
+
+                            filename: string;
+
+    
+
+    
+
+    
+
+                
+
+    
+
+    
+
+    
+
+                                                        davItemId: string; // Add davItemId here
+
+    
+
+    
+
+    
+
+                
+
+    
+
+    
+
+    
+
+                                                        davItemInternalPath: string; // New property
+
+    
+
+    
+
+    
+
+                
+
+    
+
+    
+
+    
+
+                                                        latestTimestamp: string;
+
+    
+
+    
+
+    
+
+                
+
+    
+
+    
+
+    
+
+                                    totalEvents: number;
+
+    
+
+    
+
+    
+
+        
+
+    
+
+    
+
+    
+
+                            providerCounts: Record<number, number>;
+
+    
+
+    
+
+    
+
+        
+
+    
+
+    
+
+    
+
+                            hasBlockingMissingArticles: boolean;
+
+    
+
+    
+
+    
+
+        
+
+    
+
+    
+
+    
+
+                            isImported: boolean;
+
+    
+
+    
+
+    
+
+        
+
+    
+
+    
+
+    
+
+                        }
+
+    
+
+    
+
+    
+
+        
+
+    
+
+    
+
+    
+
+                    
+
+    
+
+    
+
+    
+
+        
+
+    
+
+    
+
+    
+
+                export type MappedFile = {
+
+    
+
+    
+
+    
+
+                    davItemId: string;
+
+    
+
+    
+
+    
+
+                    davItemName: string;
+
+    
+
+    
+
+    
+
+                    linkPath: string;
+
+    
+
+    
+
+    
+
+                    targetPath: string;
+
+    
+
+    
+
+    
+
+                    targetUrl: string;
+
+                    davItemPath: string;
+
+    
+
+    
+
+    
+
+                    createdAt: string;
+
+    
+
+    
 
     
 

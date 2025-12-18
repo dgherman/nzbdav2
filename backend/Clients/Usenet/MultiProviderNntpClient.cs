@@ -185,6 +185,14 @@ public class MultiProviderNntpClient : INntpClient
             {
                 lastException = ExceptionDispatchInfo.Capture(e);
             }
+            catch (OperationCanceledException ex)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException($"Operation timed out on provider {provider.Host} (Segment: {segmentId ?? "N/A"})", ex);
+                }
+                throw;
+            }
         }
 
         if (result is NntpStatResponse)
@@ -241,6 +249,12 @@ public class MultiProviderNntpClient : INntpClient
             .ThenByDescending(x => x.IdleConnections);
 
         return pooled.Concat(others);
+    }
+
+    public Task ForceReleaseConnections(ConnectionUsageType? type = null)
+    {
+        var tasks = Providers.Select(p => p.ForceReleaseConnections(type));
+        return Task.WhenAll(tasks);
     }
 
     public void Dispose()

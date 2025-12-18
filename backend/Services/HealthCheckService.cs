@@ -1,5 +1,6 @@
 ﻿using System.Collections.Concurrent;
 using System.Net.Http;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
@@ -22,6 +23,8 @@ public class HealthCheckService
     private readonly ConfigManager _configManager;
     private readonly UsenetStreamingClient _usenetClient;
     private readonly WebsocketManager _websocketManager;
+    private readonly IServiceScopeFactory _serviceScopeFactory;
+    private readonly ProviderErrorService _providerErrorService;
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
     private readonly HashSet<string> _missingSegmentIds = [];
@@ -31,12 +34,16 @@ public class HealthCheckService
     (
         ConfigManager configManager,
         UsenetStreamingClient usenetClient,
-        WebsocketManager websocketManager
+        WebsocketManager websocketManager,
+        IServiceScopeFactory serviceScopeFactory,
+        ProviderErrorService providerErrorService
     )
     {
         _configManager = configManager;
         _usenetClient = usenetClient;
         _websocketManager = websocketManager;
+        _serviceScopeFactory = serviceScopeFactory;
+        _providerErrorService = providerErrorService;
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -146,7 +153,14 @@ public class HealthCheckService
             }
             catch (Exception e)
             {
-                Log.Error(e, $"Unexpected error performing background health checks: {e.Message}");
+                if (e.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase))
+                {
+                    Log.Error($"Unexpected error performing background health checks: {e.Message}");
+                }
+                else
+                {
+                    Log.Error(e, $"Unexpected error performing background health checks: {e.Message}");
+                }
                 await Task.Delay(TimeSpan.FromSeconds(5), _cancellationToken).ConfigureAwait(false);
             }
         }
@@ -276,6 +290,24 @@ public class HealthCheckService
         return [];
     }
 
+    public void TriggerManualRepairInBackground(string filePath)
+    {
+        _ = Task.Run(async () =>
+        {
+            try
+            {
+                using var scope = _serviceScopeFactory.CreateScope();
+                var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+                
+                await TriggerManualRepairAsync(filePath, dbClient, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, $"[ManualRepair] Failed to execute manual repair for file: {filePath}");
+            }
+        });
+    }
+
     public async Task TriggerManualRepairAsync(string filePath, DavDatabaseClient dbClient, CancellationToken ct)
     {
         Log.Information($"Manual repair triggered for file: {filePath}");
@@ -330,6 +362,7 @@ public class HealthCheckService
             if (blacklistedExtensions.Contains(Path.GetExtension(davItem.Name).ToLower()))
             {
                 dbClient.Ctx.Items.Remove(davItem);
+                OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
                 dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
                 {
                     Id = Guid.NewGuid(),
@@ -345,6 +378,7 @@ public class HealthCheckService
                     ])
                 }));
                 await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
                 return;
             }
 
@@ -354,6 +388,7 @@ public class HealthCheckService
             if (symlinkOrStrmPath == null)
             {
                 dbClient.Ctx.Items.Remove(davItem);
+                OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
                 dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
                 {
                     Id = Guid.NewGuid(),
@@ -369,6 +404,7 @@ public class HealthCheckService
                     ])
                 }));
                 await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
                 return;
             }
 
@@ -378,13 +414,37 @@ public class HealthCheckService
             foreach (var arrClient in _configManager.GetArrConfig().GetArrClients())
             {
                 var rootFolders = await arrClient.GetRootFolders().ConfigureAwait(false);
-                if (!rootFolders.Any(x => symlinkOrStrmPath.StartsWith(x.Path!))) continue;
+                if (!rootFolders.Any(x => symlinkOrStrmPath.StartsWith(x.Path!)))
+                {
+                    Log.Debug($"[HealthCheck] Path '{symlinkOrStrmPath}' does not start with any root folder of Arr instance '{arrClient.Host}' (Roots: {string.Join(", ", rootFolders.Select(x => x.Path))}). Attempting search anyway to handle potential Docker path mappings.");
+                }
+
+                // Safety Check: Ensure the file points to our mount
+                var mountDir = _configManager.GetRcloneMountDir();
+                var linkInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(symlinkOrStrmPath));
+                if (linkInfo is SymlinkAndStrmUtil.SymlinkInfo symInfo && !symInfo.TargetPath.StartsWith(mountDir))
+                {
+                    Log.Warning($"[HealthCheck] Safety check failed: Symlink {symlinkOrStrmPath} points to {symInfo.TargetPath}, which is outside mount dir {mountDir}. Skipping Arr delete.");
+                    continue;
+                }
+
+                // Capture link info before deletion for logging
+                var arrLinkInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(symlinkOrStrmPath));
+                string linkTargetMsg = "";
+                if (arrLinkInfo is SymlinkAndStrmUtil.SymlinkInfo sInfo)
+                    linkTargetMsg = $" (Symlink target: '{sInfo.TargetPath}')";
+                else if (arrLinkInfo is SymlinkAndStrmUtil.StrmInfo stInfo)
+                    linkTargetMsg = $" (Strm URL: '{stInfo.TargetUrl}')";
 
                 // if we found a corresponding arr instance,
                 // then remove and search.
                 if (await arrClient.RemoveAndSearch(symlinkOrStrmPath).ConfigureAwait(false))
                 {
+                    var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
+                    Log.Information($"[HealthCheck] {arrActionMessage}");
+
                     dbClient.Ctx.Items.Remove(davItem);
+                    OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
                     dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
                     {
                         Id = Guid.NewGuid(),
@@ -396,25 +456,43 @@ public class HealthCheckService
                         Message = string.Join(" ", [
                             failureReason,
                             $"Corresponding {linkType} found within Library Dir.",
-                            "Triggered new Arr search."
+                            arrActionMessage
                         ])
                     }));
                     await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                    await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
                     return;
                 }
 
-                // if we could not find corresponding media-item to remove-and-search
-                // within the found arr instance, then break out of this loop so that
-                // we can fall back to the behavior below of deleting both the link-file
-                // and the dav-item.
-                break;
+                // If RemoveAndSearch returned false, it means this client didn't recognize the file.
+                // Log and continue to the next client (e.g. might have checked Radarr for a TV show).
+                Log.Debug($"[HealthCheck] Arr instance '{arrClient.Host}' could not find/remove '{symlinkOrStrmPath}'. Checking next instance...");
+                continue;
             }
 
             // if we could not find a corresponding arr instance
             // then we can delete both the item and the link-file.
-            Log.Warning($"[HealthCheck] Could not find corresponding Radarr/Sonarr media-item for file: {davItem.Name}. Deleting file and link.");
+            string deleteMessage;
+            var fileInfoToDelete = new FileInfo(symlinkOrStrmPath);
+            var linkInfoToDelete = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(fileInfoToDelete);
+            
+            if (linkInfoToDelete is SymlinkAndStrmUtil.SymlinkInfo symInfoToDelete)
+            {
+                deleteMessage = $"Deleting symlink '{symlinkOrStrmPath}' (target: '{symInfoToDelete.TargetPath}') and associated NzbDav item '{davItem.Path}'.";
+            }
+            else if (linkInfoToDelete is SymlinkAndStrmUtil.StrmInfo strmInfoToDelete)
+            {
+                deleteMessage = $"Deleting strm file '{symlinkOrStrmPath}' (target URL: '{strmInfoToDelete.TargetUrl}') and associated NzbDav item '{davItem.Path}'.";
+            }
+            else
+            {
+                deleteMessage = $"Deleting file '{symlinkOrStrmPath}' and associated NzbDav item '{davItem.Path}'.";
+            }
+
+            Log.Warning($"[HealthCheck] Could not find corresponding Radarr/Sonarr media-item for file: {davItem.Name}. {deleteMessage}");
             await Task.Run(() => File.Delete(symlinkOrStrmPath)).ConfigureAwait(false);
             dbClient.Ctx.Items.Remove(davItem);
+            OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
             dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
             {
                 Id = Guid.NewGuid(),
@@ -427,10 +505,11 @@ public class HealthCheckService
                     failureReason,
                     $"Corresponding {linkType} found within Library Dir.",
                     "Could not find corresponding Radarr/Sonarr media-item to trigger a new search.",
-                    $"Deleted the webdav-file and {linkType}."
+                    deleteMessage // Use the detailed delete message
                 ])
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+            await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
         }
         catch (HttpRequestException e)
         {

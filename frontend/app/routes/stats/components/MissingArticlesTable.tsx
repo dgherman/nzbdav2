@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { Table, Button, Form as BootstrapForm, Pagination, OverlayTrigger, Tooltip } from "react-bootstrap";
+import { Table, Button, Form as BootstrapForm, Pagination, OverlayTrigger, Tooltip, Dropdown, ButtonGroup } from "react-bootstrap";
 import { Form, useSearchParams } from "react-router";
 import type { MissingArticleItem, ProviderBandwidthSnapshot } from "~/clients/backend-client.server";
 
@@ -9,17 +9,45 @@ interface Props {
     totalCount: number;
     page: number;
     search: string;
+    blocking?: boolean; // Added blocking filter prop
+    orphaned?: boolean;
+    isImported?: boolean;
 }
 
-export function MissingArticlesTable({ items, providers, totalCount, page, search }: Props) {
+function ExpandableCell({ children, maxWidth, className = "" }: { children: React.ReactNode, maxWidth: string, className?: string }) {
+    const [expanded, setExpanded] = useState(false);
+    return (
+        <div 
+            onClick={() => setExpanded(!expanded)}
+            style={{ 
+                maxWidth: expanded ? "100%" : maxWidth, 
+                cursor: "pointer",
+                whiteSpace: expanded ? "normal" : "nowrap",
+                overflow: "hidden",
+                textOverflow: expanded ? "clip" : "ellipsis"
+            }}
+            className={className}
+        >
+            {children}
+        </div>
+    );
+}
+
+export function MissingArticlesTable({ items, providers, totalCount, page, search, blocking, orphaned, isImported }: Props) {
     const [searchParams, setSearchParams] = useSearchParams();
     const [searchValue, setSearchValue] = useState(search);
+    const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
     const pageSize = 10;
     const totalPages = Math.ceil(totalCount / pageSize);
 
     useEffect(() => {
         setSearchValue(search);
     }, [search]);
+
+    // Clear selections when items change (e.g., page change, filter change)
+    useEffect(() => {
+        setSelectedItems(new Set());
+    }, [page, search, blocking, orphaned, isImported]);
 
     useEffect(() => {
         const timer = setTimeout(() => {
@@ -42,6 +70,42 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
         });
     };
 
+    const handleFilterChange = (newBlocking: boolean | undefined, newOrphaned: boolean | undefined, newIsImported: boolean | undefined) => {
+        setSearchParams(prev => {
+            if (newBlocking !== undefined) prev.set("blocking", newBlocking.toString());
+            else prev.delete("blocking");
+            
+            if (newOrphaned !== undefined) prev.set("orphaned", newOrphaned.toString());
+            else prev.delete("orphaned");
+
+            if (newIsImported !== undefined) prev.set("isImported", newIsImported.toString());
+            else prev.delete("isImported");
+
+            prev.set("page", "1"); // Reset page when changing filter
+            return prev;
+        });
+    };
+
+    const handleToggleSelect = (filename: string) => {
+        setSelectedItems(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(filename)) {
+                newSet.delete(filename);
+            } else {
+                newSet.add(filename);
+            }
+            return newSet;
+        });
+    };
+
+    const handleToggleSelectAll = () => {
+        if (selectedItems.size === items.length) {
+            setSelectedItems(new Set());
+        } else {
+            setSelectedItems(new Set(items.map(item => item.filename)));
+        }
+    };
+
     const getProviderName = (index: number) => {
         const provider = providers.find(p => p.providerIndex === index);
         return provider?.host || `Provider ${index + 1}`;
@@ -57,6 +121,18 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
         </Tooltip>
     );
 
+    const confirmRepair = (e: React.FormEvent<HTMLFormElement>) => {
+        if (!confirm(`Are you sure you want to trigger a repair for ${selectedItems.size} selected items? This will delete the files and trigger a re-search in Sonarr/Radarr.`)) {
+            e.preventDefault();
+        }
+    };
+
+    const confirmDelete = (e: React.FormEvent<HTMLFormElement>) => {
+        if (!confirm(`Are you sure you want to remove ${selectedItems.size} selected items from the log?`)) {
+            e.preventDefault();
+        }
+    };
+
     return (
         <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
             <div className="d-flex justify-content-between align-items-center mb-3">
@@ -71,6 +147,77 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                         style={{ width: '200px' }}
                         className="bg-dark text-light border-secondary"
                     />
+
+                    <div className="d-flex align-items-center bg-dark rounded border border-secondary px-2 py-1">
+                        <BootstrapForm.Check 
+                            type="checkbox"
+                            id="blocked-only-check"
+                            label="Blocked Only"
+                            checked={blocking === true}
+                            onChange={(e) => handleFilterChange(e.target.checked ? true : undefined, undefined, undefined)}
+                            className="text-light mb-0 small"
+                            style={{ fontSize: '0.875rem' }}
+                        />
+                    </div>
+
+                    <Dropdown as={ButtonGroup}>
+                        <Button 
+                            variant={blocking === undefined && orphaned === undefined && isImported === undefined ? "primary" : "outline-secondary"} 
+                            size="sm"
+                            onClick={() => handleFilterChange(undefined, undefined, undefined)}
+                        >
+                            All
+                        </Button>
+                        <Dropdown.Toggle split variant={blocking === undefined && orphaned === undefined && isImported === undefined ? "primary" : "outline-secondary"} size="sm" />
+                        <Dropdown.Menu variant="dark">
+                            <Dropdown.Item onClick={() => handleFilterChange(true, undefined, undefined)} active={blocking === true}>
+                                Blocking (All providers)
+                            </Dropdown.Item>
+                            <Dropdown.Item onClick={() => handleFilterChange(false, undefined, undefined)} active={blocking === false}>
+                                Partial (Some providers)
+                            </Dropdown.Item>
+                            <Dropdown.Item onClick={() => handleFilterChange(undefined, true, undefined)} active={orphaned === true}>
+                                Orphaned (Empty ID)
+                            </Dropdown.Item>
+                            <Dropdown.Item onClick={() => handleFilterChange(undefined, undefined, false)} active={isImported === false}>
+                                Not Mapped
+                            </Dropdown.Item>
+                        </Dropdown.Menu>
+                    </Dropdown>
+
+                    {selectedItems.size > 0 && (
+                        <>
+                            <Form method="post" onSubmit={confirmRepair} className="d-inline">
+                                <input type="hidden" name="action" value="trigger-repair" />
+                                {Array.from(selectedItems).map((filename, index) => (
+                                    <input type="hidden" name={`filePaths[${index}]`} value={filename} key={filename} />
+                                ))}
+                                <Button 
+                                    type="submit" 
+                                    variant="danger" 
+                                    size="sm"
+                                    title={`Repair ${selectedItems.size} selected items`}
+                                >
+                                    Repair ({selectedItems.size})
+                                </Button>
+                            </Form>
+                            <Form method="post" onSubmit={confirmDelete} className="d-inline ms-1">
+                                <input type="hidden" name="action" value="delete-missing-article" />
+                                {Array.from(selectedItems).map((filename, index) => (
+                                    <input type="hidden" name="filename" value={filename} key={filename} />
+                                ))}
+                                <Button 
+                                    type="submit" 
+                                    variant="secondary" 
+                                    size="sm"
+                                    title={`Delete ${selectedItems.size} selected items from log`}
+                                >
+                                    Delete ({selectedItems.size})
+                                </Button>
+                            </Form>
+                        </>
+                    )}
+
                     {items.length > 0 && (
                         <Form method="post">
                             <input type="hidden" name="action" value="clear-missing-articles" />
@@ -90,19 +237,27 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                 <Table variant="dark" hover size="sm">
                     <thead>
                         <tr>
+                            <th>
+                                <BootstrapForm.Check 
+                                    type="checkbox" 
+                                    checked={selectedItems.size === items.length && items.length > 0}
+                                    onChange={handleToggleSelectAll}
+                                />
+                            </th>
                             <th>Time</th>
                             <th>Job Name</th>
                             <th>Filename</th>
+                            <th>NzbDav Path</th>
                             <th>Status</th>
-                            <th>Imported</th>
+                            <th>Mapped</th>
                             <th>Count</th>
-                            <th style={{ width: "80px" }}>Actions</th>
+                            <th style={{ width: "130px" }}>Actions</th>
                         </tr>
                     </thead>
                     <tbody>
                         {items.length === 0 ? (
                             <tr>
-                                <td colSpan={7} className="text-center py-4 text-muted">
+                                <td colSpan={8} className="text-center py-4 text-muted">
                                     No missing articles logged
                                 </td>
                             </tr>
@@ -111,18 +266,35 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                                 const providerCount = Object.keys(item.providerCounts).length;
                                 const isCritical = item.hasBlockingMissingArticles;
                                 const displayFilename = item.filename.split('/').pop() || item.filename;
-                                const key = `${item.jobName}-${item.filename}`;
+                                const key = `${item.jobName}-${item.filename}`; // Use filename as key instead of davItemId
 
                                 return (
                                     <tr key={key} style={{ backgroundColor: 'rgba(255, 255, 255, 0.05)' }} className="border-bottom">
+                                        <td>
+                                            <BootstrapForm.Check 
+                                                type="checkbox" 
+                                                checked={selectedItems.has(item.filename)}
+                                                onChange={() => handleToggleSelect(item.filename)}
+                                            />
+                                        </td>
                                         <td className="text-nowrap text-muted small">
                                             {new Date(item.latestTimestamp).toLocaleTimeString()}
                                         </td>
-                                        <td className="text-light text-truncate" style={{ maxWidth: "200px" }} title={item.jobName}>
-                                            {item.jobName || "Uncategorized"}
+                                        <td>
+                                            <ExpandableCell maxWidth="200px" className="text-light">
+                                                {item.jobName || "Uncategorized"}
+                                            </ExpandableCell>
                                         </td>
-                                        <td className="font-mono small text-light text-truncate" style={{ maxWidth: "300px" }} title={item.filename}>
-                                            {displayFilename}
+                                        <td className="font-mono small text-light">
+                                            <ExpandableCell maxWidth="300px">
+                                                {displayFilename}
+                                                {item.davItemId && <div className="text-muted" style={{ fontSize: '0.65rem' }}>ID: {item.davItemId}</div>}
+                                            </ExpandableCell>
+                                        </td>
+                                        <td className="font-mono small text-muted">
+                                            <ExpandableCell maxWidth="300px">
+                                                {item.davItemInternalPath}
+                                            </ExpandableCell>
                                         </td>
                                         <td>
                                             <OverlayTrigger placement="top" overlay={renderProviderTooltip(item.providerCounts)}>
@@ -132,7 +304,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                                             </OverlayTrigger>
                                         </td>
                                         <td className="text-center">
-                                            {item.isImported ? "✅" : ""}
+                                            {item.isImported ? <span className="badge bg-success">Mapped</span> : ""}
                                         </td>
                                         <td>
                                             <span className="badge bg-secondary">
@@ -140,24 +312,45 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                                             </span>
                                         </td>
                                         <td>
-                                            <Form method="post" className="d-inline" onSubmit={(e) => {
-                                                if (!confirm("Are you sure you want to trigger a repair? This will delete the file and trigger a re-search in Sonarr/Radarr.")) {
-                                                    e.preventDefault();
-                                                }
-                                            }}>
-                                                <input type="hidden" name="action" value="trigger-repair" />
-                                                <input type="hidden" name="filePath" value={item.filename} />
-                                                <Button 
-                                                    type="submit" 
-                                                    variant="outline-danger" 
-                                                    size="sm" 
-                                                    className="py-0 px-2" 
-                                                    style={{ fontSize: '0.7rem' }}
-                                                    title="Trigger repair (Delete & Rescan)"
-                                                >
-                                                    Repair
-                                                </Button>
-                                            </Form>
+                                            <div className="d-flex gap-1">
+                                                <Form method="post" className="d-inline" onSubmit={(e) => {
+                                                    if (!confirm("Are you sure you want to trigger a repair? This will delete the file and trigger a re-search in Sonarr/Radarr.")) {
+                                                        e.preventDefault();
+                                                    }
+                                                }}>
+                                                    <input type="hidden" name="action" value="trigger-repair" />
+                                                    <input type="hidden" name="filePaths[0]" value={item.filename} />
+                                                    <Button 
+                                                        type="submit" 
+                                                        variant="outline-danger" 
+                                                        size="sm" 
+                                                        className="py-0 px-2" 
+                                                        style={{ fontSize: '0.7rem' }}
+                                                        title="Trigger repair (Delete & Rescan)"
+                                                    >
+                                                        Repair
+                                                    </Button>
+                                                </Form>
+
+                                                <Form method="post" className="d-inline" onSubmit={(e) => {
+                                                    if (!confirm("Are you sure you want to remove this entry from the log?")) {
+                                                        e.preventDefault();
+                                                    }
+                                                }}>
+                                                    <input type="hidden" name="action" value="delete-missing-article" />
+                                                    <input type="hidden" name="filename" value={item.filename} />
+                                                    <Button 
+                                                        type="submit" 
+                                                        variant="outline-secondary" 
+                                                        size="sm" 
+                                                        className="py-0 px-2" 
+                                                        style={{ fontSize: '0.7rem' }}
+                                                        title="Delete from log"
+                                                    >
+                                                        Delete
+                                                    </Button>
+                                                </Form>
+                                            </div>
                                         </td>
                                     </tr>
                                 );

@@ -1,12 +1,13 @@
 import { useEffect } from "react";
 import { useLoaderData, useSearchParams, useRevalidator } from "react-router";
-import { Button, ButtonGroup, Container, Tabs, Tab } from "react-bootstrap";
+import { Button, ButtonGroup, Container, Tabs, Tab, Dropdown } from "react-bootstrap";
 import type { Route } from "./+types/route";
-import { backendClient, type HealthCheckResult, type MissingArticleEvent, type MissingArticleItem } from "~/clients/backend-client.server";
+import { backendClient, type HealthCheckResult, type MissingArticleItem, type MappedFile } from "~/clients/backend-client.server";
 import { BandwidthTable } from "./components/BandwidthTable";
 import { ProviderStatus } from "./components/ProviderStatus";
 import { DeletedFilesTable } from "./components/DeletedFilesTable";
 import { MissingArticlesTable } from "./components/MissingArticlesTable";
+import { MappedFilesTable } from "./components/MappedFilesTable";
 import { LogsConsole } from "./components/LogsConsole";
 import { isAuthenticated } from "~/auth/authentication.server";
 
@@ -18,10 +19,17 @@ export async function loader({ request }: Route.LoaderArgs) {
     const tab = url.searchParams.get("tab") || "stats";
     const page = parseInt(url.searchParams.get("page") || "1");
     const search = url.searchParams.get("search") || "";
+    const blockingParam = url.searchParams.get("blocking");
+    const blocking = blockingParam === "true" ? true : blockingParam === "false" ? false : undefined;
+    const orphanedParam = url.searchParams.get("orphaned");
+    const orphaned = orphanedParam === "true" ? true : orphanedParam === "false" ? false : undefined;
+    const isImportedParam = url.searchParams.get("isImported");
+    const isImported = isImportedParam === "true" ? true : isImportedParam === "false" ? false : undefined;
 
     let connections, bandwidthHistory, currentBandwidth;
     let deletedFiles: { items: HealthCheckResult[], totalCount: number } = { items: [], totalCount: 0 };
     let missingArticles: { items: MissingArticleItem[], totalCount: number } = { items: [], totalCount: 0 };
+    let mappedFiles: { items: MappedFile[], totalCount: number } = { items: [], totalCount: 0 };
 
     if (tab === "stats") {
         [connections, bandwidthHistory, currentBandwidth] = await Promise.all([
@@ -33,14 +41,16 @@ export async function loader({ request }: Route.LoaderArgs) {
         deletedFiles = await backendClient.getDeletedFiles(page, 500, search);
     } else if (tab === "missing") {
         const [maData, cbData] = await Promise.all([
-            backendClient.getMissingArticles(page, 10, search),
+            backendClient.getMissingArticles(page, 10, search, blocking, orphaned, isImported),
             backendClient.getCurrentBandwidth(),
         ]);
         missingArticles = maData;
         currentBandwidth = cbData;
+    } else if (tab === "mapped") {
+        mappedFiles = await backendClient.getMappedFiles(page, 10, search);
     }
 
-    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, range, tab, page, search };
+    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking, orphaned, isImported };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -49,12 +59,23 @@ export async function action({ request }: Route.ActionArgs) {
 
     if (action === "clear-missing-articles") {
         await backendClient.clearMissingArticles();
+    } else if (action === "delete-missing-article") {
+        const filenames = formData.getAll("filename") as string[];
+        for (const filename of filenames) {
+            if (filename) await backendClient.clearMissingArticles(filename);
+        }
     } else if (action === "clear-deleted-files") {
         await backendClient.clearDeletedFiles();
     } else if (action === "trigger-repair") {
-        const filePath = formData.get("filePath")?.toString();
-        if (filePath) {
-            await backendClient.triggerRepair(filePath);
+        const filePaths: string[] = [];
+        // Iterate over formData entries to find all filePaths[]
+        for (const [key, value] of formData.entries()) {
+            if (key.startsWith("filePaths[") && typeof value === 'string') {
+                filePaths.push(value);
+            }
+        }
+        if (filePaths.length > 0) {
+            await backendClient.triggerRepair(filePaths);
         }
     }
 
@@ -62,7 +83,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function StatsPage({ loaderData }: Route.ComponentProps) {
-    const { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, range, tab, page, search } = loaderData;
+    const { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking } = loaderData;
     const [searchParams, setSearchParams] = useSearchParams();
     const revalidator = useRevalidator();
 
@@ -92,6 +113,7 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
             else prev.delete("tab");
             prev.delete("page"); // Reset page when switching tabs
             prev.delete("search"); // Reset search when switching tabs
+            prev.delete("blocking"); // Reset blocking filter when switching tabs
             return prev;
         });
     };
@@ -151,7 +173,18 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                             totalCount={missingArticles.totalCount}
                             page={page}
                             search={search}
+                            blocking={blocking}
                             providers={currentBandwidth} 
+                        />
+                    )}
+                </Tab>
+                <Tab eventKey="mapped" title="Mapped Files">
+                    {activeTab === 'mapped' && (
+                        <MappedFilesTable
+                            items={mappedFiles.items}
+                            totalCount={mappedFiles.totalCount}
+                            page={page}
+                            search={search}
                         />
                     )}
                 </Tab>
@@ -162,5 +195,6 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
         </Container>
     );
 }
+
 
 

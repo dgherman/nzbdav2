@@ -6,6 +6,9 @@ declare const styles: {
   readonly "live": string;
   readonly "active": string;
   readonly "caption": string;
+  readonly "usageBreakdown": string;
+  readonly "usageItem": string;
+  readonly "usageType": string;
+  readonly "usageCount": string;
 };
 export = styles;
-

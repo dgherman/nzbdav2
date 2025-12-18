@@ -1,7 +1,11 @@
 using System.Collections.Concurrent;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using NzbWebDAV.Config;
+using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Models;
 using Serilog;
 
 namespace NzbWebDAV.Utils;
@@ -14,77 +18,268 @@ public static class OrganizedLinksUtil
     private static readonly ConcurrentDictionary<Guid, string> Cache = new();
     private static volatile LinkCacheStatus _status = LinkCacheStatus.NotInitialized;
     private static readonly SemaphoreSlim _initLock = new(1, 1);
+    private static CancellationTokenSource? _refreshCts;
+    private static Task? _refreshTask;
+    private static IServiceProvider? _serviceProvider;
 
     public static LinkCacheStatus Status => _status;
 
     /// <summary>
-    /// Initializes the link cache by scanning the library asynchronously.
+    /// Adds or updates a link entry in the cache and database.
     /// </summary>
-    public static async Task InitializeAsync(ConfigManager configManager)
+    public static void UpdateCacheEntry(Guid davItemId, string linkPath)
     {
-        if (_status != LinkCacheStatus.NotInitialized) return;
+        // Update Memory
+        Cache[davItemId] = linkPath;
         
-        Log.Information("[OrganizedLinksUtil] Starting link cache initialization...");
-        _status = LinkCacheStatus.Initializing;
-
-        await _initLock.WaitAsync().ConfigureAwait(false);
-        try
+        // Update DB
+        if (_serviceProvider != null)
         {
-            if (_status != LinkCacheStatus.Initializing) return; // Re-check if status changed while waiting for lock
-
-            // The actual heavy work is done here
-            await Task.Run(() =>
+            try
             {
-                var scannedLinks = 0;
-                foreach (var davItemLink in GetLibraryDavItemLinks(configManager))
+                using var scope = _serviceProvider.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+                var existing = db.LocalLinks.FirstOrDefault(x => x.DavItemId == davItemId);
+                if (existing != null)
                 {
-                    Cache[davItemLink.DavItemId] = davItemLink.LinkPath;
-                    scannedLinks++;
+                    existing.LinkPath = linkPath;
                 }
-                Log.Information($"[OrganizedLinksUtil] Link cache initialized with {scannedLinks} links.");
-            }).ConfigureAwait(false);
-            _status = LinkCacheStatus.Initialized;
+                else
+                {
+                    db.LocalLinks.Add(new LocalLink { DavItemId = davItemId, LinkPath = linkPath });
+                }
+                db.SaveChanges();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, $"[OrganizedLinksUtil] Failed to persist link update for {davItemId}");
+            }
         }
-        catch (Exception ex)
-        {
-            Log.Error(ex, "[OrganizedLinksUtil] Error initializing link cache.");
-            _status = LinkCacheStatus.Error;
-        }
-        finally
-        {
-            _initLock.Release();
-        }
+        
+        Log.Debug($"[OrganizedLinksUtil] Cache updated for DavItem {davItemId} with link {linkPath}");
     }
 
     /// <summary>
-    /// Searches organized media library for a symlink or strm pointing to the given target
+    /// Removes a link entry from the cache and database.
     /// </summary>
-    /// <param name="targetDavItem">The given target</param>
-    /// <param name="configManager">The application config</param>
-    /// <param name="allowScan">If true, allows scanning the filesystem on cache miss (slow). If false, returns null on cache miss.</param>
-    /// <returns>The path to a symlink or strm in the organized media library that points to the given target.</returns>
+    public static void RemoveCacheEntry(Guid davItemId)
+    {
+        // Update Memory
+        Cache.TryRemove(davItemId, out _);
+        
+        // Update DB
+        if (_serviceProvider != null)
+        {
+            try
+            {
+                using var scope = _serviceProvider.CreateScope();
+                var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+                var existing = db.LocalLinks.Where(x => x.DavItemId == davItemId).ToList();
+                if (existing.Any())
+                {
+                    db.LocalLinks.RemoveRange(existing);
+                    db.SaveChanges();
+                }
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, $"[OrganizedLinksUtil] Failed to persist link removal for {davItemId}");
+            }
+        }
+        
+        Log.Debug($"[OrganizedLinksUtil] Cache entry removed for DavItem {davItemId}");
+    }
+
+    /// <summary>
+    /// Starts a background service to periodically refresh the link cache.
+    /// </summary>
+    public static void StartRefreshService(IServiceProvider serviceProvider, ConfigManager configManager, CancellationToken applicationStoppingToken)
+    {
+        if (_refreshTask != null) return; // Already running
+
+        _serviceProvider = serviceProvider;
+        _refreshCts = CancellationTokenSource.CreateLinkedTokenSource(applicationStoppingToken);
+        _refreshTask = Task.Run(() => RefreshServiceLoop(configManager, _refreshCts.Token), applicationStoppingToken);
+        Log.Information("[OrganizedLinksUtil] Background cache refresh service started.");
+    }
+
+    /// <summary>
+    /// Stops the background refresh service.
+    /// </summary>
+    public static void StopRefreshService()
+    {
+        if (_refreshCts == null) return;
+        _refreshCts.Cancel();
+        _refreshTask?.Wait();
+        _refreshCts.Dispose();
+        _refreshCts = null;
+        _refreshTask = null;
+        Log.Information("[OrganizedLinksUtil] Background cache refresh service stopped.");
+    }
+
+    private static async Task RefreshServiceLoop(ConfigManager configManager, CancellationToken ct)
+    {
+        // Initial load from DB (Fast)
+        await InitializeFromDbAsync(ct);
+        
+        while (!ct.IsCancellationRequested)
+        {
+            try
+            {
+                // Full Sync (Disk Scan)
+                await SyncLinksAsync(configManager, ct);
+                
+                // Refresh every 5 minutes
+                await Task.Delay(TimeSpan.FromMinutes(5), ct).ConfigureAwait(false); 
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[OrganizedLinksUtil] Error during periodic cache refresh.");
+                await Task.Delay(TimeSpan.FromMinutes(1), ct).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private static async Task InitializeFromDbAsync(CancellationToken ct)
+    {
+        if (_serviceProvider == null) return;
+        
+        Log.Information("[OrganizedLinksUtil] Loading link cache from database...");
+        _status = LinkCacheStatus.Initializing;
+        
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+            var links = await db.LocalLinks.AsNoTracking().ToListAsync(ct);
+            
+            foreach (var link in links)
+            {
+                Cache[link.DavItemId] = link.LinkPath;
+            }
+            
+            _status = LinkCacheStatus.Initialized;
+            Log.Information($"[OrganizedLinksUtil] Link cache loaded from database with {links.Count} links.");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[OrganizedLinksUtil] Failed to load link cache from database.");
+            _status = LinkCacheStatus.Error;
+        }
+    }
+
+    private static async Task SyncLinksAsync(ConfigManager configManager, CancellationToken ct)
+    {
+        if (_serviceProvider == null) return;
+        
+        Log.Information("[OrganizedLinksUtil] Starting filesystem sync...");
+        
+        try
+        {
+            using var scope = _serviceProvider.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+
+            // 1. Scan Disk (Heavy operation)
+            var rawDiskLinks = await Task.Run(() => GetLibraryDavItemLinks(configManager).ToList(), ct);
+
+            // Validate FKs: Only keep links that point to existing DavItems
+            var davItemIds = rawDiskLinks.Select(x => x.DavItemId).Distinct().ToList();
+            var validDavItemIds = await dbContext.Items
+                .AsNoTracking()
+                .Where(x => davItemIds.Contains(x.Id))
+                .Select(x => x.Id)
+                .ToListAsync(ct);
+            var validDavItemIdSet = new HashSet<Guid>(validDavItemIds);
+
+            var onDiskLinks = rawDiskLinks.Where(x => validDavItemIdSet.Contains(x.DavItemId)).ToList();
+            var onDiskMap = onDiskLinks.ToDictionary(x => x.LinkPath, x => x.DavItemId);
+
+            // 2. Load DB
+            var dbLinks = await dbContext.LocalLinks.ToListAsync(ct);
+            var dbMap = dbLinks.ToDictionary(x => x.LinkPath, x => x);
+
+            // 3. Compare
+            var toAdd = new List<LocalLink>();
+            var toRemove = new List<LocalLink>();
+            var toUpdate = new List<LocalLink>();
+
+            foreach (var diskLink in onDiskLinks)
+            {
+                if (dbMap.TryGetValue(diskLink.LinkPath, out var dbLink))
+                {
+                    if (dbLink.DavItemId != diskLink.DavItemId)
+                    {
+                        dbLink.DavItemId = diskLink.DavItemId;
+                        toUpdate.Add(dbLink);
+                    }
+                }
+                else
+                {
+                    toAdd.Add(new LocalLink
+                    {
+                        LinkPath = diskLink.LinkPath,
+                        DavItemId = diskLink.DavItemId
+                    });
+                }
+            }
+
+            foreach (var dbLink in dbLinks)
+            {
+                if (!onDiskMap.ContainsKey(dbLink.LinkPath))
+                {
+                    toRemove.Add(dbLink);
+                }
+            }
+
+            // 4. Update Memory Cache
+            foreach (var link in toAdd) Cache[link.DavItemId] = link.LinkPath;
+            foreach (var link in toUpdate) Cache[link.DavItemId] = link.LinkPath;
+            foreach (var link in toRemove) Cache.TryRemove(link.DavItemId, out _);
+
+            // 5. Update DB
+            if (toAdd.Count > 0) dbContext.LocalLinks.AddRange(toAdd);
+            if (toRemove.Count > 0) dbContext.LocalLinks.RemoveRange(toRemove);
+            // Updates are tracked by EF
+
+            if (toAdd.Count > 0 || toRemove.Count > 0 || toUpdate.Count > 0)
+            {
+                await dbContext.SaveChangesAsync(ct);
+                Log.Information($"[OrganizedLinksUtil] Sync complete. Added: {toAdd.Count}, Removed: {toRemove.Count}, Updated: {toUpdate.Count}");
+            }
+            else
+            {
+                Log.Information("[OrganizedLinksUtil] Sync complete. No changes detected.");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[OrganizedLinksUtil] Error during filesystem sync.");
+        }
+    }
+
+    // Kept for compatibility but now just ensures DB load
+    public static async Task InitializeAsync(ConfigManager configManager)
+    {
+        if (_status == LinkCacheStatus.Initialized) return;
+        await InitializeFromDbAsync(CancellationToken.None);
+    }
+
     public static string? GetLink(DavItem targetDavItem, ConfigManager configManager, bool allowScan = true)
     {
         if (Cache.TryGetValue(targetDavItem.Id, out var link) && Verify(link, targetDavItem, configManager))
         {
             return link;
         }
-
-        // If cache is not initialized yet, we must not block by scanning for the IsImported status in HealthCheck.
-        // Repair logic can still trigger a scan because it's less frequent and needs accuracy.
-        if (!allowScan && (_status == LinkCacheStatus.NotInitialized || _status == LinkCacheStatus.Initializing))
-        {
-            return null;
-        }
-
-        return allowScan ? SearchForLink(targetDavItem, configManager) : null;
+        
+        // Scan fallback is no longer supported/needed as we sync in background
+        // But for compatibility we can return null if not in cache
+        return null;
     }
 
-    /// <summary>
-    /// Enumerates all DavItemLinks within the organized media library that point to nzbdav dav-items.
-    /// </summary>
-    /// <param name="configManager">The application config</param>
-    /// <returns>All DavItemLinks within the organized media library that point to nzbdav dav-items.</returns>
     public static IEnumerable<DavItemLink> GetLibraryDavItemLinks(ConfigManager configManager)
     {
         var libraryRoot = configManager.GetLibraryDir()!;
@@ -96,6 +291,8 @@ public static class OrganizedLinksUtil
     {
         var mountDir = configManager.GetRcloneMountDir();
         var fileInfo = new FileInfo(linkFromCache);
+        if (!fileInfo.Exists) return false; // Basic check
+
         var symlinkOrStrmInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(fileInfo);
         if (symlinkOrStrmInfo == null) return false;
         var davItemLink = GetDavItemLink(symlinkOrStrmInfo, mountDir);
@@ -104,15 +301,8 @@ public static class OrganizedLinksUtil
 
     private static string? SearchForLink(DavItem targetDavItem, ConfigManager configManager)
     {
-        string? result = null;
-        foreach (var davItemLink in GetLibraryDavItemLinks(configManager))
-        {
-            Cache[davItemLink.DavItemId] = davItemLink.LinkPath;
-            if (davItemLink.DavItemId == targetDavItem.Id)
-                result = davItemLink.LinkPath;
-        }
-
-        return result;
+        // Deprecated
+        return null;
     }
 
     private static IEnumerable<DavItemLink> GetDavItemLinks
@@ -128,7 +318,7 @@ public static class OrganizedLinksUtil
             .Select(x => x!.Value);
     }
 
-    private static DavItemLink? GetDavItemLink
+    public static DavItemLink? GetDavItemLink
     (
         SymlinkAndStrmUtil.ISymlinkOrStrmInfo symlinkOrStrmInfo,
         string mountDir
@@ -150,10 +340,11 @@ public static class OrganizedLinksUtil
         targetPath = targetPath.StartsWith('/') ? targetPath : $"/{targetPath}";
         if (!targetPath.StartsWith("/.ids")) return null;
         var guid = Path.GetFileNameWithoutExtension(targetPath);
+        if (!Guid.TryParse(guid, out var result)) return null;
         return new DavItemLink()
         {
             LinkPath = symlinkInfo.SymlinkPath,
-            DavItemId = Guid.Parse(guid),
+            DavItemId = result,
             SymlinkOrStrmInfo = symlinkInfo
         };
     }
@@ -164,12 +355,104 @@ public static class OrganizedLinksUtil
         var absolutePath = new Uri(targetUrl).AbsolutePath;
         if (!absolutePath.StartsWith("/view/.ids")) return null;
         var guid = Path.GetFileNameWithoutExtension(absolutePath);
+        if (!Guid.TryParse(guid, out var result)) return null;
         return new DavItemLink()
         {
             LinkPath = strmInfo.StrmPath,
-            DavItemId = Guid.Parse(guid),
+            DavItemId = result,
             SymlinkOrStrmInfo = strmInfo
         };
+    }
+    
+    public static async Task<(List<MappedFile> Items, int TotalCount)> GetMappedFilesPagedAsync(
+        DavDatabaseContext dbContext, ConfigManager configManager, int page, int pageSize, string? search = null)
+    {
+        // Query directly from DB
+        var query = dbContext.LocalLinks
+            .AsNoTracking()
+            .Select(x => new MappedFile
+            {
+                DavItemId = x.DavItemId,
+                LinkPath = x.LinkPath,
+                TargetPath = "N/A", // We don't store TargetPath in DB, can be calculated or omitted.
+                DavItemName = "N/A", // Will be filled
+                CreatedAt = x.CreatedAt
+            });
+
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            search = search.ToLower();
+            query = query.Where(x => x.LinkPath.ToLower().Contains(search));
+        }
+
+        var totalCount = await query.CountAsync();
+
+        var items = await query
+            .OrderBy(x => x.LinkPath)
+            .Skip((page - 1) * pageSize)
+            .Take(pageSize)
+            .ToListAsync();
+
+        // Enrich with Scene Name and Target Path (if possible)
+        var davItemIds = items.Select(x => x.DavItemId).ToList();
+        var davItems = await dbContext.Items
+            .AsNoTracking()
+            .Where(x => davItemIds.Contains(x.Id))
+            .Select(x => new { x.Id, x.Path })
+            .ToDictionaryAsync(x => x.Id, x => x.Path);
+
+        foreach (var item in items)
+        {
+            // Enrich Name and Path
+            if (davItems.TryGetValue(item.DavItemId, out var path))
+            {
+                item.DavItemPath = path;
+                var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                if (parts.Length >= 3)
+                {
+                    item.DavItemName = parts[2]; // Scene Name
+                }
+                else
+                {
+                     item.DavItemName = Path.GetFileName(item.LinkPath);
+                }
+            }
+            else
+            {
+                 item.DavItemName = Path.GetFileName(item.LinkPath);
+            }
+            
+            // Re-calculate Target Path if needed, or we can add it to DB. 
+            // Calculating it requires reading the file which is slow.
+            // For now, "N/A" or try to read it if file exists?
+            // The table shows "Target Path/URL". 
+            // Reading 10 files per page is fine.
+            item.TargetPath = GetSymlinkOrStrmTarget(item.LinkPath, configManager);
+        }
+
+        return (items, totalCount);
+    }
+    
+    private static string GetSymlinkOrStrmTarget(string linkPath, ConfigManager configManager)
+    {
+        try 
+        {
+            var fileInfo = new FileInfo(linkPath);
+            if (!fileInfo.Exists) return "File Not Found";
+
+            var symlinkOrStrmInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(fileInfo);
+
+            if (symlinkOrStrmInfo is SymlinkAndStrmUtil.SymlinkInfo symInfo)
+            {
+                return symInfo.TargetPath;
+            }
+            else if (symlinkOrStrmInfo is SymlinkAndStrmUtil.StrmInfo strmInfo)
+            {
+                return strmInfo.TargetUrl;
+            }
+        }
+        catch {}
+        return "Error";
     }
 
     public struct DavItemLink

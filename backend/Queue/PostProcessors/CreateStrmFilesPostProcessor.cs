@@ -19,7 +19,10 @@ public class CreateStrmFilesPostProcessor(ConfigManager configManager, DavDataba
             .Where(x => x.Type != DavItem.ItemType.Directory)
             .Where(x => FilenameUtil.IsVideoFile(x.Name));
         foreach (var videoItem in videoItems)
+        {
             await CreateStrmFileAsync(videoItem).ConfigureAwait(false);
+            OrganizedLinksUtil.UpdateCacheEntry(videoItem.Id, GetStrmFilePath(videoItem));
+        }
     }
 
     private async Task CreateStrmFileAsync(DavItem davItem)

@@ -3,6 +3,7 @@ using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
 using NzbWebDAV.Websocket;
 using Serilog;
@@ -13,6 +14,7 @@ public class RemoveUnlinkedFilesTask(
     ConfigManager configManager,
     DavDatabaseClient dbClient,
     WebsocketManager websocketManager,
+    ProviderErrorService providerErrorService,
     bool isDryRun
 ) : BaseTask
 {
@@ -99,7 +101,14 @@ public class RemoveUnlinkedFilesTask(
         if (removedItems.Contains(item.Id)) return;
 
         // remove the item
-        if (!isDryRun) dbClient.Ctx.Items.Remove(item);
+        if (!isDryRun)
+        {
+            dbClient.Ctx.Items.Remove(item);
+            // Clear errors for this file
+            providerErrorService.ClearErrorsForFile(item.Path);
+            // Clear mapping cache/entry
+            OrganizedLinksUtil.RemoveCacheEntry(item.Id);
+        }
         removedItems.Add(item.Id);
 
         // remove the parent directory, if it is empty.
