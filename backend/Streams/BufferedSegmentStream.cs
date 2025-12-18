@@ -239,6 +239,12 @@ public class BufferedSegmentStream : Stream
                         Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments (operation: GetSegmentStream, provider: {providerInfo})");
                         throw;
                     }
+                    catch (UsenetArticleNotFoundException)
+                    {
+                        // Do not log error here. This is an expected condition when an article is missing.
+                        // The exception will bubble up to FetchSegmentsAsync where it is handled gracefully.
+                        throw;
+                    }
                     catch (Exception ex)
                     {
                         Log.Error($"[BufferedStream] Worker {workerId} encountered error after processing {segmentCount} segments: {ex.GetType().Name} - {ex.Message}");
