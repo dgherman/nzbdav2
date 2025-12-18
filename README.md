@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.7 (2025-12-17)
+*   **Logging**: Suppressed stack traces for generic exceptions within `GetSegmentStreamAsync` in `ThreadSafeNntpClient` when the stack trace matches a specific pattern, to reduce log noise for internal client errors.
+
 ## v0.1.6 (2025-12-17)
 *   **Logging**: Suppressed stack traces for `System.TimeoutException` originating from Usenet provider timeouts to reduce log noise.
 

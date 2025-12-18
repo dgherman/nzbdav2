@@ -7,6 +7,7 @@ using Usenet.Nntp.Models;
 using Usenet.Nntp.Responses;
 using Usenet.Nzb;
 using Usenet.Yenc;
+using Serilog;
 
 namespace NzbWebDAV.Clients.Usenet;
 
@@ -87,8 +88,21 @@ public class ThreadSafeNntpClient : INntpClient
                         catch (ObjectDisposedException) { }
                     }
                 }
-                catch (Exception)
+                catch (Exception ex)
                 {
+                    // Check if the stack trace contains the specific line the user wants to suppress.
+                    // This is a heuristic to avoid suppressing all exceptions from this method,
+                    // but target only those that surface with this particular stack context.
+                    if (ex.StackTrace?.Contains("NzbWebDAV.Clients.Usenet.ThreadSafeNntpClient.GetSegmentStreamAsync") == true)
+                    {
+                        Log.Error("An error occurred in GetSegmentStreamAsync that would typically print a stack trace. Message: {ErrorMessage}", ex.Message);
+                    }
+                    else
+                    {
+                        // For other exceptions, log with stack trace
+                        Log.Error(ex, "An unhandled error occurred in GetSegmentStreamAsync.");
+                    }
+
                     try
                     {
                         _semaphore.Release();
