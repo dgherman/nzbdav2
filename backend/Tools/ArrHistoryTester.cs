@@ -1,3 +1,4 @@
+using System.Text.Json;
 using NzbWebDAV.Clients.RadarrSonarr;
 using Serilog;
 
@@ -33,8 +34,9 @@ public static class ArrHistoryTester
         try
         {
             // 1. Fetch History
-            Log.Information("Fetching history...");
-            var history = await client.GetHistoryAsync();
+            int pageSize = 1000;
+            Log.Information($"Fetching history (PageSize: {pageSize})...");
+            var history = await client.GetHistoryAsync(pageSize: pageSize);
             
             Log.Information($"Fetched {history.Records.Count} history records.");
 
@@ -60,6 +62,7 @@ public static class ArrHistoryTester
             }
 
             Log.Information($"FOUND Grab Event: ID {grabEvent.Id}, Title: {grabEvent.SourceTitle}, EventType: {grabEvent.EventType}");
+            Log.Information($"Event Data: {JsonSerializer.Serialize(grabEvent, new JsonSerializerOptions { WriteIndented = true })}");
 
             // 3. Attempt Blacklist
             Log.Information("Attempting to blacklist (Mark as Failed)...");
