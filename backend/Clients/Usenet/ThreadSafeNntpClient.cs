@@ -90,6 +90,19 @@ public class ThreadSafeNntpClient : INntpClient
                 }
                 catch (Exception ex)
                 {
+                    // If the article is not found, we just rethrow it.
+                    // The caller (MultiProviderNntpClient) is responsible for handling this (e.g. trying another provider).
+                    // We don't want to log this as an error here because it's a normal occurrence in a multi-provider setup.
+                    if (ex is UsenetArticleNotFoundException)
+                    {
+                        try
+                        {
+                            _semaphore.Release();
+                        }
+                        catch (ObjectDisposedException) { }
+                        throw;
+                    }
+
                     // Check if the stack trace contains the specific line the user wants to suppress.
                     // This is a heuristic to avoid suppressing all exceptions from this method,
                     // but target only those that surface with this particular stack context.

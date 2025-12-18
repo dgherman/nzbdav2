@@ -299,6 +299,12 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.13 (2025-12-17)
+*   **Logging**: Fixed excessive error logging by ensuring `UsenetArticleNotFoundException` is rethrown without logging in the low-level `ThreadSafeNntpClient`. This prevents stack traces from appearing in the logs for every missing article when expected failures are handled by the multi-provider client.
+
+## v0.1.13 (2025-12-17)
+*   **Logging**: Fixed excessive error logging by ensuring `UsenetArticleNotFoundException` is rethrown without logging in the low-level `ThreadSafeNntpClient`. This prevents stack traces from appearing in the logs for every missing article when expected failures are handled by the multi-provider client.
+
 ## v0.1.12 (2025-12-17)
 *   **Logging**: Added explicit log messages when a `UsenetArticleNotFoundException` triggers an immediate health check for a `DavItem`. This provides clearer visibility into the system's proactive repair actions.
 
