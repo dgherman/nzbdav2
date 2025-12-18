@@ -63,11 +63,11 @@ public class ArrClient(string host, string apiKey)
     public Task<ArrCommand> CommandAsync(object command) =>
         Post<ArrCommand>($"/command", command);
 
-    public virtual Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null)
+    public virtual Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null, int pageSize = 1000)
     {
-        var query = "";
-        if (movieId.HasValue) query = $"?movieId={movieId.Value}&eventType={(int)ArrEventType.Grabbed}";
-        if (seriesId.HasValue) query = $"?seriesId={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
+        var query = $"?pageSize={pageSize}";
+        if (movieId.HasValue) query += $"&movieId={movieId.Value}&eventType={(int)ArrEventType.Grabbed}";
+        if (seriesId.HasValue) query += $"&seriesId={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
         return Get<ArrHistory>($"/history{query}");
     }
 

@@ -14,6 +14,7 @@ using NzbWebDAV.Middlewares;
 using NzbWebDAV.Queue;
 using NzbWebDAV.Services;
 using NzbWebDAV.Utils;
+using NzbWebDAV.Tools;
 using NzbWebDAV.WebDav;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.Websocket;
@@ -58,6 +59,13 @@ class Program
         Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-04-QUEUE-REORDER");
         Log.Warning("  FEATURE: Queue items can now be reordered via UI (move to top/bottom)");
         Log.Warning("═══════════════════════════════════════════════════════════════");
+
+        // Run Arr History Tester if requested
+        if (args.Contains("--test-arr-history"))
+        {
+            await ArrHistoryTester.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
 
         // Run repair simulation if requested
         if (args.Contains("--simulate-repair"))

@@ -35,12 +35,10 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
     public Task<ArrCommand> SearchEpisodesAsync(List<int> episodeIds) =>
         CommandAsync(new { name = "EpisodeSearch", episodeIds });
 
-    public override Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null)
+    public override Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null, int pageSize = 1000)
     {
-        var query = "";
-        // Sonarr history endpoint uses seriesIds (plural)
-        if (seriesId.HasValue) query = $"?seriesIds={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
-        // movieId is not applicable for Sonarr history endpoint
+        var query = $"?pageSize={pageSize}";
+        if (seriesId.HasValue) query += $"&seriesId={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
         return Get<ArrHistory>($"/history{query}");
     }
 

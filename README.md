@@ -299,6 +299,11 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.19 (2025-12-17)
+*   **Fix**: Corrected Sonarr history API calls to use the valid `seriesId` (singular) parameter instead of `seriesIds`.
+*   **Fix**: Updated Sonarr and Radarr history lookups to request a larger `pageSize` (default 1000), ensuring grab events are found even in extensive history.
+*   **Tooling**: Added a new CLI tool (`--test-arr-history`) to verify Sonarr/Radarr history retrieval and blacklisting functionality directly from the container.
+
 ## v0.1.18 (2025-12-17)
 *   **Reliability**: Enhanced Health Check accuracy by switching from `Stat` (STAT) to `GetArticleHeaders` (HEAD) for verifying article existence. This eliminates false positives where providers might report an article as existing (STAT OK) even when the body is missing or corrupted, ensuring that only truly available files pass the health check.
 
