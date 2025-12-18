@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.10 (2025-12-17)
+*   **Logging**: Suppressed stack traces for `UsenetArticleNotFoundException` in `BufferedSegmentStream`. This reduces log noise when all providers fail to find an article during streaming, while still logging the error message.
+
 ## v0.1.9 (2025-12-17)
 *   **Maintenance**: Improved automatic cleanup of orphaned "Missing Article" logs. The system now periodically scans for and removes error logs associated with files that have been deleted or have invalid (Empty) Dav IDs, addressing the issue of persistent "00000000..." entries in the Missing Articles table.
 

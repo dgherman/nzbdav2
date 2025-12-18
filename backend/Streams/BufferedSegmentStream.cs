@@ -287,7 +287,15 @@ public class BufferedSegmentStream : Stream
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync");
+            if (ex is UsenetArticleNotFoundException || (ex is AggregateException agg && agg.InnerExceptions.Any(e => e is UsenetArticleNotFoundException)))
+            {
+                // Log without stack trace for expected missing article errors
+                Log.Error($"[BufferedStream] Error in FetchSegmentsAsync: {ex.Message}");
+            }
+            else
+            {
+                Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync");
+            }
             _bufferChannel.Writer.Complete(ex);
         }
     }
