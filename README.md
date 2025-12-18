@@ -299,6 +299,10 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.21 (2025-12-17)
+*   **Fix**: Resolved a race condition where a routine health check could overwrite and clear the "Urgent" status of a file that failed streaming, effectively ignoring the failure. The system now re-verifies the file's status before saving results.
+*   **Fix**: Corrected timeout handling for urgent health checks. If an urgent check times out, it is no longer rescheduled to the future (downgrading it to a routine check), but instead maintains its high priority to ensure a rigorous retry.
+
 ## v0.1.20 (2025-12-17)
 *   **Optimization**: Implemented a smart health check strategy. Routine scheduled health checks now use the faster `STAT` command, while urgent health checks triggered by streaming failures continue to use the more reliable `HEAD` command. This balances performance for maintenance with accuracy for repair.
 

@@ -141,17 +141,27 @@ public class HealthCheckService
                     else
                     {
                         Log.Warning($"[HealthCheck] Timed out processing item: {davItem.Name}. Rescheduling for later (Attempt {timeouts}).");
-                        try
+                        
+                        // If this was an Urgent check (MinValue), do NOT reschedule to the future.
+                        // We want it to stay Urgent so it retries with HEAD.
+                        if (davItem.NextHealthCheck != DateTimeOffset.MinValue)
                         {
-                            using var dbContext = new DavDatabaseContext();
-                            await dbContext.Items
-                                .Where(x => x.Id == davItem.Id)
-                                .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, DateTimeOffset.UtcNow.AddHours(1)))
-                                .ConfigureAwait(false);
+                            try
+                            {
+                                using var dbContext = new DavDatabaseContext();
+                                await dbContext.Items
+                                    .Where(x => x.Id == davItem.Id)
+                                    .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, DateTimeOffset.UtcNow.AddHours(1)))
+                                    .ConfigureAwait(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                Log.Error(ex, "[HealthCheck] Failed to reschedule timed-out item.");
+                            }
                         }
-                        catch (Exception ex)
+                        else
                         {
-                            Log.Error(ex, "[HealthCheck] Failed to reschedule timed-out item.");
+                            Log.Warning($"[HealthCheck] Item `{davItem.Name}` timed out during Urgent check. Keeping priority high for immediate retry.");
                         }
                     }
                 }
@@ -224,6 +234,19 @@ public class HealthCheckService
             Log.Debug($"[HealthCheck] Segments verified for {davItem.Name}. Updating database...");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");
+
+            // Prevent Race Condition:
+            // If this was a Routine (STAT) check, but the file was marked Urgent (HEAD) by the middleware 
+            // *during* this check (e.g. user tried to stream and failed), we must NOT overwrite the Urgent status.
+            if (!useHead)
+            {
+                await dbClient.Ctx.Entry(davItem).ReloadAsync(ct).ConfigureAwait(false);
+                if (davItem.NextHealthCheck == DateTimeOffset.MinValue)
+                {
+                    Log.Warning($"[HealthCheck] Item `{davItem.Name}` was marked Urgent during a Routine check. Aborting save to allow Immediate Urgent (HEAD) check.");
+                    return;
+                }
+            }
 
             // update the database
             davItem.LastHealthCheck = DateTimeOffset.UtcNow;
