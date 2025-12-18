@@ -88,25 +88,31 @@ public class UsenetStreamingClient
                 using var _ = segmentCts.Token.SetScopedContext(usageContext);
                 try
                 {
-                    return (
-                        SegmentId: x,
-                        Result: await _client.StatAsync(x, segmentCts.Token).ConfigureAwait(false)
-                    );
+                    // Use GetArticleHeadersAsync (HEAD) instead of StatAsync (STAT)
+                    // STAT can sometimes return false positives (ArticleExists) on some providers even if the body is missing.
+                    // HEAD is more reliable for verifying existence.
+                    await _client.GetArticleHeadersAsync(x, segmentCts.Token).ConfigureAwait(false);
+                    return x;
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested && segmentCts.IsCancellationRequested)
                 {
-                    throw new TimeoutException($"Stat timed out for segment {x}");
+                    throw new TimeoutException($"Head timed out for segment {x}");
                 }
             })
             .WithConcurrencyAsync(concurrency);
 
         var processed = 0;
-        await foreach (var task in tasks.ConfigureAwait(false))
+        try
         {
-            progress?.Report(++processed);
-            if (task.Result.ResponseType == NntpStatResponseType.ArticleExists) continue;
+            await foreach (var segmentId in tasks.ConfigureAwait(false))
+            {
+                progress?.Report(++processed);
+            }
+        }
+        catch (Exception)
+        {
             await childCt.CancelAsync().ConfigureAwait(false);
-            throw new UsenetArticleNotFoundException(task.SegmentId);
+            throw;
         }
     }
 

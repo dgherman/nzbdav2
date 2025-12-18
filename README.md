@@ -299,6 +299,9 @@ volumes:
 *   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
 
 
+## v0.1.18 (2025-12-17)
+*   **Reliability**: Enhanced Health Check accuracy by switching from `Stat` (STAT) to `GetArticleHeaders` (HEAD) for verifying article existence. This eliminates false positives where providers might report an article as existing (STAT OK) even when the body is missing or corrupted, ensuring that only truly available files pass the health check.
+
 ## v0.1.17 (2025-12-17)
 *   **Logging**: Removed `UsenetArticleNotFoundException` error logs from the internal worker loop in `BufferedSegmentStream`. These errors are expected when searching for missing articles across providers and were causing unnecessary noise before the final result was determined.
 
