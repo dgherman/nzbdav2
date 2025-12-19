@@ -9,6 +9,7 @@ public class HealthCheckResult
     public HealthResult Result { get; init; }
     public RepairAction RepairStatus { get; set; }
     public string? Message { get; set; }
+    public string Operation { get; set; } = "UNKNOWN";
 
     public enum HealthResult
     {

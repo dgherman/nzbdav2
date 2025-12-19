@@ -280,7 +280,7 @@ public class HealthCheckService
             // when usenet article is missing, perform repairs
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path }));
-            await Repair(davItem, dbClient, cts2.Token, failureDetails).ConfigureAwait(false);
+            await Repair(davItem, dbClient, cts2.Token, failureDetails, useHead ? "HEAD" : "STAT").ConfigureAwait(false);
         }
     }
 
@@ -378,7 +378,7 @@ public class HealthCheckService
         await Repair(davItem, dbClient, cts.Token, "Manual repair triggered by user").ConfigureAwait(false);
     }
 
-    private async Task Repair(DavItem davItem, DavDatabaseClient dbClient, CancellationToken ct, string? failureDetails = null)
+    private async Task Repair(DavItem davItem, DavDatabaseClient dbClient, CancellationToken ct, string? failureDetails = null, string operation = "UNKNOWN")
     {
         try
         {
@@ -404,7 +404,8 @@ public class HealthCheckService
                         failureReason,
                         "File extension is marked in settings as ignored (unwanted) file type.",
                         "Deleted file."
-                    ])
+                    ]),
+                    Operation = operation
                 }));
                 await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                 await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
@@ -430,7 +431,8 @@ public class HealthCheckService
                         failureReason,
                         "Could not find corresponding symlink or strm-file within Library Dir.",
                         "Deleted file."
-                    ])
+                    ]),
+                    Operation = operation
                 }));
                 await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                 await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
@@ -486,7 +488,8 @@ public class HealthCheckService
                             failureReason,
                             $"Corresponding {linkType} found within Library Dir.",
                             arrActionMessage
-                        ])
+                        ]),
+                        Operation = operation
                     }));
                     await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
                     await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
@@ -535,7 +538,8 @@ public class HealthCheckService
                     $"Corresponding {linkType} found within Library Dir.",
                     "Could not find corresponding Radarr/Sonarr media-item to trigger a new search.",
                     deleteMessage // Use the detailed delete message
-                ])
+                ]),
+                Operation = operation
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
             await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
@@ -555,7 +559,8 @@ public class HealthCheckService
                 CreatedAt = utcNow,
                 Result = HealthCheckResult.HealthResult.Unhealthy,
                 RepairStatus = HealthCheckResult.RepairAction.ActionNeeded,
-                Message = $"Error performing file repair: {e.Message}"
+                Message = $"Error performing file repair: {e.Message}",
+                Operation = operation
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         }
@@ -574,7 +579,8 @@ public class HealthCheckService
                 CreatedAt = utcNow,
                 Result = HealthCheckResult.HealthResult.Unhealthy,
                 RepairStatus = HealthCheckResult.RepairAction.ActionNeeded,
-                Message = $"Error performing file repair: {e.Message}"
+                Message = $"Error performing file repair: {e.Message}",
+                Operation = operation
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         }
