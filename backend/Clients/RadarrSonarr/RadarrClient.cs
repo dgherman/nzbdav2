@@ -110,7 +110,7 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         return true;
     }
 
-    private async Task<(int movieFileId, int movieId)?> GetMediaIds(string symlinkOrStrmPath)
+    public async Task<(int movieFileId, int movieId)?> GetMediaIds(string symlinkOrStrmPath)
     {
         // if we already have the movie-id cached
         // then let's use it to find and return the corresponding movie-file-id

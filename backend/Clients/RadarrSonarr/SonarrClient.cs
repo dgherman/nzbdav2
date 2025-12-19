@@ -38,7 +38,7 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
     public override Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null, int pageSize = 1000)
     {
         var query = $"?pageSize={pageSize}";
-        if (seriesId.HasValue) query += $"&seriesId={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
+        if (seriesId.HasValue) query += $"&seriesIds={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
         return Get<ArrHistory>($"/history{query}");
     }
 

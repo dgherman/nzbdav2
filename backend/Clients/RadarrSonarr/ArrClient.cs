@@ -67,7 +67,7 @@ public class ArrClient(string host, string apiKey)
     {
         var query = $"?pageSize={pageSize}";
         if (movieId.HasValue) query += $"&movieId={movieId.Value}&eventType={(int)ArrEventType.Grabbed}";
-        if (seriesId.HasValue) query += $"&seriesId={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
+        if (seriesId.HasValue) query += $"&seriesIds={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
         return Get<ArrHistory>($"/history{query}");
     }
 
