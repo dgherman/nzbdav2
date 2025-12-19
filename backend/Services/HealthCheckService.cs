@@ -1,4 +1,5 @@
-﻿using System.Collections.Concurrent;
+﻿using NzbWebDAV.Clients.RadarrSonarr;
+using System.Collections.Concurrent;
 using System.Net.Http;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.EntityFrameworkCore;
@@ -27,6 +28,7 @@ public class HealthCheckService
     private readonly ProviderErrorService _providerErrorService;
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
+    private readonly ArrClient _arrClient;
     private readonly HashSet<string> _missingSegmentIds = [];
     private readonly ConcurrentDictionary<Guid, int> _timeoutCounts = new();
 
@@ -36,7 +38,8 @@ public class HealthCheckService
         UsenetStreamingClient usenetClient,
         WebsocketManager websocketManager,
         IServiceScopeFactory serviceScopeFactory,
-        ProviderErrorService providerErrorService
+        ProviderErrorService providerErrorService,
+        ArrClient arrClient // Inject ArrClient
     )
     {
         _configManager = configManager;
@@ -44,6 +47,7 @@ public class HealthCheckService
         _websocketManager = websocketManager;
         _serviceScopeFactory = serviceScopeFactory;
         _providerErrorService = providerErrorService;
+        _arrClient = arrClient; // Initialize _arrClient
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
