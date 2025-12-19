@@ -121,6 +121,16 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
         </Tooltip>
     );
 
+    const renderOperationTooltip = (counts: Record<string, number>) => (
+        <Tooltip>
+            {Object.entries(counts || {}).map(([op, count]) => (
+                <div key={op}>
+                    {op}: {count}
+                </div>
+            ))}
+        </Tooltip>
+    );
+
     const confirmRepair = (e: React.FormEvent<HTMLFormElement>) => {
         if (!confirm(`Are you sure you want to trigger a repair for ${selectedItems.size} selected items? This will delete the files and trigger a re-search in Sonarr/Radarr.`)) {
             e.preventDefault();
@@ -297,11 +307,23 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                                             </ExpandableCell>
                                         </td>
                                         <td>
-                                            <OverlayTrigger placement="top" overlay={renderProviderTooltip(item.providerCounts)}>
-                                                <span className={`badge ${isCritical ? 'bg-danger' : 'bg-warning text-dark'}`}>
-                                                    {isCritical ? "Broken (All)" : "Partial"}
-                                                </span>
-                                            </OverlayTrigger>
+                                            <div className="d-flex gap-1">
+                                                <OverlayTrigger placement="top" overlay={renderProviderTooltip(item.providerCounts)}>
+                                                    <span className={`badge ${isCritical ? 'bg-danger' : 'bg-warning text-dark'}`}>
+                                                        {isCritical ? "Broken" : "Partial"}
+                                                    </span>
+                                                </OverlayTrigger>
+
+                                                <OverlayTrigger placement="top" overlay={renderOperationTooltip(item.operationCounts)}>
+                                                    <span className="badge bg-secondary" style={{ cursor: 'help' }}>
+                                                        {Object.entries(item.operationCounts || {})
+                                                            .sort((a, b) => b[1] - a[1]) // Sort by count desc
+                                                            .slice(0, 1) // Take top 1
+                                                            .map(([op]) => op)
+                                                            .join('/') || "N/A"}
+                                                    </span>
+                                                </OverlayTrigger>
+                                            </div>
                                         </td>
                                         <td className="text-center">
                                             {item.isImported ? <span className="badge bg-success">Mapped</span> : ""}
