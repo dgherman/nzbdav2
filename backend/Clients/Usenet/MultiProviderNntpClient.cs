@@ -1,4 +1,4 @@
-﻿using System.Runtime.ExceptionServices;
+using System.Runtime.ExceptionServices;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Exceptions;
@@ -40,7 +40,8 @@ public class MultiProviderNntpClient : INntpClient
             connection => connection.StatAsync(segmentId, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken,
-            segmentId);
+            segmentId,
+            "STAT");
     }
 
     public Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken)
@@ -57,7 +58,8 @@ public class MultiProviderNntpClient : INntpClient
             connection => connection.GetArticleHeadersAsync(segmentId, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken,
-            segmentId);
+            segmentId,
+            "HEADER");
     }
 
     public Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders,
@@ -67,7 +69,8 @@ public class MultiProviderNntpClient : INntpClient
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken,
-            segmentId);
+            segmentId,
+            "BODY");
     }
 
     public Task<YencHeaderStream> GetBalancedSegmentStreamAsync(string segmentId, bool includeHeaders,
@@ -77,7 +80,8 @@ public class MultiProviderNntpClient : INntpClient
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
             GetBalancedProviders(),
             cancellationToken,
-            segmentId);
+            segmentId,
+            "BODY");
     }
 
     public Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
@@ -86,7 +90,8 @@ public class MultiProviderNntpClient : INntpClient
             connection => connection.GetSegmentYencHeaderAsync(segmentId, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
             cancellationToken,
-            segmentId);
+            segmentId,
+            "BODY");
     }
 
     public Task<long> GetFileSizeAsync(NzbFile file, CancellationToken cancellationToken)
@@ -94,7 +99,9 @@ public class MultiProviderNntpClient : INntpClient
         return RunFromPoolWithBackup(
             connection => connection.GetFileSizeAsync(file, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
-            cancellationToken);
+            cancellationToken,
+            null,
+            "STAT");
     }
 
     public Task WaitForReady(CancellationToken cancellationToken)
@@ -115,7 +122,9 @@ public class MultiProviderNntpClient : INntpClient
         return RunFromPoolWithBackup(
             connection => connection.DownloadArticleBodyAsync(group, articleId, cancellationToken),
             GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
-            cancellationToken);
+            cancellationToken,
+            null,
+            "BODY");
     }
 
     private async Task<T> RunFromPoolWithBackup<T>
@@ -123,7 +132,8 @@ public class MultiProviderNntpClient : INntpClient
         Func<INntpClient, Task<T>> task,
         IEnumerable<MultiConnectionNntpClient> orderedProviders,
         CancellationToken cancellationToken,
-        string? segmentId = null
+        string? segmentId = null,
+        string operationName = "UNKNOWN"
     )
     {
         ExceptionDispatchInfo? lastException = null;
@@ -178,7 +188,7 @@ public class MultiProviderNntpClient : INntpClient
             catch (UsenetArticleNotFoundException e)
             {
                 // Explicitly caught to record it
-                RecordMissingArticle(provider.ProviderIndex, e.SegmentId, cancellationToken);
+                RecordMissingArticle(provider.ProviderIndex, e.SegmentId, cancellationToken, operationName);
                 lastException = ExceptionDispatchInfo.Capture(e);
             }
             catch (Exception e) when (e is not OperationCanceledException and not TaskCanceledException)
@@ -202,7 +212,7 @@ public class MultiProviderNntpClient : INntpClient
         throw new Exception("There are no usenet providers configured.");
     }
 
-    private void RecordMissingArticle(int providerIndex, string segmentId, CancellationToken ct)
+    private void RecordMissingArticle(int providerIndex, string segmentId, CancellationToken ct, string operation)
     {
         var context = ct.GetContext<ConnectionUsageContext>();
         var filename = context.DetailsObject?.Text ?? context.Details ?? "Unknown";
@@ -212,7 +222,7 @@ public class MultiProviderNntpClient : INntpClient
             : $"Provider {providerIndex}";
 
         if (_providerErrorService == null) return;
-        _providerErrorService.RecordError(providerIndex, filename, segmentId ?? "", "Article not found", context.IsImported);
+        _providerErrorService.RecordError(providerIndex, filename, segmentId ?? "", "Article not found", context.IsImported, operation);
     }
 
     private IEnumerable<MultiConnectionNntpClient> GetOrderedProviders(MultiConnectionNntpClient? preferredProvider)
