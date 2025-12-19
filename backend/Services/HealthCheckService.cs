@@ -280,7 +280,45 @@ public class HealthCheckService
             // when usenet article is missing, perform repairs
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path }));
-            await Repair(davItem, dbClient, cts2.Token, failureDetails, useHead ? "HEAD" : "STAT").ConfigureAwait(false);
+
+            int? episodeId = null;
+            // If this is a Sonarr item, try to get the episode ID for more specific history lookup
+            if (_arrClient is SonarrClient sonarrClient)
+            {
+                var mediaIds = await sonarrClient.GetMediaIds(davItem.Path);
+                if (mediaIds != null && mediaIds.Value.episodeIds.Any())
+                {
+                    episodeId = mediaIds.Value.episodeIds.First(); // Use the first episode ID found
+                }
+            }
+
+            // Pass episodeId and sort parameters from HealthCheckService
+            if (await arrClient.RemoveAndSearch(symlinkOrStrmPath, episodeId: episodeId, sortKey: "date", sortDirection: "descending").ConfigureAwait(false))
+            {
+                var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
+                Log.Information($"[HealthCheck] {arrActionMessage}");
+
+                dbClient.Ctx.Items.Remove(davItem);
+                OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
+                dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+                {
+                    Id = Guid.NewGuid(),
+                    DavItemId = davItem.Id,
+                    Path = davItem.Path,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    Result = HealthCheckResult.HealthResult.Unhealthy,
+                    RepairStatus = HealthCheckResult.RepairAction.Repaired,
+                    Message = string.Join(" ", [
+                        failureReason,
+                        $"Corresponding {linkType} found within Library Dir.",
+                        arrActionMessage
+                    ]),
+                    Operation = operation
+                }));
+                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
+                return;
+            }
         }
     }
 
@@ -467,9 +505,8 @@ public class HealthCheckService
                 else if (arrLinkInfo is SymlinkAndStrmUtil.StrmInfo stInfo)
                     linkTargetMsg = $" (Strm URL: '{stInfo.TargetUrl}')";
 
-                // if we found a corresponding arr instance,
-                // then remove and search.
-                if (await arrClient.RemoveAndSearch(symlinkOrStrmPath).ConfigureAwait(false))
+                // Pass episodeId and sort parameters from HealthCheckService
+                if (await arrClient.RemoveAndSearch(symlinkOrStrmPath, episodeId: episodeId, sortKey: "date", sortDirection: "descending").ConfigureAwait(false))
                 {
                     var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
                     Log.Information($"[HealthCheck] {arrActionMessage}");

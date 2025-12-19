@@ -31,7 +31,7 @@ public class ArrClient(string host, string apiKey)
     public Task<ArrApiInfoResponse> GetApiInfo() =>
         GetRoot<ArrApiInfoResponse>($"/api");
 
-    public virtual Task<bool> RemoveAndSearch(string symlinkOrStrmPath) =>
+    public virtual Task<bool> RemoveAndSearch(string symlinkOrStrmPath, int? episodeId = null, string sortKey = "date", string sortDirection = "descending") =>
         throw new InvalidOperationException();
 
     public Task<List<ArrRootFolder>> GetRootFolders() =>
@@ -63,11 +63,13 @@ public class ArrClient(string host, string apiKey)
     public Task<ArrCommand> CommandAsync(object command) =>
         Post<ArrCommand>($"/command", command);
 
-    public virtual Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null, int pageSize = 1000)
+    public virtual Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null, int? episodeId = null, int pageSize = 1000, string sortKey = "date", string sortDirection = "descending")
     {
-        var query = $"?pageSize={pageSize}";
+        var query = $"?pageSize={pageSize}&sortKey={sortKey}&sortDirection={sortDirection}";
         if (movieId.HasValue) query += $"&movieId={movieId.Value}&eventType={(int)ArrEventType.Grabbed}";
         if (seriesId.HasValue) query += $"&seriesIds={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
+        // Note: Base implementation doesn't handle episodeId generic logic well because Sonarr/Radarr differ significantly here.
+        // Derived classes should override this.
         return Get<ArrHistory>($"/history{query}");
     }
 
