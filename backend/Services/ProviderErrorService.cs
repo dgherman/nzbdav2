@@ -113,13 +113,23 @@ public class ProviderErrorService : IDisposable
                     if (maxTimestamp > summary.LastSeen) summary.LastSeen = maxTimestamp;
 
                     // Update provider counts
-                    var providerCounts = JsonSerializer.Deserialize<Dictionary<int, int>>(summary.ProviderCountsJson) ?? new();
+                    var providerCountsJson = !string.IsNullOrWhiteSpace(summary.ProviderCountsJson) ? summary.ProviderCountsJson : "{}";
+                    var operationCountsJson = !string.IsNullOrWhiteSpace(summary.OperationCountsJson) ? summary.OperationCountsJson : "{}";
+
+                    var providerCounts = JsonSerializer.Deserialize<Dictionary<int, int>>(providerCountsJson) ?? new();
+                    var operationCounts = JsonSerializer.Deserialize<Dictionary<string, int>>(operationCountsJson) ?? new();
+                    
                     foreach (var evt in group)
                     {
                         if (!providerCounts.ContainsKey(evt.ProviderIndex)) providerCounts[evt.ProviderIndex] = 0;
                         providerCounts[evt.ProviderIndex]++;
+                        
+                        var op = evt.Operation ?? "UNKNOWN";
+                        if (!operationCounts.ContainsKey(op)) operationCounts[op] = 0;
+                        operationCounts[op]++;
                     }
                     summary.ProviderCountsJson = JsonSerializer.Serialize(providerCounts);
+                    summary.OperationCountsJson = JsonSerializer.Serialize(operationCounts);
 
                     // Update stats
                     summary.TotalEvents += group.Count();
@@ -210,7 +220,7 @@ public class ProviderErrorService : IDisposable
         return "Uncategorized";
     }
 
-    public void RecordError(int providerIndex, string filename, string segmentId, string error, bool isImported = false)
+    public void RecordError(int providerIndex, string filename, string segmentId, string error, bool isImported = false, string operation = "UNKNOWN")
     {
         var jobName = ExtractJobName(filename);
         _buffer.Enqueue(new MissingArticleEvent
@@ -221,7 +231,8 @@ public class ProviderErrorService : IDisposable
             SegmentId = segmentId,
             Error = error,
             JobName = jobName,
-            IsImported = isImported
+            IsImported = isImported,
+            Operation = operation
         });
     }
 
@@ -260,6 +271,9 @@ public class ProviderErrorService : IDisposable
                 var providerCounts = events.GroupBy(x => x.ProviderIndex)
                     .ToDictionary(g => g.Key, g => g.Count());
                 
+                var operationCounts = events.GroupBy(x => x.Operation ?? "UNKNOWN")
+                    .ToDictionary(g => g.Key, g => g.Count());
+                
                 var hasBlocking = events.GroupBy(x => x.SegmentId)
                     .Any(g => g.Select(p => p.ProviderIndex).Distinct().Count() >= totalProviders);
 
@@ -276,6 +290,7 @@ public class ProviderErrorService : IDisposable
                     LastSeen = events.Max(x => x.Timestamp),
                     TotalEvents = events.Count,
                     ProviderCountsJson = JsonSerializer.Serialize(providerCounts),
+                    OperationCountsJson = JsonSerializer.Serialize(operationCounts),
                     HasBlockingMissingArticles = hasBlocking,
                     IsImported = events.Any(x => x.IsImported)
                 };
@@ -442,7 +457,12 @@ public class ProviderErrorService : IDisposable
                     DavItemInternalPath = davItemInternalPath ?? "N/A", // Populate new property
                     LatestTimestamp = x.s.LastSeen,
                     TotalEvents = x.s.TotalEvents,
-                    ProviderCounts = JsonSerializer.Deserialize<Dictionary<int, int>>(x.s.ProviderCountsJson) ?? new(),
+                    ProviderCounts = !string.IsNullOrWhiteSpace(x.s.ProviderCountsJson) 
+                        ? (JsonSerializer.Deserialize<Dictionary<int, int>>(x.s.ProviderCountsJson) ?? new()) 
+                        : new(),
+                    OperationCounts = !string.IsNullOrWhiteSpace(x.s.OperationCountsJson) 
+                        ? (JsonSerializer.Deserialize<Dictionary<string, int>>(x.s.OperationCountsJson) ?? new()) 
+                        : new(),
                     HasBlockingMissingArticles = x.s.HasBlockingMissingArticles,
                     IsImported = x.IsImported // Use dynamic value
                 };
@@ -557,19 +577,6 @@ public class ProviderErrorService : IDisposable
             Log.Error(ex, "Failed to clear missing article events");
             throw;
         }
-    }
-
-    public class MissingArticleItem // Define the MissingArticleItem DTO as an inner class
-    {
-        public string JobName { get; set; } = string.Empty;
-        public string Filename { get; set; } = string.Empty;
-        public string DavItemId { get; set; } = string.Empty;
-        public string DavItemInternalPath { get; set; } = string.Empty; // New property
-        public DateTimeOffset LatestTimestamp { get; set; }
-        public int TotalEvents { get; set; }
-        public Dictionary<int, int> ProviderCounts { get; set; } = new();
-        public bool HasBlockingMissingArticles { get; set; }
-        public bool IsImported { get; set; }
     }
 
     public void Dispose()

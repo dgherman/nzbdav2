@@ -25,6 +25,8 @@ public class MissingArticleSummary
     // JSON stored dictionary of ProviderIndex -> Count
     public string ProviderCountsJson { get; set; } = "{}";
 
+    public string OperationCountsJson { get; set; } = "{}";
+
     public bool HasBlockingMissingArticles { get; set; }
     
     public bool IsImported { get; set; }

@@ -23,5 +23,7 @@ public class MissingArticleEvent
 
     public string Error { get; set; } = string.Empty;
 
+    public string Operation { get; set; } = "UNKNOWN";
+
     public bool IsImported { get; set; }
 }

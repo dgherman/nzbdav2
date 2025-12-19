@@ -2,6 +2,7 @@
 using System;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database;
 
@@ -10,9 +11,11 @@ using NzbWebDAV.Database;
 namespace NzbWebDAV.Database.Migrations
 {
     [DbContext(typeof(DavDatabaseContext))]
-    partial class DavDatabaseContextModelSnapshot : ModelSnapshot
+    [Migration("20251218225106_AddOperationToMissingArticle")]
+    partial class AddOperationToMissingArticle
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "9.0.4");
@@ -180,10 +183,6 @@ namespace NzbWebDAV.Database.Migrations
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Message")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("Operation")
-                        .IsRequired()
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Path")

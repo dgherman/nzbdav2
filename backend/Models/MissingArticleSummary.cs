@@ -4,9 +4,12 @@ public class MissingArticleItem
 {
     public string JobName { get; set; } = string.Empty;
     public string Filename { get; set; } = string.Empty;
+    public string DavItemId { get; set; } = string.Empty;
+    public string DavItemInternalPath { get; set; } = string.Empty;
     public DateTimeOffset LatestTimestamp { get; set; }
     public int TotalEvents { get; set; }
     public Dictionary<int, int> ProviderCounts { get; set; } = new();
+    public Dictionary<string, int> OperationCounts { get; set; } = new();
     public bool HasBlockingMissingArticles { get; set; }
     public bool IsImported { get; set; }
 }
