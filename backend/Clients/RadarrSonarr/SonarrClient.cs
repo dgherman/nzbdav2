@@ -35,16 +35,17 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
     public Task<ArrCommand> SearchEpisodesAsync(List<int> episodeIds) =>
         CommandAsync(new { name = "EpisodeSearch", episodeIds });
 
-    public override Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null, int pageSize = 1000)
+    public override Task<ArrHistory> GetHistoryAsync(int? movieId = null, int? seriesId = null, int? episodeId = null, int pageSize = 1000, string sortKey = "date", string sortDirection = "descending")
     {
-        var query = $"?pageSize={pageSize}";
+        var query = $"?pageSize={pageSize}&sortKey={sortKey}&sortDirection={sortDirection}";
         if (seriesId.HasValue) query += $"&seriesIds={seriesId.Value}&eventType={(int)ArrEventType.Grabbed}";
+        if (episodeId.HasValue) query += $"&episodeId={episodeId.Value}";
         return Get<ArrHistory>($"/history{query}");
     }
 
-    public override async Task<bool> RemoveAndSearch(string symlinkOrStrmPath)
+    public override async Task<bool> RemoveAndSearch(string symlinkOrStrmPath, int? episodeId = null, string sortKey = "date", string sortDirection = "descending")
     {
-        Log.Information($"[ArrClient] Attempting to remove and search for '{symlinkOrStrmPath}' in Sonarr '{Host}'");
+        Log.Information($"[ArrClient] Attempting to remove and search for '{symlinkOrStrmPath}' in Sonarr '{Host}' (EpisodeID: {episodeId}, Sort: {sortKey}/{sortDirection})");
 
         // get episode-file-id and episode-ids
         var mediaIds = await GetMediaIds(symlinkOrStrmPath);
@@ -73,7 +74,8 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
             Log.Debug($"[ArrClient] Searching history for grab event with source title '{sceneName}'...");
             try
             {
-                var history = await GetHistoryAsync(seriesId: seriesId);
+                // Use the provided episodeId and sort parameters
+                var history = await GetHistoryAsync(seriesId: seriesId, episodeId: episodeId, sortKey: sortKey, sortDirection: sortDirection);
                 var grabEvent = history.Records
                     .FirstOrDefault(x => 
                         x.SourceTitle != null &&
