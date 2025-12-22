@@ -66,7 +66,9 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     const [connections, setConnections] = useState<{[index: number]: ConnectionCounts}>({});
     const providerConfig = useMemo(() => parseProviderConfig(config["usenet.providers"]), [config]);
     const [statsEnabled, setStatsEnabled] = useState(config["stats.enable"] !== "false");
+    const [hideSamples, setHideSamples] = useState(config["usenet.hide-samples"] === "true");
     const [streamBufferSize, setStreamBufferSize] = useState(config["usenet.stream-buffer-size"] || "100");
+    const [operationTimeout, setOperationTimeout] = useState(config["usenet.operation-timeout"] || "90");
 
     // handlers
     const handleStatsEnableChange = useCallback((checked: boolean) => {
@@ -74,10 +76,22 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
         setNewConfig(prev => ({ ...prev, "stats.enable": checked.toString() }));
     }, [setNewConfig]);
 
+    const handleHideSamplesChange = useCallback((checked: boolean) => {
+        setHideSamples(checked);
+        setNewConfig(prev => ({ ...prev, "usenet.hide-samples": checked.toString() }));
+    }, [setNewConfig]);
+
     const handleStreamBufferSizeChange = useCallback((value: string) => {
         setStreamBufferSize(value);
         if (isPositiveInteger(value)) {
             setNewConfig(prev => ({ ...prev, "usenet.stream-buffer-size": value }));
+        }
+    }, [setNewConfig]);
+
+    const handleOperationTimeoutChange = useCallback((value: string) => {
+        setOperationTimeout(value);
+        if (isPositiveInteger(value)) {
+            setNewConfig(prev => ({ ...prev, "usenet.operation-timeout": value }));
         }
     }, [setNewConfig]);
 
@@ -166,6 +180,20 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                     </div>
                 </div>
                 <div className={styles["form-group"]}>
+                    <div className={styles["form-checkbox-wrapper"]}>
+                        <input
+                            type="checkbox"
+                            id="hide-samples"
+                            className={styles["form-checkbox"]}
+                            checked={hideSamples}
+                            onChange={(e) => handleHideSamplesChange(e.target.checked)}
+                        />
+                        <label htmlFor="hide-samples" className={styles["form-checkbox-label"]}>
+                            Hide Sample Files (case-insensitive ".sample." in name)
+                        </label>
+                    </div>
+                </div>
+                <div className={styles["form-group"]}>
                     <label htmlFor="stream-buffer-size" className={styles["form-label"]}>
                         Stream Buffer Size (segments)
                     </label>
@@ -180,6 +208,23 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                     />
                     <div>
                         Higher values increase RAM usage but may improve streaming stability. (Default: 100)
+                    </div>
+                </div>
+                <div className={styles["form-group"]}>
+                    <label htmlFor="operation-timeout" className={styles["form-label"]}>
+                        Usenet Operation Timeout (seconds)
+                    </label>
+                    <input
+                        type="text"
+                        id="operation-timeout"
+                        className={`${styles["form-input"]} ${!isPositiveInteger(operationTimeout) ? styles.error : ""}`}
+                        placeholder="90"
+                        value={operationTimeout}
+                        onChange={(e) => handleOperationTimeoutChange(e.target.value)}
+                        style={{ maxWidth: '200px' }}
+                    />
+                    <div>
+                        Maximum time to wait for a Usenet response (including connection acquisition). Increase if you see frequent timeouts. (Default: 90)
                     </div>
                 </div>
             </div>
@@ -702,7 +747,9 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
 export function isUsenetSettingsUpdated(config: Record<string, string>, newConfig: Record<string, string>) {
     return config["usenet.providers"] !== newConfig["usenet.providers"]
         || config["stats.enable"] !== newConfig["stats.enable"]
-        || config["usenet.stream-buffer-size"] !== newConfig["usenet.stream-buffer-size"];
+        || config["usenet.hide-samples"] !== newConfig["usenet.hide-samples"]
+        || config["usenet.stream-buffer-size"] !== newConfig["usenet.stream-buffer-size"]
+        || config["usenet.operation-timeout"] !== newConfig["usenet.operation-timeout"];
 }
 
 export function isPositiveInteger(value: string) {

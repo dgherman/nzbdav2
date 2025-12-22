@@ -26,6 +26,9 @@ public class DatabaseStoreSymlinkCollection(
     protected override async Task<IStoreItem?> GetItemAsync(GetItemRequest request)
     {
         if (DeletedFiles.IsDeleted(request.Name)) return null;
+        if (configManager.HideSamples() && request.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+            return null;
+
         var name = Regex.Replace(request.Name, @"\.rclonelink$", "");
         var child = await dbClient.GetDirectoryChildAsync(TargetId, name, request.CancellationToken).ConfigureAwait(false);
         if (child is null) return null;
@@ -40,6 +43,13 @@ public class DatabaseStoreSymlinkCollection(
         var children = isCategoryFolder
             ? await dbClient.GetCompletedSymlinkCategoryChildren(davDirectory.Name, cancellationToken).ConfigureAwait(false)
             : await dbClient.GetDirectoryChildrenAsync(TargetId, cancellationToken).ConfigureAwait(false);
+
+        if (configManager.HideSamples())
+        {
+            children = children
+                .Where(x => !x.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
 
         return children
             .Select(GetItem)

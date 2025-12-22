@@ -8,6 +8,7 @@ using NzbWebDAV.Extensions;
 using Usenet.Nzb;
 using Usenet.Yenc;
 using Serilog;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Queue.DeobfuscationSteps._1.FetchFirstSegment;
 
@@ -77,6 +78,14 @@ public static class FetchFirstSegmentsStep
         catch (UsenetArticleNotFoundException)
         {
             Log.Debug($"[FetchFirst] Missing first segment for {nzbFile.FileName}");
+
+            // Fail fast for important files (RARs, Videos, etc.) as we cannot stream them without headers.
+            if (FilenameUtil.IsImportantFileType(nzbFile.FileName))
+            {
+                Log.Error($"[FetchFirst] Critical file {nzbFile.FileName} is missing first segment. Failing job.");
+                throw;
+            }
+
             return new NzbFileWithFirstSegment
             {
                 NzbFile = nzbFile,

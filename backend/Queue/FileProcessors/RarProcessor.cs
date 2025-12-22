@@ -22,6 +22,12 @@ public class RarProcessor(
 {
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
+        if (fileInfo.MissingFirstSegment)
+        {
+            Log.Error($"[RarProcessor] Skipping {fileInfo.FileName} because the first segment is missing.");
+            throw new NzbWebDAV.Exceptions.UsenetArticleNotFoundException(fileInfo.NzbFile.Segments.FirstOrDefault()?.MessageId ?? "unknown");
+        }
+
         Log.Debug($"[RarProcessor] Initializing stream for {fileInfo.FileName}");
         await using var stream = await GetNzbFileStream().ConfigureAwait(false);
 

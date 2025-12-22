@@ -75,12 +75,16 @@ public class ArrClient(string host, string apiKey)
 
     public async Task<bool> MarkHistoryFailedAsync(int historyId)
     {
-        var request = new HttpRequestMessage(HttpMethod.Post, GetRequestUri($"/history/failed"));
-        var body = new { id = historyId };
-        var jsonBody = JsonSerializer.Serialize(body);
-        request.Content = new StringContent(jsonBody, new MediaTypeHeaderValue("application/json"));
+        var request = new HttpRequestMessage(HttpMethod.Post, GetRequestUri($"/history/failed/{historyId}"));
         using var response = await SendAsync(request);
-        return response.IsSuccessStatusCode;
+
+        if (!response.IsSuccessStatusCode)
+        {
+            Log.Error($"[ArrClient] MarkHistoryFailed failed with status {response.StatusCode}");
+            return false;
+        }
+
+        return true;
     }
 
     protected Task<T> Get<T>(string path) =>
@@ -91,14 +95,9 @@ public class ArrClient(string host, string apiKey)
         var request = new HttpRequestMessage(HttpMethod.Get, $"{Host}{rootPath}");
         using var response = await SendAsync(request);
         
-        Log.Debug($"[ArrClient] Received {response.StatusCode} from {rootPath}");
-
         if (!response.IsSuccessStatusCode)
         {
-            // Log raw content on error to help debug JSON serialization issues
-            var errorContent = await response.Content.ReadAsStringAsync();
-            Log.Warning($"[ArrClient] Request to {rootPath} failed with status {response.StatusCode}. Response: {errorContent}");
-            throw new HttpRequestException($"Request to {rootPath} failed with status {response.StatusCode}. Content: {errorContent}");
+            throw new HttpRequestException($"Request to {rootPath} failed with status {response.StatusCode}");
         }
 
         if (response.Content.Headers.ContentLength == 0)
@@ -115,8 +114,6 @@ public class ArrClient(string host, string apiKey)
         request.Content = new StringContent(jsonBody, new MediaTypeHeaderValue("application/json"));
         using var response = await SendAsync(request);
 
-        Log.Debug($"[ArrClient] Received {response.StatusCode} from {path}");
-
         if (!response.IsSuccessStatusCode)
             throw new HttpRequestException($"Request to {path} failed with status {response.StatusCode}");
 
@@ -131,7 +128,6 @@ public class ArrClient(string host, string apiKey)
     {
         var request = new HttpRequestMessage(HttpMethod.Delete, GetRequestUri(path, queryParams));
         using var response = await SendAsync(request);
-        Log.Debug($"[ArrClient] Received {response.StatusCode} from {path}");
         return response.StatusCode;
     }
 
@@ -147,7 +143,6 @@ public class ArrClient(string host, string apiKey)
 
     private Task<HttpResponseMessage> SendAsync(HttpRequestMessage request)
     {
-        Log.Debug($"[ArrClient] Sending {request.Method} request to {request.RequestUri}");
         request.Headers.Add("X-Api-Key", ApiKey);
         return HttpClient.SendAsync(request);
     }

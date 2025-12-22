@@ -64,6 +64,7 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
                 ReleaseDate = x.ReleaseDate,
                 LastHealthCheck = x.LastHealthCheck,
                 NextHealthCheck = x.NextHealthCheck == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow : x.NextHealthCheck,
+                OperationType = x.NextHealthCheck == DateTimeOffset.MinValue ? "HEAD" : "STAT", // Urgent checks use HEAD, routine use STAT
             }).ToList(),
         };
     }

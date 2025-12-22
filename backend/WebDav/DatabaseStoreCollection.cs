@@ -29,6 +29,9 @@ public class DatabaseStoreCollection(
 
     protected override async Task<IStoreItem?> GetItemAsync(GetItemRequest request)
     {
+        if (configManager.HideSamples() && request.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+            return null;
+
         var child = await dbClient.GetDirectoryChildAsync(davDirectory.Id, request.Name, request.CancellationToken).ConfigureAwait(false);
         if (child is null) return null;
         return GetItem(child);
@@ -36,7 +39,16 @@ public class DatabaseStoreCollection(
 
     protected override async Task<IStoreItem[]> GetAllItemsAsync(CancellationToken cancellationToken)
     {
-        return (await dbClient.GetDirectoryChildrenAsync(davDirectory.Id, cancellationToken).ConfigureAwait(false))
+        var items = await dbClient.GetDirectoryChildrenAsync(davDirectory.Id, cancellationToken).ConfigureAwait(false);
+
+        if (configManager.HideSamples())
+        {
+            items = items
+                .Where(x => !x.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+        }
+
+        return items
             .Select(GetItem)
             .ToArray();
     }

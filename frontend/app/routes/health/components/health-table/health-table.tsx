@@ -121,10 +121,15 @@ export function HealthTable({
                                             {formatDateBadge(item.lastHealthCheck, 'Never', 'warning')}
                                         </td>
                                         <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                            {item.progress > 0
-                                                ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
-                                                : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
-                                            }
+                                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                                {item.progress > 0
+                                                    ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
+                                                    : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
+                                                }
+                                                <Badge bg={item.operationType === 'HEAD' ? 'danger' : 'secondary'} className={styles.operationBadge}>
+                                                    {item.operationType}
+                                                </Badge>
+                                            </div>
                                         </td>
                                         <td>
                                             <div 
@@ -180,10 +185,15 @@ function DateDetailsTable({ item, onRunHealthCheck }: { item: HealthCheckQueueIt
             <div className={styles.dateDetailsRow}>
                 <div className={styles.dateDetailsLabel}>Next Health Check</div>
                 <div className={styles.dateDetailsValue}>
-                    {item.progress > 0
-                        ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
-                        : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
-                    }
+                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                        {item.progress > 0
+                            ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
+                            : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
+                        }
+                        <Badge bg={item.operationType === 'HEAD' ? 'danger' : 'secondary'} className={styles.operationBadge}>
+                            {item.operationType}
+                        </Badge>
+                    </div>
                 </div>
             </div>
             <div className={styles.dateDetailsRow}>

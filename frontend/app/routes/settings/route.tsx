@@ -28,6 +28,7 @@ const defaultConfig = {
     "usenet.providers": "",
     "usenet.connections-per-stream": "5",
     "usenet.stream-buffer-size": "100",
+    "usenet.hide-samples": "false",
     "webdav.user": "admin",
     "webdav.pass": "",
     "webdav.show-hidden-files": "false",

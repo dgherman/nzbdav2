@@ -169,33 +169,33 @@ public class ProviderErrorService : IDisposable
                     }
                 }
 
-                // Save Events first to ensure consistency for blocking check
-                await dbContext.SaveChangesAsync().ConfigureAwait(false);
-                
-                // Re-evaluate Blocking Status for touched files
-                // This is heavier but ensures accuracy.
-                foreach (var group in fileGroups)
+                // Optimization: Pre-calculate blocking status for all files before saving
+                // This allows us to do a single SaveChangesAsync instead of two
+                var blockingCheckTasks = fileGroups.Select(async group =>
                 {
                     var filename = group.Key;
-                    var summary = await dbContext.MissingArticleSummaries.FirstAsync(x => x.Filename == filename);
-                    
-                    if (!summary.HasBlockingMissingArticles)
+                    var summary = await dbContext.MissingArticleSummaries.FirstOrDefaultAsync(x => x.Filename == filename);
+
+                    if (summary != null && !summary.HasBlockingMissingArticles)
                     {
-                        // Check if any segment is missing on ALL providers
+                        // Include events from current batch in the check (they're already added to dbContext)
                         var hasBlocking = await dbContext.MissingArticleEvents
                             .Where(x => x.Filename == filename)
                             .GroupBy(x => x.SegmentId)
                             .AnyAsync(g => g.Select(p => p.ProviderIndex).Distinct().Count() >= totalProviders);
-                        
+
                         if (hasBlocking)
                         {
                             summary.HasBlockingMissingArticles = true;
                             Log.Information($"[MissingArticles] File '{filename}' (DavItemId: {summary.DavItemId}) is now blocking (missing across all providers).");
-                            // We need to save again
-                            await dbContext.SaveChangesAsync().ConfigureAwait(false);
                         }
                     }
-                }
+                }).ToList();
+
+                await Task.WhenAll(blockingCheckTasks).ConfigureAwait(false);
+
+                // Single SaveChangesAsync for both events and updated blocking status
+                await dbContext.SaveChangesAsync().ConfigureAwait(false);
             }
         }
         catch (Exception ex)

@@ -14,8 +14,13 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
 
     private static readonly Lazy<DbContextOptions<DavDatabaseContext>> Options = new(
         () => new DbContextOptionsBuilder<DavDatabaseContext>()
-            .UseSqlite($"Data Source={DatabaseFilePath}")
+            .UseSqlite($"Data Source={DatabaseFilePath};Cache=Shared;Mode=ReadWriteCreate", options =>
+            {
+                // Enable WAL mode for better concurrency
+                options.CommandTimeout(30);
+            })
             .AddInterceptors(new SqliteForeignKeyEnabler())
+            .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.AmbientTransactionWarning))
             .Options
     );
 

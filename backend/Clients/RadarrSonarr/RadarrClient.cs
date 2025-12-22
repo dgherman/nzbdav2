@@ -38,14 +38,12 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
             var movie = await GetMovieAsync(movieId);
             if (movie.MovieFile?.Path == symlinkOrStrmPath)
             {
-                Log.Debug($"[ArrClient] Cache hit for '{symlinkOrStrmPath}'. Movie ID: {movieId}, File ID: {movie.MovieFile.Id}");
                 return (movie.MovieFile.Id!, movieId);
             }
         }
 
         // otherwise, let's fetch all movies, cache all movie files
         // and return the matching movie-id and movie-file-id
-        Log.Debug($"[ArrClient] Fetching all movies to match '{symlinkOrStrmPath}'...");
         var allMovies = await GetMoviesAsync();
         (int movieFileId, int movieId)? result = null;
         var fileName = Path.GetFileName(symlinkOrStrmPath);
@@ -60,14 +58,12 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
                 if (movieFile.Path == symlinkOrStrmPath)
                 {
                     result = (movieFile.Id!, movie.Id);
-                    Log.Debug($"[ArrClient] Strict match found. Movie ID: {movie.Id}, File ID: {movieFile.Id}");
                     break; // Strict match found, stop searching
                 }
                 
                 if (result == null && Path.GetFileName(movieFile.Path) == fileName)
                 {
                     // Fallback match, keep searching in case we find a strict match later
-                    Log.Debug($"[ArrClient] Found potential match by filename for '{symlinkOrStrmPath}': '{movieFile.Path}' (Movie ID: {movie.Id})");
                     result = (movieFile.Id!, movie.Id);
                 }
             }

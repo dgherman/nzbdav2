@@ -17,9 +17,10 @@ public class BandwidthService
     private readonly ConcurrentDictionary<int, ProviderStats> _providerStats = new();
     private readonly Timer _broadcastTimer;
     private readonly Timer _persistenceTimer;
-    private readonly JsonSerializerOptions _jsonOptions = new() 
-    { 
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase 
+    private readonly SemaphoreSlim _dbWriteLock = new(1, 1); // Serialize DB writes to prevent SQLite locks
+    private readonly JsonSerializerOptions _jsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
     public BandwidthService(
@@ -47,36 +48,55 @@ public class BandwidthService
     {
         if (!_configManager.IsStatsEnabled()) return;
 
-        try
+        const int maxRetries = 3;
+        for (int i = 0; i < maxRetries; i++)
         {
-            using var scope = _scopeFactory.CreateScope();
-            var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
-            var now = DateTimeOffset.UtcNow;
-
-            var hasChanges = false;
-            foreach (var (index, stats) in _providerStats)
+            try
             {
-                var bytes = stats.GetAndResetPendingDbBytes();
-                if (bytes > 0)
+                await _dbWriteLock.WaitAsync();
+                try
                 {
-                    dbContext.BandwidthSamples.Add(new BandwidthSample
+                    using var scope = _scopeFactory.CreateScope();
+                    var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+                    var now = DateTimeOffset.UtcNow;
+
+                    var hasChanges = false;
+                    foreach (var (index, stats) in _providerStats)
                     {
-                        ProviderIndex = index,
-                        Timestamp = now,
-                        Bytes = bytes
-                    });
-                    hasChanges = true;
+                        var bytes = stats.GetAndResetPendingDbBytes();
+                        if (bytes > 0)
+                        {
+                            dbContext.BandwidthSamples.Add(new BandwidthSample
+                            {
+                                ProviderIndex = index,
+                                Timestamp = now,
+                                Bytes = bytes
+                            });
+                            hasChanges = true;
+                        }
+                    }
+
+                    if (hasChanges)
+                    {
+                        await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                    }
+                    break; // Success
+                }
+                finally
+                {
+                    _dbWriteLock.Release();
                 }
             }
-
-            if (hasChanges)
+            catch (Exception e) when (i < maxRetries - 1 && e.Message.Contains("database is locked"))
             {
-                await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                Log.Warning($"[BandwidthService] Database locked on attempt {i + 1}/{maxRetries}, retrying...");
+                await Task.Delay(100 * (i + 1)); // Exponential backoff: 100ms, 200ms, 300ms
             }
-        }
-        catch (Exception e)
-        {
-            Log.Error(e, "Failed to persist bandwidth stats");
+            catch (Exception e)
+            {
+                Log.Error(e, "Failed to persist bandwidth stats");
+                break;
+            }
         }
     }
 

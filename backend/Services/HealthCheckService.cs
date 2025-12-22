@@ -28,7 +28,6 @@ public class HealthCheckService
     private readonly ProviderErrorService _providerErrorService;
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
-    private readonly ArrClient _arrClient;
     private readonly HashSet<string> _missingSegmentIds = [];
     private readonly ConcurrentDictionary<Guid, int> _timeoutCounts = new();
 
@@ -38,8 +37,7 @@ public class HealthCheckService
         UsenetStreamingClient usenetClient,
         WebsocketManager websocketManager,
         IServiceScopeFactory serviceScopeFactory,
-        ProviderErrorService providerErrorService,
-        ArrClient arrClient // Inject ArrClient
+        ProviderErrorService providerErrorService
     )
     {
         _configManager = configManager;
@@ -47,7 +45,6 @@ public class HealthCheckService
         _websocketManager = websocketManager;
         _serviceScopeFactory = serviceScopeFactory;
         _providerErrorService = providerErrorService;
-        _arrClient = arrClient; // Initialize _arrClient
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -285,44 +282,11 @@ public class HealthCheckService
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path }));
 
-            int? episodeId = null;
-            // If this is a Sonarr item, try to get the episode ID for more specific history lookup
-            if (_arrClient is SonarrClient sonarrClient)
-            {
-                var mediaIds = await sonarrClient.GetMediaIds(davItem.Path);
-                if (mediaIds != null && mediaIds.Value.episodeIds.Any())
-                {
-                    episodeId = mediaIds.Value.episodeIds.First(); // Use the first episode ID found
-                }
-            }
+            // Set operation type based on the check method used
+            var operation = useHead ? "HEAD" : "STAT";
 
-            // Pass episodeId and sort parameters from HealthCheckService
-            if (await arrClient.RemoveAndSearch(symlinkOrStrmPath, episodeId: episodeId, sortKey: "date", sortDirection: "descending").ConfigureAwait(false))
-            {
-                var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
-                Log.Information($"[HealthCheck] {arrActionMessage}");
-
-                dbClient.Ctx.Items.Remove(davItem);
-                OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
-                dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
-                {
-                    Id = Guid.NewGuid(),
-                    DavItemId = davItem.Id,
-                    Path = davItem.Path,
-                    CreatedAt = DateTimeOffset.UtcNow,
-                    Result = HealthCheckResult.HealthResult.Unhealthy,
-                    RepairStatus = HealthCheckResult.RepairAction.Repaired,
-                    Message = string.Join(" ", [
-                        failureReason,
-                        $"Corresponding {linkType} found within Library Dir.",
-                        arrActionMessage
-                    ]),
-                    Operation = operation
-                }));
-                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-                await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
-                return;
-            }
+            // Call the Repair method which handles all arr clients properly
+            await Repair(davItem, dbClient, cts2.Token, failureDetails, operation).ConfigureAwait(false);
         }
     }
 
@@ -484,6 +448,7 @@ public class HealthCheckService
             // if the unhealthy item is linked within the organized media-library
             // then we must find the corresponding arr instance and trigger a new search.
             var linkType = symlinkOrStrmPath.ToLower().EndsWith("strm") ? "strm-file" : "symlink";
+
             foreach (var arrClient in _configManager.GetArrConfig().GetArrClients())
             {
                 var rootFolders = await arrClient.GetRootFolders().ConfigureAwait(false);
@@ -509,7 +474,19 @@ public class HealthCheckService
                 else if (arrLinkInfo is SymlinkAndStrmUtil.StrmInfo stInfo)
                     linkTargetMsg = $" (Strm URL: '{stInfo.TargetUrl}')";
 
-                // Pass episodeId and sort parameters from HealthCheckService
+                // If this is a Sonarr client, try to get the episode ID for more specific history lookup
+                // episodeId is Sonarr-specific and not applicable to Radarr
+                int? episodeId = null;
+                if (arrClient is SonarrClient sonarrClient)
+                {
+                    var mediaIds = await sonarrClient.GetMediaIds(davItem.Path);
+                    if (mediaIds != null && mediaIds.Value.episodeIds.Any())
+                    {
+                        episodeId = mediaIds.Value.episodeIds.First(); // Use the first episode ID found
+                    }
+                }
+
+                // Pass episodeId (Sonarr only) and sort parameters
                 if (await arrClient.RemoveAndSearch(symlinkOrStrmPath, episodeId: episodeId, sortKey: "date", sortDirection: "descending").ConfigureAwait(false))
                 {
                     var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";

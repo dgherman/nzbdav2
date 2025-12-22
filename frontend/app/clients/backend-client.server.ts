@@ -340,7 +340,7 @@ class BackendClient {
         if (!response.ok) throw new Error(`Failed to reset connections: ${(await response.json()).error}`);
     }
 
-    public async triggerRepair(filePaths: string[]): Promise<void> {
+    public async triggerRepair(filePaths: string[], davItemIds?: string[]): Promise<void> {
         const url = process.env.BACKEND_URL + `/api/stats/repair`;
         const response = await fetch(url, {
             method: "POST",
@@ -348,7 +348,7 @@ class BackendClient {
                 "Content-Type": "application/json",
                 "X-Api-Key": process.env.FRONTEND_BACKEND_API_KEY || "",
             },
-            body: JSON.stringify({ filePaths }),
+            body: JSON.stringify({ filePaths, davItemIds }),
         });
         if (!response.ok) throw new Error(`Failed to trigger repair: ${(await response.json()).error}`);
     }
@@ -494,6 +494,8 @@ class BackendClient {
         nextHealthCheck: string | null,
 
         progress: number,
+
+        operationType: string, // "STAT" or "HEAD"
 
     }
 

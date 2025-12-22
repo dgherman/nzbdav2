@@ -210,6 +210,14 @@
     width: 85px;
 }
 
+.operationBadge {
+    font-size: 11px !important;
+    font-weight: 600 !important;
+    padding: 4px 8px !important;
+    text-shadow: 0 0 4px rgba(0, 0, 0, 0.4) !important;
+    white-space: nowrap;
+}
+
 .actionButton {
     transition: transform 0.2s, opacity 0.2s;
     opacity: 0.8;

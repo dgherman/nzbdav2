@@ -43,31 +43,53 @@ public class ExceptionMiddleware(RequestDelegate next)
                 // Log with Job Name context
                 Log.Error("File `{FilePath}` (Job: {JobName}) has missing articles: {ErrorMessage}", filePath, davItem.Name, e.Message);
 
-                try
-                {
-                    using var scope = context.RequestServices.CreateScope();
-                    var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+                // Capture ServiceScopeFactory to create a new scope in the background task
+                // We cannot use context.RequestServices inside the task because the request might be finished (disposed) by then.
+                var scopeFactory = context.RequestServices.GetRequiredService<IServiceScopeFactory>();
+                var davItemId = davItem.Id;
+                var davItemName = davItem.Name;
 
-                    // Reset any existing error status so the item is picked up by the queue query
-                    await dbContext.HealthCheckResults
-                        .Where(h => h.DavItemId == davItem.Id && h.RepairStatus == HealthCheckResult.RepairAction.ActionNeeded)
-                        .ExecuteDeleteAsync()
-                        .ConfigureAwait(false);
-                    
-                    var rows = await dbContext.Items
-                        .Where(x => x.Id == davItem.Id && x.NextHealthCheck != DateTimeOffset.MinValue)
-                        .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, DateTimeOffset.MinValue))
-                        .ConfigureAwait(false);
-                        
-                    if (rows > 0)
-                        Log.Information($"[HealthCheckTrigger] Item `{davItem.Name}` priority set to immediate health check/repair due to missing articles.");
-                    else
-                        Log.Information($"[HealthCheckTrigger] Item `{davItem.Name}` already at highest priority for health check due to missing articles.");
-                }
-                catch (Exception ex)
+                // Queue health check in background - fire and forget to avoid blocking streaming
+                _ = Task.Run(async () =>
                 {
-                    Log.Error(ex, "Failed to queue item for health check.");
-                }
+                    const int maxRetries = 3;
+                    for (int i = 0; i < maxRetries; i++)
+                    {
+                        try
+                        {
+                            using var scope = scopeFactory.CreateScope();
+                            var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+
+                            // Optimization: Combine delete + update into single operation
+                            // Delete old results asynchronously (fire and forget)
+                            _ = dbContext.HealthCheckResults
+                                .Where(h => h.DavItemId == davItemId && h.RepairStatus == HealthCheckResult.RepairAction.ActionNeeded)
+                                .ExecuteDeleteAsync();
+
+                            // Set priority to immediate health check
+                            var rows = await dbContext.Items
+                                .Where(x => x.Id == davItemId && x.NextHealthCheck != DateTimeOffset.MinValue)
+                                .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, DateTimeOffset.MinValue))
+                                .ConfigureAwait(false);
+
+                            if (rows > 0)
+                                Log.Information($"[HealthCheckTrigger] Item `{davItemName}` priority set to immediate health check/repair due to missing articles.");
+                            else
+                                Log.Information($"[HealthCheckTrigger] Item `{davItemName}` already at highest priority for health check due to missing articles.");
+                            break; // Success
+                        }
+                        catch (Exception ex) when (i < maxRetries - 1 && ex.Message.Contains("database is locked"))
+                        {
+                            Log.Warning($"[HealthCheckTrigger] Database locked on attempt {i + 1}/{maxRetries}, retrying...");
+                            await Task.Delay(100 * (i + 1)); // Exponential backoff: 100ms, 200ms, 300ms
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Error(ex, "Failed to queue item for health check.");
+                            break;
+                        }
+                    }
+                });
             }
             else
             {

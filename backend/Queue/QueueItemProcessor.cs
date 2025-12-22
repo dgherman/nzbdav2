@@ -102,7 +102,7 @@ public class QueueItemProcessor(
             }
             catch (Exception ex)
             {
-                Log.Error(e, ex.Message);
+                Log.Error(ex, "Failed to mark queue item as completed");
             }
         }
     }
@@ -149,7 +149,6 @@ public class QueueItemProcessor(
         healthCheckService.CheckCachedMissingSegmentIds(articlesToPrecheck);
 
         // step 1 -- get name and size of each nzb file
-        Log.Information($"[Queue] Step 1: Fetching first segments for {nzbFiles.Count} files with concurrency={concurrency}");
         var part1Progress = progress
             .Scale(50, 100)
             .ToPercentage(nzbFiles.Count);
@@ -164,7 +163,6 @@ public class QueueItemProcessor(
         var filesWithoutSize = fileInfos.Where(f => f.FileSize == null).Select(f => f.NzbFile).ToList();
         if (filesWithoutSize.Count > 0)
         {
-            Log.Information($"[Queue] Step 1b: Batch fetching file sizes for {filesWithoutSize.Count} files (Par2 provided {fileInfos.Count - filesWithoutSize.Count} sizes)");
             var fileSizes = await usenetClient.GetFileSizesBatchAsync(filesWithoutSize, concurrency, ct).ConfigureAwait(false);
             foreach (var fileInfo in fileInfos.Where(f => f.FileSize == null))
             {
@@ -174,22 +172,13 @@ public class QueueItemProcessor(
                 }
             }
         }
-        else
-        {
-            Log.Information($"[Queue] Step 1b: Skipped - Par2 file provided all {fileInfos.Count} file sizes");
-        }
 
         // step 2 -- perform file processing
         var fileProcessors = GetFileProcessors(fileInfos, archivePassword).ToList();
 
-        // Reduce concurrency to prevent connection pool exhaustion when processing archives
-        // Each RAR can use up to 5 connections, so with 145 total connections:
-        // - MaxQueueConnections reserves 30 permits for queue operations
-        // - But physical connection pool is shared, so limit concurrent file processing
-        // - Safe limit: totalConnections / maxConnectionsPerFile = 145 / 5 = 29
-        var fileConcurrency = Math.Min(concurrency, providerConfig.TotalPooledConnections / 5);
+        // Safe limit: totalConnections / maxConnectionsPerFile = 145 / 5 = 29
+        var fileConcurrency = Math.Max(1, Math.Min(concurrency, providerConfig.TotalPooledConnections / 5));
 
-        Log.Information($"[Queue] Step 2: Processing {fileProcessors.Count} file groups with concurrency={fileConcurrency}");
         var part2Progress = progress
             .Offset(50)
             .Scale(50, 100)
@@ -211,7 +200,6 @@ public class QueueItemProcessor(
                 .Where(x => x.IsRar || FilenameUtil.IsImportantFileType(x.FileName))
                 .SelectMany(x => x.NzbFile.GetSegmentIds())
                 .ToList();
-            Log.Information($"[Queue] Step 3: Checking {articlesToCheck.Count} article segments with concurrency={concurrency}");
             var part3Progress = progress
                 .Offset(100)
                 .ToPercentage(articlesToCheck.Count);
@@ -411,7 +399,10 @@ public class QueueItemProcessor(
         var mountFolder = databaseOperations != null ? await databaseOperations.Invoke().ConfigureAwait(false) : null;
         var historyItem = CreateHistoryItem(mountFolder, startTime, error);
         var historySlot = GetHistoryResponse.HistorySlot.FromHistoryItem(historyItem, mountFolder, configManager);
-        dbClient.Ctx.QueueItems.Remove(queueItem);
+        
+        // Ensure queueItem is attached to this context before removing
+        dbClient.Ctx.QueueItems.Entry(queueItem).State = EntityState.Deleted;
+        
         dbClient.Ctx.HistoryItems.Add(historyItem);
         await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemRemoved, queueItem.Id.ToString());

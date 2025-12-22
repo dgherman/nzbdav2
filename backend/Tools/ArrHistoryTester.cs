@@ -1,5 +1,6 @@
 using System.Text.Json;
 using NzbWebDAV.Clients.RadarrSonarr;
+using NzbWebDAV.Clients.RadarrSonarr.BaseModels;
 using Serilog;
 
 namespace NzbWebDAV.Tools;
@@ -75,22 +76,33 @@ public static class ArrHistoryTester
             return;
         }
 
-        // 3. Search History
+        // 3. Search History (with episodeId and sort parameters for more specific results)
         int pageSize = 1000;
-        Log.Information($"[Sonarr] Searching history for SeriesId {seriesId} (PageSize: {pageSize})...");
-        var history = await client.GetHistoryAsync(seriesId: seriesId, pageSize: pageSize);
-        
+        int? episodeId = episodeIds.Any() ? episodeIds.First() : null;
+
+        ArrHistory history;
+        if (episodeId.HasValue)
+        {
+            Log.Information($"[Sonarr] Searching history for SeriesId {seriesId}, EpisodeId {episodeId} (PageSize: {pageSize}, sorted by date descending)...");
+            history = await client.GetHistoryAsync(seriesId: seriesId, episodeId: episodeId, pageSize: pageSize, sortKey: "date", sortDirection: "descending");
+        }
+        else
+        {
+            Log.Information($"[Sonarr] Searching history for SeriesId {seriesId} (PageSize: {pageSize}, sorted by date descending)...");
+            history = await client.GetHistoryAsync(seriesId: seriesId, pageSize: pageSize, sortKey: "date", sortDirection: "descending");
+        }
+
         Log.Information($"[Sonarr] Fetched {history.Records.Count} history records.");
 
         // 4. Filter History
-        Log.Information($"[Sonarr] Filtering for SourceTitle: '{sceneName}' and Protocol: 'usenet'...");
-        var grabEvent = history.Records.FirstOrDefault(x => 
+        Log.Information($"[Sonarr] Filtering for SourceTitle: '{sceneName}' and Protocol: '1' (usenet)...");
+        var grabEvent = history.Records.FirstOrDefault(x =>
             x.SourceTitle != null &&
             x.SourceTitle.Equals(sceneName, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(x.EventType, "grabbed", StringComparison.OrdinalIgnoreCase) &&
             x.Data != null &&
             x.Data.TryGetValue("protocol", out var protocol) &&
-            protocol.Equals("usenet", StringComparison.OrdinalIgnoreCase)
+            protocol == "1" // 1 = usenet, 2 = torrent
         );
 
         if (grabEvent != null)
@@ -111,7 +123,19 @@ public static class ArrHistoryTester
             Log.Information("Top 5 History Records for context:");
             foreach (var record in history.Records.Take(5))
             {
-                 Log.Information($" - [{record.Id}] {record.SourceTitle} ({record.EventType})");
+                var dataStr = record.Data != null && record.Data.Any()
+                    ? string.Join(", ", record.Data.Select(kvp => $"{kvp.Key}={kvp.Value}"))
+                    : "(no data)";
+                var protocol = record.Data?.TryGetValue("protocol", out var p) == true ? p : "(none)";
+                Log.Information($" - [{record.Id}] {record.SourceTitle} ({record.EventType}) | Protocol: {protocol} | Data: {dataStr}");
+            }
+
+            // Dump full JSON for first 5 records
+            Log.Information("Full JSON for first 5 records:");
+            foreach (var record in history.Records.Take(5))
+            {
+                var json = JsonSerializer.Serialize(record, new JsonSerializerOptions { WriteIndented = true });
+                Log.Information($"Record {record.Id}:\n{json}");
             }
         }
     }
@@ -145,22 +169,22 @@ public static class ArrHistoryTester
             return;
         }
 
-        // 3. Search History
+        // 3. Search History (with sort parameters for consistent results)
         int pageSize = 1000;
-        Log.Information($"[Radarr] Searching history for MovieId {movieId} (PageSize: {pageSize})...");
-        var history = await client.GetHistoryAsync(movieId: movieId, pageSize: pageSize);
+        Log.Information($"[Radarr] Searching history for MovieId {movieId} (PageSize: {pageSize}, sorted by date descending)...");
+        var history = await client.GetHistoryAsync(movieId: movieId, pageSize: pageSize, sortKey: "date", sortDirection: "descending");
         
         Log.Information($"[Radarr] Fetched {history.Records.Count} history records.");
 
         // 4. Filter History
-        Log.Information($"[Radarr] Filtering for SourceTitle: '{sceneName}' and Protocol: 'usenet'...");
-        var grabEvent = history.Records.FirstOrDefault(x => 
+        Log.Information($"[Radarr] Filtering for SourceTitle: '{sceneName}' and Protocol: '1' (usenet)...");
+        var grabEvent = history.Records.FirstOrDefault(x =>
             x.SourceTitle != null &&
             x.SourceTitle.Equals(sceneName, StringComparison.OrdinalIgnoreCase) &&
             string.Equals(x.EventType, "grabbed", StringComparison.OrdinalIgnoreCase) &&
             x.Data != null &&
             x.Data.TryGetValue("protocol", out var protocol) &&
-            protocol.Equals("usenet", StringComparison.OrdinalIgnoreCase)
+            protocol == "1" // 1 = usenet, 2 = torrent
         );
 
         if (grabEvent != null)
@@ -180,7 +204,19 @@ public static class ArrHistoryTester
             Log.Information("Top 5 History Records for context:");
             foreach (var record in history.Records.Take(5))
             {
-                 Log.Information($" - [{record.Id}] {record.SourceTitle} ({record.EventType})");
+                var dataStr = record.Data != null && record.Data.Any()
+                    ? string.Join(", ", record.Data.Select(kvp => $"{kvp.Key}={kvp.Value}"))
+                    : "(no data)";
+                var protocol = record.Data?.TryGetValue("protocol", out var p) == true ? p : "(none)";
+                Log.Information($" - [{record.Id}] {record.SourceTitle} ({record.EventType}) | Protocol: {protocol} | Data: {dataStr}");
+            }
+
+            // Dump full JSON for first 5 records
+            Log.Information("Full JSON for first 5 records:");
+            foreach (var record in history.Records.Take(5))
+            {
+                var json = JsonSerializer.Serialize(record, new JsonSerializerOptions { WriteIndented = true });
+                Log.Information($"Record {record.Id}:\n{json}");
             }
         }
     }

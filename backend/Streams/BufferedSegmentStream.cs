@@ -38,8 +38,6 @@ public class BufferedSegmentStream : Stream
         ConnectionUsageContext? usageContext = null)
     {
         _usageContext = usageContext;
-        Log.Debug("[BufferedStream] Initializing BufferedSegmentStream for {SegmentCount} segments, file size: {FileSize}. Concurrent connections: {ConcurrentConnections}, Buffer segment count: {BufferSegmentCount}", 
-            segmentIds.Length, fileSize, concurrentConnections, bufferSegmentCount);
         // Ensure buffer is large enough to prevent thrashing with high concurrency
         bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 5);
 
@@ -81,7 +79,6 @@ public class BufferedSegmentStream : Stream
         int bufferSegmentCount,
         CancellationToken ct)
     {
-        Log.Debug($"[BufferedStream] Starting FetchSegmentsAsync for {segmentIds.Length} segments with {concurrentConnections} connections");
         try
         {
             // Use a producer-consumer pattern with indexed segments to maintain order
@@ -120,7 +117,6 @@ public class BufferedSegmentStream : Stream
             var workers = Enumerable.Range(0, concurrentConnections)
                 .Select(async workerId =>
                 {
-                    Log.Debug($"[BufferedStream] Worker {workerId} started");
                     var segmentCount = 0;
                     var currentSegmentId = "none";
                     var currentSegmentIndex = -1;
@@ -135,8 +131,6 @@ public class BufferedSegmentStream : Stream
                             currentSegmentIndex = index;
                             stopwatch.Restart();
 
-                            Log.Debug($"[BufferedStream] Worker {workerId} processing segment {index}: {segmentId} (#{segmentCount})");
-                            
                             Stream? stream = null;
                             try
                             {
@@ -160,8 +154,6 @@ public class BufferedSegmentStream : Stream
                                     }
                                 }
                                 
-                                Log.Debug($"[BufferedStream] Worker {workerId} obtained stream for segment {index}: {segmentId}");
-
                                 // Rent a buffer and read the segment into it
                                 var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024); 
                                 var totalRead = 0;
@@ -202,32 +194,38 @@ public class BufferedSegmentStream : Stream
                             }
 
                             // Try to write any consecutive segments to the buffer channel in order
-                        Log.Debug($"[BufferedStream] Worker {workerId} waiting for write lock for segment {index}");
                         await writeLock.WaitAsync(ct).ConfigureAwait(false);
                         try
                         {
                             while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
                             {
-                                Log.Debug($"[BufferedStream] Worker {workerId} writing segment {nextIndexToWrite} to buffer channel: {orderedSegment.SegmentId}");
-                                await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
+                    await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
                                 nextIndexToWrite++;
                             }
                         }
                         finally
                         {
                             writeLock.Release();
-                            Log.Debug($"[BufferedStream] Worker {workerId} released write lock");
                         }
                         }
                     }
                     catch (OperationCanceledException ex)
                     {
                         stopwatch.Stop();
-                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments. " +
-                            $"Segment: {currentSegmentIndex} ({currentSegmentId}). " +
-                            $"Elapsed: {stopwatch.Elapsed.TotalSeconds:F2}s. " +
-                            $"Parent Canceled: {ct.IsCancellationRequested}. " +
-                            $"Msg: {ex.Message}");
+                        if (ct.IsCancellationRequested)
+                        {
+                            Log.Warning($"[BufferedStream] Worker {workerId} canceled after processing {segmentCount} segments. " +
+                                $"Segment: {currentSegmentIndex} ({currentSegmentId}). " +
+                                $"Elapsed: {stopwatch.Elapsed.TotalSeconds:F2}s. " +
+                                $"Msg: {ex.Message}");
+                        }
+                        else
+                        {
+                            Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments. " +
+                                $"Segment: {currentSegmentIndex} ({currentSegmentId}). " +
+                                $"Elapsed: {stopwatch.Elapsed.TotalSeconds:F2}s. " +
+                                $"Msg: {ex.Message}");
+                        }
                         throw;
                     }
                     catch (TimeoutException ex)
@@ -250,15 +248,10 @@ public class BufferedSegmentStream : Stream
                         Log.Error($"[BufferedStream] Worker {workerId} encountered error after processing {segmentCount} segments: {ex.GetType().Name} - {ex.Message}");
                         throw;
                     }
-                    finally
-                    {
-                        Log.Debug($"[BufferedStream] Worker {workerId} completed. Total segments processed: {segmentCount}");
-                    }
                 })
                 .ToList();
 
             // Wait for all workers to complete
-            Log.Debug($"[BufferedStream] Waiting for {workers.Count} workers to complete...");
             var workerCompletionTask = Task.WhenAll(workers);
             var timeoutTask = Task.Delay(TimeSpan.FromMinutes(2), ct);
             var completedTask = await Task.WhenAny(workerCompletionTask, timeoutTask).ConfigureAwait(false);
@@ -268,7 +261,6 @@ public class BufferedSegmentStream : Stream
                 Log.Warning($"[BufferedStream] Workers have not completed after 2 minutes. Still waiting...");
                 await workerCompletionTask.ConfigureAwait(false);
             }
-            Log.Debug($"[BufferedStream] All {workers.Count} workers completed");
 
             // Ensure all segments were written (shouldn't have any left)
             await writeLock.WaitAsync(ct).ConfigureAwait(false);
@@ -290,7 +282,6 @@ public class BufferedSegmentStream : Stream
         }
         catch (OperationCanceledException)
         {
-            Log.Debug("[BufferedStream] FetchSegmentsAsync canceled");
             _bufferChannel.Writer.TryComplete();
         }
         catch (Exception ex)
@@ -393,7 +384,6 @@ public class BufferedSegmentStream : Stream
 
     public override long Seek(long offset, SeekOrigin origin)
     {
-        Log.Debug("[BufferedStream] Seek method called, but seeking is not supported. Throwing NotSupportedException.");
         throw new NotSupportedException("Seeking is not supported.");
     }
 
@@ -404,7 +394,6 @@ public class BufferedSegmentStream : Stream
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
-        Log.Debug("[BufferedStream] Disposing BufferedSegmentStream. Disposing: {Disposing}", disposing);
         if (disposing)
         {
             _cts.Cancel();
@@ -428,7 +417,6 @@ public class BufferedSegmentStream : Stream
     public override async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        Log.Debug("[BufferedStream] Disposing BufferedSegmentStream asynchronously.");
 
         _cts.Cancel();
         _bufferChannel.Writer.TryComplete();

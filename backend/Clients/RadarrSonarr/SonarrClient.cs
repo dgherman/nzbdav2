@@ -59,7 +59,6 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         var episodeFile = await GetEpisodeFile(mediaIds.Value.episodeFileId);
         var sceneName = episodeFile.SceneName;
         var seriesId = episodeFile.SeriesId;
-        Log.Debug($"[ArrClient] Found episode file (ID: {episodeFile.Id}, Series ID: {seriesId}). SceneName: '{sceneName}'");
 
         // 2. Delete the episode-file
         Log.Information($"[ArrClient] Deleting episode file ID {mediaIds.Value.episodeFileId} from Sonarr...");
@@ -71,18 +70,17 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         // 3. Try to find the "grab" event in history and mark it as failed (this handles blacklist + search)
         if (!string.IsNullOrEmpty(sceneName))
         {
-            Log.Debug($"[ArrClient] Searching history for grab event with source title '{sceneName}'...");
             try
             {
                 // Use the provided episodeId and sort parameters
                 var history = await GetHistoryAsync(seriesId: seriesId, episodeId: episodeId, sortKey: sortKey, sortDirection: sortDirection);
                 var grabEvent = history.Records
-                    .FirstOrDefault(x => 
+                    .FirstOrDefault(x =>
                         x.SourceTitle != null &&
                         x.SourceTitle.Equals(sceneName, StringComparison.OrdinalIgnoreCase) &&
                         x.Data != null &&
                         x.Data.TryGetValue("protocol", out var protocol) &&
-                        protocol.Equals("usenet", StringComparison.OrdinalIgnoreCase)
+                        protocol == "1" // 1 = usenet, 2 = torrent
                     );
                 
                 if (grabEvent != null)
@@ -102,16 +100,6 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
                 else
                 {
                     Log.Warning($"[ArrClient] Could not find grab event in history for '{sceneName}' in Sonarr '{Host}'. Proceeding to fallback search.");
-                    
-                    // Detailed logging for diagnostics
-                    if (history?.Records != null && history.Records.Count > 0)
-                    {
-                        Log.Debug($"[ArrClient] Fetched {history.Records.Count} history records. Top 5 records: {string.Join(", ", history.Records.Take(5).Select(r => $"'{r.SourceTitle}' ({r.EventType})"))}");
-                    }
-                    else
-                    {
-                        Log.Debug("[ArrClient] History API returned 0 records.");
-                    }
                 }
             }
             catch (Exception ex)
@@ -136,7 +124,6 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         var episodeFileId = await GetEpisodeFileId(symlinkOrStrmPath);
         if (episodeFileId == null)
         {
-            Log.Debug($"[ArrClient] Could not find Episode File ID for '{symlinkOrStrmPath}'.");
             return null;
         }
 
@@ -145,12 +132,10 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         var episodeIds = episodes.Select(x => x.Id).ToList();
         if (episodeIds.Count == 0)
         {
-            Log.Debug($"[ArrClient] Found Episode File ID {episodeFileId} but no associated episodes.");
             return null;
         }
 
         // return
-        Log.Debug($"[ArrClient] Found match: File ID {episodeFileId}, Episode IDs: {string.Join(",", episodeIds)}");
         return (episodeFileId.Value, episodeIds);
     }
 
@@ -226,7 +211,6 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
                     if (!string.IsNullOrEmpty(seriesFolderName) && 
                         symlinkOrStrmPath.Contains($"/{seriesFolderName}/", StringComparison.OrdinalIgnoreCase))
                     {
-                        Log.Debug($"[ArrClient] Found potential series match by folder name for '{symlinkOrStrmPath}': '{series.Path}'");
                         result = series.Id;
                         break;
                     }

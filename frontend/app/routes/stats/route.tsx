@@ -68,14 +68,19 @@ export async function action({ request }: Route.ActionArgs) {
         await backendClient.clearDeletedFiles();
     } else if (action === "trigger-repair") {
         const filePaths: string[] = [];
-        // Iterate over formData entries to find all filePaths[]
+        const davItemIds: string[] = [];
+        // Iterate over formData entries to find all filePaths[] and davItemIds[]
         for (const [key, value] of formData.entries()) {
             if (key.startsWith("filePaths[") && typeof value === 'string') {
                 filePaths.push(value);
             }
+            if (key.startsWith("davItemIds[") && typeof value === 'string') {
+                davItemIds.push(value);
+            }
         }
-        if (filePaths.length > 0) {
-            await backendClient.triggerRepair(filePaths);
+        if (filePaths.length > 0 || davItemIds.length > 0) {
+            await backendClient.triggerRepair(filePaths, davItemIds);
+            return { success: true, message: `Repair queued for ${filePaths.length + davItemIds.length} file(s)` };
         }
     }
 

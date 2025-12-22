@@ -8,9 +8,9 @@ public class UpdateConfigRequest
 {
     public List<ConfigItem> ConfigItems { get; init; }
 
-    public UpdateConfigRequest(HttpContext context)
+    public UpdateConfigRequest(IFormCollection form)
     {
-        ConfigItems = context.Request.Form
+        ConfigItems = form
             .Select(x => new ConfigItem()
             {
                 ConfigName = x.Key,

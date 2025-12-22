@@ -93,7 +93,7 @@ public class ThreadSafeNntpClient : INntpClient
                     // If the article is not found, or if there's a network IO exception (e.g. connection aborted),
                     // or a protocol exception (invalid response), we just rethrow it. The caller (MultiProviderNntpClient)
                     // is responsible for handling this (e.g. trying another provider).
-                    if (ex is UsenetArticleNotFoundException || ex is System.IO.IOException || ex is TimeoutException || ex is global::Usenet.Exceptions.NntpException)
+                    if (ex is UsenetArticleNotFoundException || ex is System.IO.IOException || ex is TimeoutException || ex is global::Usenet.Exceptions.NntpException || ex is ObjectDisposedException)
                     {
                         try
                         {

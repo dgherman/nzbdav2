@@ -51,7 +51,8 @@ public class UpdateConfigController(DavDatabaseClient dbClient, ConfigManager co
 
     protected override async Task<IActionResult> HandleRequest()
     {
-        var request = new UpdateConfigRequest(HttpContext);
+        var form = await HttpContext.Request.ReadFormAsync();
+        var request = new UpdateConfigRequest(form);
         var response = await UpdateConfig(request).ConfigureAwait(false);
         return Ok(response);
     }

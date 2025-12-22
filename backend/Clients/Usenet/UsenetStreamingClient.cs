@@ -46,10 +46,11 @@ public class UsenetStreamingClient
         configManager.OnConfigChanged += (_, configEventArgs) =>
         {
             // if unrelated config changed, do nothing
-            if (!configEventArgs.ChangedConfig.TryGetValue("usenet.providers", out var rawConfig)) return;
+            if (!configEventArgs.ChangedConfig.TryGetValue("usenet.providers", out var rawConfig) && 
+                !configEventArgs.ChangedConfig.ContainsKey("usenet.operation-timeout")) return;
 
             // update the connection-pool according to the new config
-            var newProviderConfig = JsonSerializer.Deserialize<UsenetProviderConfig>(rawConfig);
+            var newProviderConfig = configManager.GetUsenetProviderConfig();
             var newMultiProviderClient = CreateMultiProviderClient(newProviderConfig!);
             _client.UpdateUnderlyingClient(newMultiProviderClient);
         };
@@ -222,6 +223,8 @@ public class UsenetStreamingClient
         _connectionPoolStats = connectionPoolStats;
         var totalPooledConnectionCount = providerConfig.TotalPooledConnections;
         var pooledSemaphore = new ExtendedSemaphoreSlim(totalPooledConnectionCount, totalPooledConnectionCount);
+        
+        var operationTimeout = _configManager.GetUsenetOperationTimeout();
 
         // Create ONE global operation limiter shared across ALL providers
         var maxQueueConnections = _configManager.GetMaxQueueConnections();
@@ -239,7 +242,8 @@ public class UsenetStreamingClient
                 index,
                 pooledSemaphore,
                 globalLimiter,
-                _providerErrorService
+                _providerErrorService,
+                operationTimeout
             ))
             .ToList();
         return new MultiProviderNntpClient(providerClients, _providerErrorService);
@@ -252,7 +256,8 @@ public class UsenetStreamingClient
         int providerIndex,
         ExtendedSemaphoreSlim pooledSemaphore,
         GlobalOperationLimiter globalLimiter,
-        ProviderErrorService providerErrorService
+        ProviderErrorService providerErrorService,
+        int operationTimeout
     )
     {
         var connectionPool = CreateNewConnectionPool(
@@ -263,7 +268,16 @@ public class UsenetStreamingClient
             connectionPoolStats: connectionPoolStats,
             providerIndex: providerIndex
         );
-        return new MultiConnectionNntpClient(connectionPool, connectionDetails.Type, globalLimiter, _bandwidthService, providerErrorService, providerIndex, connectionDetails.Host);
+        return new MultiConnectionNntpClient(
+            connectionPool, 
+            connectionDetails.Type, 
+            globalLimiter, 
+            _bandwidthService, 
+            providerErrorService, 
+            providerIndex, 
+            connectionDetails.Host, 
+            operationTimeout
+        );
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection

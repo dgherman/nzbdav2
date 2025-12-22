@@ -18,6 +18,7 @@ public static class OrganizedLinksUtil
     private static readonly ConcurrentDictionary<Guid, string> Cache = new();
     private static volatile LinkCacheStatus _status = LinkCacheStatus.NotInitialized;
     private static readonly SemaphoreSlim _initLock = new(1, 1);
+    private static readonly SemaphoreSlim _dbWriteLock = new(1, 1); // Serialize DB writes to prevent SQLite locks
     private static CancellationTokenSource? _refreshCts;
     private static Task? _refreshTask;
     private static IServiceProvider? _serviceProvider;
@@ -31,31 +32,53 @@ public static class OrganizedLinksUtil
     {
         // Update Memory
         Cache[davItemId] = linkPath;
-        
-        // Update DB
+
+        // Update DB (with retry logic for SQLite locks)
         if (_serviceProvider != null)
         {
-            try
+            _ = Task.Run(async () =>
             {
-                using var scope = _serviceProvider.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
-                var existing = db.LocalLinks.FirstOrDefault(x => x.DavItemId == davItemId);
-                if (existing != null)
+                const int maxRetries = 3;
+                for (int i = 0; i < maxRetries; i++)
                 {
-                    existing.LinkPath = linkPath;
+                    try
+                    {
+                        await _dbWriteLock.WaitAsync();
+                        try
+                        {
+                            using var scope = _serviceProvider.CreateScope();
+                            var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+                            var existing = db.LocalLinks.FirstOrDefault(x => x.DavItemId == davItemId);
+                            if (existing != null)
+                            {
+                                existing.LinkPath = linkPath;
+                            }
+                            else
+                            {
+                                db.LocalLinks.Add(new LocalLink { DavItemId = davItemId, LinkPath = linkPath });
+                            }
+                            await db.SaveChangesAsync();
+                            break; // Success
+                        }
+                        finally
+                        {
+                            _dbWriteLock.Release();
+                        }
+                    }
+                    catch (Exception ex) when (i < maxRetries - 1 && ex.Message.Contains("database is locked"))
+                    {
+                        Log.Warning($"[OrganizedLinksUtil] Database locked on attempt {i + 1}/{maxRetries}, retrying...");
+                        await Task.Delay(100 * (i + 1)); // Exponential backoff
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, $"[OrganizedLinksUtil] Failed to persist link update for {davItemId}");
+                        break;
+                    }
                 }
-                else
-                {
-                    db.LocalLinks.Add(new LocalLink { DavItemId = davItemId, LinkPath = linkPath });
-                }
-                db.SaveChanges();
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, $"[OrganizedLinksUtil] Failed to persist link update for {davItemId}");
-            }
+            });
         }
-        
+
         Log.Debug($"[OrganizedLinksUtil] Cache updated for DavItem {davItemId} with link {linkPath}");
     }
 
@@ -66,27 +89,55 @@ public static class OrganizedLinksUtil
     {
         // Update Memory
         Cache.TryRemove(davItemId, out _);
-        
-        // Update DB
+
+        // Update DB (with retry logic for SQLite locks)
         if (_serviceProvider != null)
         {
-            try
+            _ = Task.Run(async () =>
             {
-                using var scope = _serviceProvider.CreateScope();
-                var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
-                var existing = db.LocalLinks.Where(x => x.DavItemId == davItemId).ToList();
-                if (existing.Any())
+                const int maxRetries = 3;
+                for (int i = 0; i < maxRetries; i++)
                 {
-                    db.LocalLinks.RemoveRange(existing);
-                    db.SaveChanges();
+                    try
+                    {
+                        await _dbWriteLock.WaitAsync();
+                        try
+                        {
+                            using var scope = _serviceProvider.CreateScope();
+                            var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+                            var existing = db.LocalLinks.Where(x => x.DavItemId == davItemId).ToList();
+                            if (existing.Any())
+                            {
+                                db.LocalLinks.RemoveRange(existing);
+                                await db.SaveChangesAsync();
+                            }
+                            break; // Success
+                        }
+                        finally
+                        {
+                            _dbWriteLock.Release();
+                        }
+                    }
+                    catch (Exception ex) when (i < maxRetries - 1 && ex.Message.Contains("database is locked"))
+                    {
+                        Log.Warning($"[OrganizedLinksUtil] Database locked on attempt {i + 1}/{maxRetries}, retrying...");
+                        await Task.Delay(100 * (i + 1)); // Exponential backoff
+                    }
+                    catch (DbUpdateConcurrencyException)
+                    {
+                        // Row already deleted by another process/thread - consider success
+                        Log.Debug($"[OrganizedLinksUtil] Concurrency exception during removal for {davItemId} - assuming already deleted.");
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Error(ex, $"[OrganizedLinksUtil] Failed to persist link removal for {davItemId}");
+                        break;
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                Log.Error(ex, $"[OrganizedLinksUtil] Failed to persist link removal for {davItemId}");
-            }
+            });
         }
-        
+
         Log.Debug($"[OrganizedLinksUtil] Cache entry removed for DavItem {davItemId}");
     }
 
@@ -367,67 +418,71 @@ public static class OrganizedLinksUtil
     public static async Task<(List<MappedFile> Items, int TotalCount)> GetMappedFilesPagedAsync(
         DavDatabaseContext dbContext, ConfigManager configManager, int page, int pageSize, string? search = null)
     {
-        // Query directly from DB
-        var query = dbContext.LocalLinks
-            .AsNoTracking()
-            .Select(x => new MappedFile
-            {
-                DavItemId = x.DavItemId,
-                LinkPath = x.LinkPath,
-                TargetPath = "N/A", // We don't store TargetPath in DB, can be calculated or omitted.
-                DavItemName = "N/A", // Will be filled
-                CreatedAt = x.CreatedAt
-            });
+        // Join LocalLinks with Items table upfront to enable searching on all fields
+        var query = from link in dbContext.LocalLinks.AsNoTracking()
+                    join item in dbContext.Items.AsNoTracking() on link.DavItemId equals item.Id into itemGroup
+                    from item in itemGroup.DefaultIfEmpty()
+                    select new
+                    {
+                        link.DavItemId,
+                        link.LinkPath,
+                        link.CreatedAt,
+                        DavItemPath = item != null ? item.Path : null
+                    };
 
+        // Apply search filter across all columns (DavItemId, LinkPath, DavItemPath)
         if (!string.IsNullOrWhiteSpace(search))
         {
             search = search.ToLower();
-            query = query.Where(x => x.LinkPath.ToLower().Contains(search));
+            query = query.Where(x =>
+                x.DavItemId.ToString().ToLower().Contains(search) ||
+                x.LinkPath.ToLower().Contains(search) ||
+                (x.DavItemPath != null && x.DavItemPath.ToLower().Contains(search))
+            );
         }
 
         var totalCount = await query.CountAsync();
 
-        var items = await query
+        var results = await query
             .OrderBy(x => x.LinkPath)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync();
 
-        // Enrich with Scene Name and Target Path (if possible)
-        var davItemIds = items.Select(x => x.DavItemId).ToList();
-        var davItems = await dbContext.Items
-            .AsNoTracking()
-            .Where(x => davItemIds.Contains(x.Id))
-            .Select(x => new { x.Id, x.Path })
-            .ToDictionaryAsync(x => x.Id, x => x.Path);
-
-        foreach (var item in items)
+        // Map to MappedFile and enrich with scene name and target path
+        var items = new List<MappedFile>();
+        foreach (var result in results)
         {
-            // Enrich Name and Path
-            if (davItems.TryGetValue(item.DavItemId, out var path))
+            var item = new MappedFile
             {
-                item.DavItemPath = path;
-                var parts = path.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                DavItemId = result.DavItemId,
+                LinkPath = result.LinkPath,
+                CreatedAt = result.CreatedAt,
+                DavItemPath = result.DavItemPath
+            };
+
+            // Extract Scene Name from DavItemPath
+            if (!string.IsNullOrEmpty(result.DavItemPath))
+            {
+                var parts = result.DavItemPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
                 if (parts.Length >= 3)
                 {
                     item.DavItemName = parts[2]; // Scene Name
                 }
                 else
                 {
-                     item.DavItemName = Path.GetFileName(item.LinkPath);
+                    item.DavItemName = Path.GetFileName(item.LinkPath);
                 }
             }
             else
             {
-                 item.DavItemName = Path.GetFileName(item.LinkPath);
+                item.DavItemName = Path.GetFileName(item.LinkPath);
             }
-            
-            // Re-calculate Target Path if needed, or we can add it to DB. 
-            // Calculating it requires reading the file which is slow.
-            // For now, "N/A" or try to read it if file exists?
-            // The table shows "Target Path/URL". 
-            // Reading 10 files per page is fine.
+
+            // Calculate Target Path/URL by reading the file
             item.TargetPath = GetSymlinkOrStrmTarget(item.LinkPath, configManager);
+
+            items.Add(item);
         }
 
         return (items, totalCount);

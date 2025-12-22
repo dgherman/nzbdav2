@@ -95,7 +95,8 @@ export function MappedFilesTable({ items, totalCount, page, search }: Props) {
                                             }
                                         }}>
                                             <input type="hidden" name="action" value="trigger-repair" />
-                                            <input type="hidden" name="filePaths[0]" value={item.davItemPath} />
+                                            {item.davItemPath && <input type="hidden" name="filePaths[0]" value={item.davItemPath} />}
+                                            <input type="hidden" name="davItemIds[0]" value={item.davItemId} />
                                             <Button 
                                                 type="submit" 
                                                 variant="outline-danger" 
@@ -103,7 +104,7 @@ export function MappedFilesTable({ items, totalCount, page, search }: Props) {
                                                 className="py-0 px-2" 
                                                 style={{ fontSize: '0.7rem' }}
                                                 title="Trigger repair (Delete & Rescan)"
-                                                disabled={!item.davItemPath}
+                                                disabled={!item.davItemPath && !item.davItemId}
                                             >
                                                 Repair
                                             </Button>

@@ -235,6 +235,22 @@ public class ConfigManager
         return (configValue != null ? bool.Parse(configValue) : defaultValue);
     }
 
+    public bool HideSamples()
+    {
+        var defaultValue = false;
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("usenet.hide-samples"));
+        return (configValue != null ? bool.Parse(configValue) : defaultValue);
+    }
+
+    public int GetUsenetOperationTimeout()
+    {
+        return int.Parse(
+            StringUtil.EmptyToNull(GetConfigValue("usenet.operation-timeout"))
+            ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("USENET_OPERATION_TIMEOUT"))
+            ?? "90"
+        );
+    }
+
     public ArrConfig GetArrConfig()
     {
         var defaultValue = new ArrConfig();

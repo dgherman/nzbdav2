@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Config;
@@ -14,6 +15,7 @@ namespace NzbWebDAV.Api.Controllers.Stats;
 public class RepairRequest
 {
     public List<string> FilePaths { get; set; } = new();
+    public List<Guid> DavItemIds { get; set; } = new();
 }
 
 [ApiController]
@@ -24,7 +26,8 @@ public class StatsController(
     BandwidthService bandwidthService,
     ProviderErrorService providerErrorService,
     HealthCheckService healthCheckService,
-    ConfigManager configManager
+    ConfigManager configManager,
+    IServiceScopeFactory scopeFactory
 ) : ControllerBase
 {
     private void EnsureAuthenticated()
@@ -213,15 +216,57 @@ public class StatsController(
     {
         return ExecuteSafely(async () =>
         {
-            if (request.FilePaths == null || request.FilePaths.Count == 0)
-                return BadRequest(new { error = "FilePaths is required" });
-                
-            foreach (var filePath in request.FilePaths)
+            var hasFilePaths = request.FilePaths != null && request.FilePaths.Count > 0;
+            var hasDavItemIds = request.DavItemIds != null && request.DavItemIds.Count > 0;
+
+            if (!hasFilePaths && !hasDavItemIds)
+                return BadRequest(new { error = "FilePaths or DavItemIds is required" });
+
+            // Queue all repairs in the background - fire and forget
+            _ = Task.Run(async () =>
             {
-                healthCheckService.TriggerManualRepairInBackground(filePath);
-                await providerErrorService.ClearErrorsForFile(filePath);
-            }
-            return Ok(new { message = "Repair triggered successfully" });
+                var pathsToRepair = new HashSet<string>(request.FilePaths ?? []);
+
+                // 1. Resolve IDs to Paths
+                if (hasDavItemIds)
+                {
+                    using var scope = scopeFactory.CreateScope();
+                    var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+                    
+                    foreach (var id in request.DavItemIds!)
+                    {
+                        var item = await db.Items.AsNoTracking().FirstOrDefaultAsync(x => x.Id == id);
+                        if (item != null)
+                        {
+                            pathsToRepair.Add(item.Path);
+                        }
+                        else
+                        {
+                            // Orphaned ID (no DavItem found). 
+                            // Remove from mapped files cache/DB to ensure cleanup.
+                            OrganizedLinksUtil.RemoveCacheEntry(id);
+                            // We cannot easily clear errors without filename, but ProviderErrorService has cleanup logic for orphaned errors.
+                        }
+                    }
+                }
+
+                // 2. Trigger Repair for all Paths
+                foreach (var filePath in pathsToRepair)
+                {
+                    healthCheckService.TriggerManualRepairInBackground(filePath);
+                    try
+                    {
+                        await providerErrorService.ClearErrorsForFile(filePath);
+                    }
+                    catch (Exception ex)
+                    {
+                        Serilog.Log.Error(ex, $"Failed to clear errors for file: {filePath}");
+                    }
+                }
+            });
+
+            // Return immediately - don't wait for repairs to complete
+            return Ok(new { message = $"Repair queued for {request.FilePaths?.Count + request.DavItemIds?.Count} item(s)" });
         });
     }
 
