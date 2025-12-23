@@ -94,9 +94,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             reservedSlots = Math.Max(1, _maxConnections / 6);
         }
 
-        Serilog.Log.Verbose("[GlobalPool] Borrowing connection for {UsageType} (Reserved: {ReservedSlots}). Current: Live={Live}, Idle={Idle}, Active={Active}, Available={Available}, GateRemaining={GateRemaining}",
-            usageContext.UsageType, reservedSlots, _live, _idleConnections.Count, ActiveConnections, AvailableConnections, RemainingSemaphoreSlots);
-
         // Make caller cancellation also cancel the wait on the gate.
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(
             cancellationToken, _sweepCts.Token);
@@ -121,7 +118,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                 TriggerConnectionPoolChangedEvent();
                 _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext);
                 
-                Serilog.Log.Verbose("[GlobalPool] Reusing idle connection for {UsageType}. ID={ID}", usageContext.UsageType, connectionId);
                 return BuildLock(item.Connection, connectionId);
             }
 
@@ -135,7 +131,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         T conn;
         try
         {
-            Serilog.Log.Verbose("[GlobalPool] Creating fresh connection for {UsageType}. ID={ID}", usageContext.UsageType, connectionId);
             conn = await _factory(linked.Token).ConfigureAwait(false);
         }
         catch (Exception ex)
@@ -226,7 +221,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             return;
         }
 
-        Serilog.Log.Verbose("[GlobalPool] Returning connection to pool for {UsageType}. ID={ID}", usageType, connectionId);
         _idleConnections.Push(new Pooled(connection, Environment.TickCount64));
         _gate.Release();
         TriggerConnectionPoolChangedEvent();
@@ -238,7 +232,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
 
         // When a lock requests replacement, we dispose the connection instead of reusing.
-        Serilog.Log.Verbose("[GlobalPool] Destroying connection for {UsageType}. ID={ID}", usageType, connectionId);
         _ = DisposeConnectionAsync(connection); // fire & forget
         Interlocked.Decrement(ref _live);
         if (Volatile.Read(ref _disposed) == 0)

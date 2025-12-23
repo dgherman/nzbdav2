@@ -64,23 +64,25 @@ fi
 # Change permissions on /config directory to the given PUID and PGID
 chown $PUID:$PGID /config
 
-# Run backend database migration
 cd /app/backend
-echo "Running database maintenance."
-su-exec appuser ./NzbWebDAV --db-migration
-if [ $? -ne 0 ]; then
-    echo "Database migration failed. Exiting with error code $?."
-    exit $?
-fi
-echo "Done with database maintenance."
 
 # Run backend as appuser in background
 su-exec appuser ./NzbWebDAV &
 BACKEND_PID=$!
 
+# Run database migration in background (delayed) to avoid stalling startup
+# This allows the app to start immediately while indices build in the background.
+(
+    sleep 30
+    echo "Starting background database maintenance (indices/migrations)..."
+    cd /app/backend
+    su-exec appuser ./NzbWebDAV --db-migration
+    echo "Background database maintenance completed."
+) &
+
 # Wait for backend health check
 echo "Waiting for backend to start."
-MAX_BACKEND_HEALTH_RETRIES=${MAX_BACKEND_HEALTH_RETRIES:-30}
+MAX_BACKEND_HEALTH_RETRIES=${MAX_BACKEND_HEALTH_RETRIES:-300}
 MAX_BACKEND_HEALTH_RETRY_DELAY=${MAX_BACKEND_HEALTH_RETRY_DELAY:-1}
 i=0
 while true; do

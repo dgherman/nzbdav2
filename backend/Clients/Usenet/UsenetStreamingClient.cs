@@ -292,11 +292,25 @@ public class UsenetStreamingClient
         var useSsl = connectionDetails.UseSsl;
         var user = connectionDetails.User;
         var pass = connectionDetails.Pass;
-        if (!await connection.ConnectAsync(host, port, useSsl, cancellationToken).ConfigureAwait(false))
-            throw new CouldNotConnectToUsenetException("Could not connect to usenet host. Check connection settings.");
-        if (!await connection.AuthenticateAsync(user, pass, cancellationToken).ConfigureAwait(false))
-            throw new CouldNotLoginToUsenetException("Could not login to usenet host. Check username and password.");
-        return connection;
+
+        try
+        {
+            if (!await connection.ConnectAsync(host, port, useSsl, cancellationToken).ConfigureAwait(false))
+                throw new CouldNotConnectToUsenetException($"Could not connect to usenet host ({host}:{port}). Check connection settings.");
+            if (!await connection.AuthenticateAsync(user, pass, cancellationToken).ConfigureAwait(false))
+                throw new CouldNotLoginToUsenetException($"Could not login to usenet host ({host}:{port}). Check username and password.");
+            return connection;
+        }
+        catch (OperationCanceledException)
+        {
+            connection.Dispose();
+            throw new OperationCanceledException($"Connection to usenet host ({host}:{port}) timed out or was canceled.");
+        }
+        catch (Exception)
+        {
+            connection.Dispose();
+            throw;
+        }
     }
 
     public Task ResetConnections(ConnectionUsageType? type = null)

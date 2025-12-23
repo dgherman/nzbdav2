@@ -66,8 +66,8 @@ public class ProviderErrorService : IDisposable
 
             if (batch.Count > 0)
             {
-                // 1. Add Events
-                dbContext.MissingArticleEvents.AddRange(batch);
+                // 1. Add Events (SKIPPED to save space - aggregated into summaries only)
+                // dbContext.MissingArticleEvents.AddRange(batch);
 
                 // 2. Update Summaries
                 var fileGroups = batch.GroupBy(x => x.Filename);
@@ -136,65 +136,29 @@ public class ProviderErrorService : IDisposable
                     if (group.Any(x => x.IsImported)) summary.IsImported = true;
 
                     // Check for blocking (simple check based on current batch + existing state)
-                    // Note: Ideally this needs full history check, but for performance we do progressive check
                     if (!summary.HasBlockingMissingArticles)
                     {
-                        // Check if any segment in THIS batch is now blocking?
-                        // This is hard without querying all events for the file.
-                        // We will mark it as potentially blocking if we see high failures in batch, 
-                        // OR we rely on a separate background job to verify blocking status accurate.
-                        // For now, let's leave it as is, or query events for this file if needed.
-                        // To allow fast writes, we skip heavy "blocking" check here and assume
-                        // the "GetFileSummaries" might eventually need to re-verify or we accept loose accuracy.
-                        
-                        // BUT, to keep previous behavior "accurate":
-                        // Let's do a quick check only if we suspect blocking.
-                        // Or, we can query DB for this specific file's segments.
-                        
-                        // Optimization: Only check for blocking if we have enough failures.
-                        var segmentsInBatch = group.Select(x => x.SegmentId).Distinct();
-                        foreach (var segmentId in segmentsInBatch)
-                        {
-                             var distinctProviders = await dbContext.MissingArticleEvents
-                                 .Where(x => x.Filename == filename && x.SegmentId == segmentId)
-                                 .Select(x => x.ProviderIndex)
-                                 .Distinct()
-                                 .CountAsync();
-                             
-                             // Add current batch contributions (that might not be in DB yet)
-                             var batchProviders = group.Where(x => x.SegmentId == segmentId).Select(x => x.ProviderIndex).Distinct();
-                             // This overlap check is tricky.
-                             // Simplest: Just save events first, then check.
-                        }
+                         // Optimization: Check for blocking within the current batch only.
+                         // Since we are not persisting granular events anymore to save space, 
+                         // we cannot query the DB for historical provider failures per segment.
+                         // We will mark as blocking only if we see failures from ALL providers for a single segment *within this batch* 
+                         // or if the summary already says so.
+                         
+                         var segmentsInBatch = group.GroupBy(x => x.SegmentId);
+                         foreach (var segGroup in segmentsInBatch)
+                         {
+                             var distinctProvidersInBatch = segGroup.Select(x => x.ProviderIndex).Distinct().Count();
+                             if (distinctProvidersInBatch >= totalProviders)
+                             {
+                                 summary.HasBlockingMissingArticles = true;
+                                 Log.Information($"[MissingArticles] File '{filename}' (DavItemId: {summary.DavItemId}) is now blocking (missing across all providers in current batch).");
+                                 break;
+                             }
+                         }
                     }
                 }
 
-                // Optimization: Pre-calculate blocking status for all files before saving
-                // This allows us to do a single SaveChangesAsync instead of two
-                var blockingCheckTasks = fileGroups.Select(async group =>
-                {
-                    var filename = group.Key;
-                    var summary = await dbContext.MissingArticleSummaries.FirstOrDefaultAsync(x => x.Filename == filename);
-
-                    if (summary != null && !summary.HasBlockingMissingArticles)
-                    {
-                        // Include events from current batch in the check (they're already added to dbContext)
-                        var hasBlocking = await dbContext.MissingArticleEvents
-                            .Where(x => x.Filename == filename)
-                            .GroupBy(x => x.SegmentId)
-                            .AnyAsync(g => g.Select(p => p.ProviderIndex).Distinct().Count() >= totalProviders);
-
-                        if (hasBlocking)
-                        {
-                            summary.HasBlockingMissingArticles = true;
-                            Log.Information($"[MissingArticles] File '{filename}' (DavItemId: {summary.DavItemId}) is now blocking (missing across all providers).");
-                        }
-                    }
-                }).ToList();
-
-                await Task.WhenAll(blockingCheckTasks).ConfigureAwait(false);
-
-                // Single SaveChangesAsync for both events and updated blocking status
+                // Single SaveChangesAsync
                 await dbContext.SaveChangesAsync().ConfigureAwait(false);
             }
         }

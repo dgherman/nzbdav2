@@ -81,6 +81,8 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                     x => DateTimeOffset.FromUnixTimeSeconds(x)
                 );
             e.HasIndex(i => i.Timestamp);
+            e.HasIndex(i => i.Filename);
+            e.HasIndex(i => i.SegmentId);
         });
 
         // BandwidthSample
@@ -180,6 +182,8 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.HasIndex(i => new { i.IdPrefix, i.Type });
 
             e.HasIndex(i => new { i.Type, i.NextHealthCheck, i.ReleaseDate, i.Id });
+
+            e.HasIndex(i => i.Path);
         });
 
         // DavNzbFile

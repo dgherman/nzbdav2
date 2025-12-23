@@ -1,8 +1,15 @@
 class BackendClient {
+    private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
+        return fetch(url, {
+            ...options,
+            signal: options.signal ?? AbortSignal.timeout(30000)
+        });
+    }
+
     public async isOnboarding(): Promise<boolean> {
         const url = process.env.BACKEND_URL + "/api/is-onboarding";
 
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "GET",
             headers: {
                 "Content-Type": "application/json",
@@ -21,7 +28,7 @@ class BackendClient {
     public async createAccount(username: string, password: string): Promise<boolean> {
         const url = process.env.BACKEND_URL + "/api/create-account";
 
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: {
                 "x-api-key": process.env.FRONTEND_BACKEND_API_KEY || ""
@@ -47,7 +54,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + "/api/authenticate";
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: { "x-api-key": apiKey },
             body: (() => {
@@ -71,7 +78,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + `/api?mode=queue&limit=${limit}`;
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) {
             throw new Error(`Failed to get queue: ${(await response.json()).error}`);
         }
@@ -84,7 +91,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + `/api?mode=history&pageSize=${limit}`;
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) {
             throw new Error(`Failed to get history: ${(await response.json()).error}`);
         }
@@ -99,7 +106,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + `/api?mode=addfile&cat=${category}&priority=0&pp=0`;
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: { "x-api-key": apiKey },
             body: (() => {
@@ -123,7 +130,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + "/api/list-webdav-directory";
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: { "x-api-key": apiKey },
             body: (() => {
@@ -144,7 +151,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + "/api/get-config";
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: { "x-api-key": apiKey },
             body: (() => {
@@ -167,7 +174,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + "/api/update-config";
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: { "x-api-key": apiKey },
             body: (() => {
@@ -194,7 +201,7 @@ class BackendClient {
         }
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "GET",
             headers: { "x-api-key": apiKey }
         });
@@ -214,7 +221,7 @@ class BackendClient {
         }
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "GET",
             headers: { "x-api-key": apiKey }
         });
@@ -229,7 +236,7 @@ class BackendClient {
     public async getActiveConnections(): Promise<Record<number, ConnectionUsageContext[]>> {
         const url = process.env.BACKEND_URL + "/api/stats/connections";
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get active connections: ${(await response.json()).error}`);
         return response.json();
     }
@@ -237,7 +244,7 @@ class BackendClient {
     public async getCurrentBandwidth(): Promise<ProviderBandwidthSnapshot[]> {
         const url = process.env.BACKEND_URL + "/api/stats/bandwidth/current";
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get current bandwidth: ${(await response.json()).error}`);
         return response.json();
     }
@@ -245,7 +252,7 @@ class BackendClient {
     public async getBandwidthHistory(range: string): Promise<BandwidthSample[]> {
         const url = process.env.BACKEND_URL + `/api/stats/bandwidth/history?range=${range}`;
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get bandwidth history: ${(await response.json()).error}`);
         return response.json();
     }
@@ -253,7 +260,7 @@ class BackendClient {
     public async getDeletedFiles(page: number = 1, pageSize: number = 50, search: string = ""): Promise<{ items: HealthCheckResult[], totalCount: number }> {
         const url = process.env.BACKEND_URL + `/api/stats/deleted-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get deleted files: ${(await response.json()).error}`);
         return response.json();
     }
@@ -270,7 +277,7 @@ class BackendClient {
             url += `&isImported=${isImported}`;
         }
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get missing articles: ${(await response.json()).error}`);
         return response.json();
     }
@@ -278,7 +285,7 @@ class BackendClient {
     public async getMappedFiles(page: number = 1, pageSize: number = 10, search: string = ""): Promise<{ items: MappedFile[], totalCount: number }> {
         const url = process.env.BACKEND_URL + `/api/stats/mapped-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
-        const response = await fetch(url, { headers: { "x-api-key": apiKey } });
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get mapped files: ${(await response.json()).error}`);
         return response.json();
     }
@@ -292,7 +299,7 @@ class BackendClient {
 
             const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
 
-            const response = await fetch(url, {
+            const response = await this.fetchWithTimeout(url, {
 
                 method: "DELETE",
 
@@ -312,7 +319,7 @@ class BackendClient {
 
             const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
 
-            const response = await fetch(url, {
+            const response = await this.fetchWithTimeout(url, {
 
                 method: "DELETE",
 
@@ -328,7 +335,7 @@ class BackendClient {
         const url = process.env.BACKEND_URL + "/api/maintenance/reset-connections";
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: { 
                 "x-api-key": apiKey,
@@ -342,7 +349,7 @@ class BackendClient {
 
     public async triggerRepair(filePaths: string[], davItemIds?: string[]): Promise<void> {
         const url = process.env.BACKEND_URL + `/api/stats/repair`;
-        const response = await fetch(url, {
+        const response = await this.fetchWithTimeout(url, {
             method: "POST",
             headers: {
                 "Content-Type": "application/json",
