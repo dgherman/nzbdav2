@@ -128,16 +128,49 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         }
 
         // Need a fresh connection.
-        T conn;
-        try
+        T conn = default!;
+        var retries = 0;
+        const int maxRetries = 5;
+
+        while (true)
         {
-            conn = await _factory(linked.Token).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            Serilog.Log.Error(ex, "[GlobalPool] Failed to create fresh connection for {UsageType}. Error: {Message}", usageContext.UsageType, ex.Message);
-            _gate.Release(); // free the permit on failure
-            throw;
+            try
+            {
+                conn = await _factory(linked.Token).ConfigureAwait(false);
+                break;
+            }
+            catch (Exception ex)
+            {
+                // Check for socket exhaustion errors (AddressInUse, TryAgain/EAGAIN)
+                // We check string message too because sometimes it's wrapped or platform specific
+                var isSocketExhaustion = ex.ToString().Contains("Address already in use") || 
+                                         ex.ToString().Contains("Resource temporarily unavailable") ||
+                                         (ex is System.Net.Sockets.SocketException sockEx && 
+                                            (sockEx.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse || 
+                                             sockEx.SocketErrorCode == System.Net.Sockets.SocketError.TryAgain));
+
+                if (isSocketExhaustion && retries < maxRetries)
+                {
+                    retries++;
+                    var delay = 200 * retries; // Linear backoff: 200, 400, 600, 800, 1000 ms
+                    Serilog.Log.Warning("[GlobalPool] Socket exhaustion detected (EAGAIN/AddressInUse). Retrying connection creation in {Delay}ms (Attempt {Retry}/{Max})...", delay, retries, maxRetries);
+                    
+                    try
+                    {
+                        await Task.Delay(delay, linked.Token).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        _gate.Release();
+                        throw;
+                    }
+                    continue;
+                }
+
+                Serilog.Log.Error(ex, "[GlobalPool] Failed to create fresh connection for {UsageType}. Error: {Message}", usageContext.UsageType, ex.Message);
+                _gate.Release(); // free the permit on failure
+                throw;
+            }
         }
 
         Interlocked.Increment(ref _live);
