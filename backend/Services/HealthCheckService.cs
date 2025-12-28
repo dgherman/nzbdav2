@@ -150,9 +150,10 @@ public class HealthCheckService
                             try
                             {
                                 using var dbContext = new DavDatabaseContext();
+                                var nextCheck = DateTimeOffset.UtcNow.AddHours(1);
                                 await dbContext.Items
                                     .Where(x => x.Id == davItem.Id)
-                                    .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, DateTimeOffset.UtcNow.AddHours(1)))
+                                    .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, nextCheck))
                                     .ConfigureAwait(false);
                             }
                             catch (Exception ex)
@@ -231,7 +232,19 @@ public class HealthCheckService
             var isImported = OrganizedLinksUtil.GetLink(davItem, _configManager, allowScan: false) != null;
             using var healthCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Path, IsImported = isImported }));
-            await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token, useHead).ConfigureAwait(false);
+            var sizes = await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token, useHead).ConfigureAwait(false);
+
+            // If we did a HEAD check, we now have the segment sizes. Cache them for faster seeking.
+            if (useHead && sizes != null && davItem.Type == DavItem.ItemType.NzbFile)
+            {
+                var nzbFile = await dbClient.GetNzbFileAsync(davItem.Id, ct).ConfigureAwait(false);
+                if (nzbFile != null)
+                {
+                    nzbFile.SetSegmentSizes(sizes);
+                    Log.Debug($"[HealthCheck] Cached {sizes.Length} segment sizes for {davItem.Name}");
+                }
+            }
+
             Log.Debug($"[HealthCheck] Segments verified for {davItem.Name}. Updating database...");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");
