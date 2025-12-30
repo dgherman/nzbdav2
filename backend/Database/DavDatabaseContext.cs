@@ -20,10 +20,6 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 options.CommandTimeout(300);
             })
             .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.AmbientTransactionWarning))
-            .EnableSensitiveDataLogging()
-            .EnableDetailedErrors()
-            .LogTo(msg => Serilog.Log.Warning($"[EF] {msg}"),
-                new[] { DbLoggerCategory.Database.Command.Name, DbLoggerCategory.Migrations.Name })
             .Options
     );
 
