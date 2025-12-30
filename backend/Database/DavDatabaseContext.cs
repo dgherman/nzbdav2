@@ -14,13 +14,16 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
 
     private static readonly Lazy<DbContextOptions<DavDatabaseContext>> Options = new(
         () => new DbContextOptionsBuilder<DavDatabaseContext>()
-            .UseSqlite($"Data Source={DatabaseFilePath};Cache=Shared;Mode=ReadWriteCreate", options =>
+            .UseSqlite($"Data Source={DatabaseFilePath};Mode=ReadWriteCreate", options =>
             {
-                // Enable WAL mode for better concurrency
-                options.CommandTimeout(30);
+                // Increase timeout for large database migrations (30s -> 300s)
+                options.CommandTimeout(300);
             })
-            .AddInterceptors(new SqliteForeignKeyEnabler())
             .ConfigureWarnings(warnings => warnings.Ignore(RelationalEventId.AmbientTransactionWarning))
+            .EnableSensitiveDataLogging()
+            .EnableDetailedErrors()
+            .LogTo(msg => Serilog.Log.Warning($"[EF] {msg}"),
+                new[] { DbLoggerCategory.Database.Command.Name, DbLoggerCategory.Migrations.Name })
             .Options
     );
 
@@ -40,6 +43,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<MissingArticleSummary> MissingArticleSummaries { get; set; }
     public DbSet<BandwidthSample> BandwidthSamples { get; set; }
     public DbSet<LocalLink> LocalLinks { get; set; }
+    public DbSet<NzbProviderStats> NzbProviderStats { get; set; }
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
@@ -100,6 +104,27 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                     x => DateTimeOffset.FromUnixTimeSeconds(x)
                 );
             e.HasIndex(i => new { i.Timestamp, i.ProviderIndex });
+        });
+
+        // NzbProviderStats
+        b.Entity<NzbProviderStats>(e =>
+        {
+            e.ToTable("NzbProviderStats");
+            e.HasKey(i => new { i.JobName, i.ProviderIndex });
+            e.Property(i => i.JobName).IsRequired();
+            e.Property(i => i.ProviderIndex).IsRequired();
+            e.Property(i => i.SuccessfulSegments).IsRequired();
+            e.Property(i => i.FailedSegments).IsRequired();
+            e.Property(i => i.TotalBytes).IsRequired();
+            e.Property(i => i.TotalTimeMs).IsRequired();
+            e.Property(i => i.LastUsed)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+            e.HasIndex(i => i.JobName);
+            e.HasIndex(i => new { i.JobName, i.LastUsed });
         });
 
         // Account
