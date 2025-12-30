@@ -214,17 +214,13 @@ public class BufferedSegmentStream : Stream
                         stopwatch.Stop();
                         if (ct.IsCancellationRequested)
                         {
-                            Log.Warning($"[BufferedStream] Worker {workerId} canceled after processing {segmentCount} segments. " +
-                                $"Segment: {currentSegmentIndex} ({currentSegmentId}). " +
-                                $"Elapsed: {stopwatch.Elapsed.TotalSeconds:F2}s. " +
-                                $"Msg: {ex.Message}");
+                            Log.Warning("[BufferedStream] Worker {WorkerId} canceled after processing {SegmentCount} segments. Segment: {SegmentIndex} ({SegmentId}). Elapsed: {Elapsed:F2}s. Msg: {Message}",
+                                workerId, segmentCount, currentSegmentIndex, currentSegmentId, stopwatch.Elapsed.TotalSeconds, ex.Message);
                         }
                         else
                         {
-                            Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments. " +
-                                $"Segment: {currentSegmentIndex} ({currentSegmentId}). " +
-                                $"Elapsed: {stopwatch.Elapsed.TotalSeconds:F2}s. " +
-                                $"Msg: {ex.Message}");
+                            Log.Warning("[BufferedStream] Worker {WorkerId} timed out after processing {SegmentCount} segments. Segment: {SegmentIndex} ({SegmentId}). Elapsed: {Elapsed:F2}s. Msg: {Message}",
+                                workerId, segmentCount, currentSegmentIndex, currentSegmentId, stopwatch.Elapsed.TotalSeconds, ex.Message);
                         }
                         throw;
                     }
@@ -234,7 +230,8 @@ public class BufferedSegmentStream : Stream
                         var providerInfo = ex.Message.Contains(" on provider ")
                             ? ex.Message.Substring(ex.Message.LastIndexOf(" on provider ") + 13)
                             : "unknown";
-                        Log.Warning($"[BufferedStream] Worker {workerId} timed out after processing {segmentCount} segments (operation: GetSegmentStream, provider: {providerInfo})");
+                        Log.Warning("[BufferedStream] Worker {WorkerId} timed out after processing {SegmentCount} segments (operation: GetSegmentStream, provider: {Provider})",
+                            workerId, segmentCount, providerInfo);
                         throw;
                     }
                     catch (UsenetArticleNotFoundException)
@@ -245,7 +242,8 @@ public class BufferedSegmentStream : Stream
                     }
                     catch (Exception ex)
                     {
-                        Log.Error($"[BufferedStream] Worker {workerId} encountered error after processing {segmentCount} segments: {ex.GetType().Name} - {ex.Message}");
+                        Log.Error("[BufferedStream] Worker {WorkerId} encountered error after processing {SegmentCount} segments: {ExceptionType} - {Message}",
+                            workerId, segmentCount, ex.GetType().Name, ex.Message);
                         throw;
                     }
                 })
@@ -258,7 +256,7 @@ public class BufferedSegmentStream : Stream
 
             if (completedTask == timeoutTask)
             {
-                Log.Warning($"[BufferedStream] Workers have not completed after 2 minutes. Still waiting...");
+                Log.Warning("[BufferedStream] Workers have not completed after 2 minutes. Still waiting...");
                 await workerCompletionTask.ConfigureAwait(false);
             }
 
@@ -293,12 +291,14 @@ public class BufferedSegmentStream : Stream
             if (ex is UsenetArticleNotFoundException || (ex is AggregateException agg && agg.InnerExceptions.Any(e => e is UsenetArticleNotFoundException)))
             {
                 // Log without stack trace for expected missing article errors
-                Log.Error($"[BufferedStream] Error in FetchSegmentsAsync for Job: '{jobName}': {ex.Message}");
+                Log.Error("[BufferedStream] Error in FetchSegmentsAsync for Job: {JobName}: {Message}",
+                    jobName, ex.Message);
             }
             else if (ex is TimeoutException || (ex is AggregateException aggTimeout && aggTimeout.InnerExceptions.Any(e => e is TimeoutException)))
             {
                 // Log without stack trace for timeouts (common with unreliable providers)
-                Log.Warning($"[BufferedStream] Timeout in FetchSegmentsAsync for Job: '{jobName}': {ex.Message}");
+                Log.Warning("[BufferedStream] Timeout in FetchSegmentsAsync for Job: {JobName}: {Message}",
+                    jobName, ex.Message);
             }
             else
             {

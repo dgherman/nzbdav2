@@ -37,7 +37,7 @@ public class QueueItemProcessor(
 {
     public async Task ProcessAsync()
     {
-        Log.Information($"[Queue] Starting processing for {queueItem.JobName} ({queueItem.Id})");
+        Log.Information("[Queue] Starting processing for {JobName} ({Id})", queueItem.JobName, queueItem.Id);
         // initialize
         var startTime = DateTime.Now;
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Downloading");
@@ -52,7 +52,7 @@ public class QueueItemProcessor(
         // then we need to clear any db changes and finish early.
         catch (Exception e) when (e.GetBaseException() is OperationCanceledException or TaskCanceledException)
         {
-            Log.Information($"Processing of queue item `{queueItem.JobName}` was cancelled.");
+            Log.Information("Processing of queue item {JobName} was cancelled.", queueItem.JobName);
             // No need to clear change tracker as we use short-lived contexts now
         }
 
@@ -64,7 +64,7 @@ public class QueueItemProcessor(
         {
             try
             {
-                Log.Error($"Failed to process job, `{queueItem.JobName}` -- {e.Message}");
+                Log.Error("Failed to process job, {JobName} -- {Message}", queueItem.JobName, e.Message);
                 using var scope = scopeFactory.CreateScope();
                 var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
                 
@@ -133,7 +133,7 @@ public class QueueItemProcessor(
         // GlobalOperationLimiter now handles all connection limits - no need for reserved connections
         var providerConfig = configManager.GetUsenetProviderConfig();
         var concurrency = configManager.GetMaxQueueConnections();
-        Log.Information($"[Queue] Processing '{queueItem.JobName}': TotalConnections={providerConfig.TotalPooledConnections}, MaxQueueConnections={concurrency}");
+        Log.Information("[Queue] Processing '{JobName}': TotalConnections={TotalConnections}, MaxQueueConnections={MaxQueueConnections}", queueItem.JobName, providerConfig.TotalPooledConnections, concurrency);
         using var _1 = ct.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Queue, queueItem.JobName));
 
         // read the nzb document
@@ -255,11 +255,11 @@ public class QueueItemProcessor(
         var connectionsPerRar = rarCount > 0
             ? Math.Max(1, Math.Min(5, maxConnections / Math.Max(1, rarCount / 3)))
             : 1;
-        Log.Debug($"[Queue] Adaptive RAR concurrency: {connectionsPerRar} connections per RAR ({rarCount} RAR files, {maxConnections} total connections)");
+        Log.Debug("[Queue] Adaptive RAR concurrency: {ConnectionsPerRar} connections per RAR ({RarCount} RAR files, {MaxConnections} total connections)", connectionsPerRar, rarCount, maxConnections);
 
         foreach (var group in groups)
         {
-            Log.Debug($"[Queue] Processing group '{group.Key}' with {group.Count()} files. First file: {group.First().FileName}");
+            Log.Debug("[Queue] Processing group '{GroupKey}' with {FileCount} files. First file: {FirstFileName}", group.Key, group.Count(), group.First().FileName);
 
             if (group.Key == "7z")
                 yield return new SevenZipProcessor(group.ToList(), usenetClient, archivePassword, ct);
@@ -430,7 +430,7 @@ public class QueueItemProcessor(
         }
         catch (Exception e)
         {
-            Log.Debug($"Could not refresh monitored downloads for Arr instance: `{arrClient.Host}`. {e.Message}");
+            Log.Debug("Could not refresh monitored downloads for Arr instance: {ArrHost}. {Message}", arrClient.Host, e.Message);
         }
     }
 }

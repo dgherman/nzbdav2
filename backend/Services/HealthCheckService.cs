@@ -28,7 +28,7 @@ public class HealthCheckService
     private readonly ProviderErrorService _providerErrorService;
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
-    private readonly HashSet<string> _missingSegmentIds = [];
+    private readonly ConcurrentDictionary<string, byte> _missingSegmentIds = new();
     private readonly ConcurrentDictionary<Guid, int> _timeoutCounts = new();
 
     public HealthCheckService
@@ -50,7 +50,7 @@ public class HealthCheckService
         {
             // when usenet host changes, clear the missing segments cache
             if (!configEventArgs.ChangedConfig.ContainsKey("usenet.host")) return;
-            lock (_missingSegmentIds) _missingSegmentIds.Clear();
+            _missingSegmentIds.Clear();
         };
 
         _ = StartMonitoringService();
@@ -100,13 +100,14 @@ public class HealthCheckService
                 var useHead = isUrgentCheck;
 
                 // perform the health check
-                Log.Information($"[HealthCheck] Processing item: {davItem.Name} ({davItem.Id}). Type: {(isUrgentCheck ? "Urgent (HEAD)" : "Routine (STAT)")}");
+                Log.Information("[HealthCheck] Processing item: {Name} ({Id}). Type: {Type}",
+                    davItem.Name, davItem.Id, isUrgentCheck ? "Urgent (HEAD)" : "Routine (STAT)");
                 await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token, useHead).ConfigureAwait(false);
                 
                 // Success! Remove from timeout tracking
                 _timeoutCounts.TryRemove(davItem.Id, out _);
                 
-                Log.Information($"[HealthCheck] Finished item: {davItem.Name}");
+                Log.Information("[HealthCheck] Finished item: {Name}", davItem.Name);
             }
             catch (OperationCanceledException) when (!_cancellationToken.IsCancellationRequested)
             {
@@ -116,7 +117,8 @@ public class HealthCheckService
 
                     if (timeouts >= 2)
                     {
-                        Log.Error($"[HealthCheck] Item {davItem.Name} timed out {timeouts} times. Marking as failed.");
+                        Log.Error("[HealthCheck] Item {Name} timed out {Timeouts} times. Marking as failed.",
+                            davItem.Name, timeouts);
                         _timeoutCounts.TryRemove(davItem.Id, out _);
 
                         try
@@ -141,7 +143,8 @@ public class HealthCheckService
                     }
                     else
                     {
-                        Log.Warning($"[HealthCheck] Timed out processing item: {davItem.Name}. Rescheduling for later (Attempt {timeouts}).");
+                        Log.Warning("[HealthCheck] Timed out processing item: {Name}. Rescheduling for later (Attempt {Timeouts}).",
+                            davItem.Name, timeouts);
                         
                         // If this was an Urgent check (MinValue), do NOT reschedule to the future.
                         // We want it to stay Urgent so it retries with HEAD.
@@ -194,6 +197,7 @@ public class HealthCheckService
     public static IQueryable<DavItem> GetHealthCheckQueueItemsQuery(DavDatabaseClient dbClient)
     {
         return dbClient.Ctx.Items
+            .AsNoTracking()
             .Where(x => x.Type == DavItem.ItemType.NzbFile
                         || x.Type == DavItem.ItemType.RarFile
                         || x.Type == DavItem.ItemType.MultipartFile);
@@ -284,12 +288,12 @@ public class HealthCheckService
             var percentage = totalSegments > 0 ? (double)missingIndex / totalSegments * 100.0 : 0;
             var failureDetails = $"Missing segment at index {missingIndex}/{totalSegments} ({percentage:F2}%)";
 
-            Log.Warning($"[HealthCheck] Health check failed for item {davItem.Name} (Missing Segment: {e.SegmentId}). {failureDetails}. Attempting repair.");
+            Log.Warning("[HealthCheck] Health check failed for item {Name} (Missing Segment: {SegmentId}). {FailureDetails}. Attempting repair.",
+                davItem.Name, e.SegmentId, failureDetails);
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|100");
             _ = _websocketManager.SendMessage(WebsocketTopic.HealthItemProgress, $"{davItem.Id}|done");
             if (FilenameUtil.IsImportantFileType(davItem.Name))
-                lock (_missingSegmentIds)
-                    _missingSegmentIds.Add(e.SegmentId);
+                _missingSegmentIds.TryAdd(e.SegmentId, 0);
 
             // when usenet article is missing, perform repairs
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -322,6 +326,7 @@ public class HealthCheckService
         if (davItem.Type == DavItem.ItemType.RarFile)
         {
             var rarFile = await dbClient.Ctx.RarFiles
+                .AsNoTracking()
                 .Where(x => x.Id == davItem.Id)
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
             return rarFile?.RarParts?.SelectMany(x => x.SegmentIds)?.ToList() ?? [];
@@ -330,6 +335,7 @@ public class HealthCheckService
         if (davItem.Type == DavItem.ItemType.MultipartFile)
         {
             var multipartFile = await dbClient.Ctx.MultipartFiles
+                .AsNoTracking()
                 .Where(x => x.Id == davItem.Id)
                 .FirstOrDefaultAsync(ct).ConfigureAwait(false);
             return multipartFile?.Metadata?.FileParts?.SelectMany(x => x.SegmentIds)?.ToList() ?? [];
@@ -358,18 +364,18 @@ public class HealthCheckService
 
     public async Task TriggerManualRepairAsync(string filePath, DavDatabaseClient dbClient, CancellationToken ct)
     {
-        Log.Information($"Manual repair triggered for file: {filePath}");
-        
+        Log.Information("Manual repair triggered for file: {FilePath}", filePath);
+
         // 1. Try exact match
-        var davItem = await dbClient.Ctx.Items.FirstOrDefaultAsync(x => x.Path == filePath, ct).ConfigureAwait(false);
-        
+        var davItem = await dbClient.Ctx.Items.AsNoTracking().FirstOrDefaultAsync(x => x.Path == filePath, ct).ConfigureAwait(false);
+
         // 2. Try unescaped match
         if (davItem == null)
         {
             var unescapedPath = Uri.UnescapeDataString(filePath);
             if (unescapedPath != filePath)
             {
-                davItem = await dbClient.Ctx.Items.FirstOrDefaultAsync(x => x.Path == unescapedPath, ct).ConfigureAwait(false);
+                davItem = await dbClient.Ctx.Items.AsNoTracking().FirstOrDefaultAsync(x => x.Path == unescapedPath, ct).ConfigureAwait(false);
             }
         }
 
@@ -377,11 +383,11 @@ public class HealthCheckService
         if (davItem == null)
         {
             var fileName = Path.GetFileName(filePath);
-            var candidates = await dbClient.Ctx.Items.Where(x => x.Name == fileName).ToListAsync(ct).ConfigureAwait(false);
+            var candidates = await dbClient.Ctx.Items.AsNoTracking().Where(x => x.Name == fileName).ToListAsync(ct).ConfigureAwait(false);
             if (candidates.Count == 1)
             {
                 davItem = candidates[0];
-                Log.Information($"Found item by filename match: {davItem.Path}");
+                Log.Information("Found item by filename match: {Path}", davItem.Path);
             }
             else if (candidates.Count > 1)
             {
@@ -629,11 +635,8 @@ public class HealthCheckService
 
     public void CheckCachedMissingSegmentIds(IEnumerable<string> segmentIds)
     {
-        lock (_missingSegmentIds)
-        {
-            foreach (var segmentId in segmentIds)
-                if (_missingSegmentIds.Contains(segmentId))
-                    throw new UsenetArticleNotFoundException(segmentId);
-        }
+        foreach (var segmentId in segmentIds)
+            if (_missingSegmentIds.ContainsKey(segmentId))
+                throw new UsenetArticleNotFoundException(segmentId);
     }
 }

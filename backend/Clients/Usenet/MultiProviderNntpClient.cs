@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Clients.Usenet.Models;
@@ -7,9 +8,9 @@ using NzbWebDAV.Models;
 using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
 using Serilog;
-using Usenet.Nntp.Responses;
+using UsenetSharp.Exceptions;
+using UsenetSharp.Models;
 using Usenet.Nzb;
-using Usenet.Yenc;
 
 namespace NzbWebDAV.Clients.Usenet;
 
@@ -17,11 +18,16 @@ public class MultiProviderNntpClient : INntpClient
 {
     public IReadOnlyList<MultiConnectionNntpClient> Providers { get; }
     private readonly ProviderErrorService? _providerErrorService;
+    private readonly NzbProviderAffinityService? _affinityService;
 
-    public MultiProviderNntpClient(List<MultiConnectionNntpClient> providers, ProviderErrorService? providerErrorService = null)
+    public MultiProviderNntpClient(
+        List<MultiConnectionNntpClient> providers,
+        ProviderErrorService? providerErrorService = null,
+        NzbProviderAffinityService? affinityService = null)
     {
         Providers = providers;
         _providerErrorService = providerErrorService;
+        _affinityService = affinityService;
     }
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
@@ -34,21 +40,21 @@ public class MultiProviderNntpClient : INntpClient
         throw new NotSupportedException("Please authenticate within the connectionFactory");
     }
 
-    public Task<NntpStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
+    public Task<UsenetStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
     {
         return RunFromPoolWithBackup(
             connection => connection.StatAsync(segmentId, cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken,
             segmentId,
             "STAT");
     }
 
-    public Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken)
+    public Task<UsenetDateResponse> DateAsync(CancellationToken cancellationToken)
     {
         return RunFromPoolWithBackup(
             connection => connection.DateAsync(cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken);
     }
 
@@ -56,7 +62,7 @@ public class MultiProviderNntpClient : INntpClient
     {
         return RunFromPoolWithBackup(
             connection => connection.GetArticleHeadersAsync(segmentId, cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken,
             segmentId,
             "HEADER");
@@ -67,7 +73,7 @@ public class MultiProviderNntpClient : INntpClient
     {
         return RunFromPoolWithBackup(
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken,
             segmentId,
             "BODY");
@@ -78,17 +84,17 @@ public class MultiProviderNntpClient : INntpClient
     {
         return RunFromPoolWithBackup(
             connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
-            GetBalancedProviders(),
+            GetBalancedProviders(cancellationToken),
             cancellationToken,
             segmentId,
             "BODY");
     }
 
-    public Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
+    public Task<UsenetYencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
     {
         return RunFromPoolWithBackup(
             connection => connection.GetSegmentYencHeaderAsync(segmentId, cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken,
             segmentId,
             "BODY");
@@ -98,7 +104,7 @@ public class MultiProviderNntpClient : INntpClient
     {
         return RunFromPoolWithBackup(
             connection => connection.GetFileSizeAsync(file, cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken,
             null,
             "STAT");
@@ -109,11 +115,11 @@ public class MultiProviderNntpClient : INntpClient
         return Task.CompletedTask;
     }
 
-    public Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
+    public Task<UsenetGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
     {
         return RunFromPoolWithBackup(
             connection => connection.GroupAsync(group, cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken);
     }
 
@@ -121,7 +127,7 @@ public class MultiProviderNntpClient : INntpClient
     {
         return RunFromPoolWithBackup(
             connection => connection.DownloadArticleBodyAsync(group, articleId, cancellationToken),
-            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider),
+            GetOrderedProviders(cancellationToken.GetContext<LastSuccessfulProviderContext>()?.Provider, cancellationToken),
             cancellationToken,
             null,
             "BODY");
@@ -170,15 +176,31 @@ public class MultiProviderNntpClient : INntpClient
             if (lastException is not null && lastException.SourceException is not UsenetArticleNotFoundException)
             {
                 var msg = lastException.SourceException.Message;
-                Log.Debug($"Encountered error during NNTP Operation: `{msg}`. Trying another provider.");
+                Log.Debug("Encountered error during NNTP Operation: {Message}. Trying another provider.", msg);
             }
 
+            // Track timing for provider affinity
+            var stopwatch = Stopwatch.StartNew();
             try
             {
                 result = await task.Invoke(provider).ConfigureAwait(false);
-                if (result is NntpStatResponse r && r.ResponseType != NntpStatResponseType.ArticleExists)
+                stopwatch.Stop();
+
+                if (result is UsenetStatResponse r && !r.ArticleExists)
                 {
-                    throw new UsenetArticleNotFoundException(r.MessageId.Value);
+                    throw new UsenetArticleNotFoundException(r.ResponseMessage ?? segmentId ?? "Unknown");
+                }
+
+                // Record successful download for provider affinity
+                if (_affinityService != null && operationName == "BODY")
+                {
+                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
+                    if (!string.IsNullOrEmpty(jobName))
+                    {
+                        // Estimate bytes from result if it's a stream
+                        long bytes = result is YencHeaderStream stream ? stream.Length : 0;
+                        _affinityService.RecordSuccess(jobName, provider.ProviderIndex, bytes, stopwatch.ElapsedMilliseconds);
+                    }
                 }
 
                 if (lastSuccessfulProviderContext is not null && lastSuccessfulProvider != provider)
@@ -187,16 +209,43 @@ public class MultiProviderNntpClient : INntpClient
             }
             catch (UsenetArticleNotFoundException e)
             {
+                stopwatch.Stop();
+
                 // Explicitly caught to record it
                 RecordMissingArticle(provider.ProviderIndex, e.SegmentId, cancellationToken, operationName);
+
+                // Record failure for provider affinity
+                if (_affinityService != null)
+                {
+                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
+                    if (!string.IsNullOrEmpty(jobName))
+                    {
+                        _affinityService.RecordFailure(jobName, provider.ProviderIndex);
+                    }
+                }
+
                 lastException = ExceptionDispatchInfo.Capture(e);
             }
             catch (Exception e) when (e is not OperationCanceledException and not TaskCanceledException)
             {
+                stopwatch.Stop();
+
+                // Record failure for provider affinity
+                if (_affinityService != null)
+                {
+                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
+                    if (!string.IsNullOrEmpty(jobName))
+                    {
+                        _affinityService.RecordFailure(jobName, provider.ProviderIndex);
+                    }
+                }
+
                 lastException = ExceptionDispatchInfo.Capture(e);
             }
             catch (OperationCanceledException ex)
             {
+                stopwatch.Stop();
+
                 if (cancellationToken.IsCancellationRequested)
                 {
                     throw new TimeoutException($"Operation timed out on provider {provider.Host} (Segment: {segmentId ?? "N/A"})", ex);
@@ -205,7 +254,7 @@ public class MultiProviderNntpClient : INntpClient
             }
         }
 
-        if (result is NntpStatResponse)
+        if (result is UsenetStatResponse)
             return result;
 
         lastException?.Throw();
@@ -225,26 +274,64 @@ public class MultiProviderNntpClient : INntpClient
         _providerErrorService.RecordError(providerIndex, filename, segmentId ?? "", "Article not found", context.IsImported, operation);
     }
 
-    private IEnumerable<MultiConnectionNntpClient> GetOrderedProviders(MultiConnectionNntpClient? preferredProvider)
+    private IEnumerable<MultiConnectionNntpClient> GetOrderedProviders(MultiConnectionNntpClient? preferredProvider, CancellationToken cancellationToken)
     {
+        // Check for NZB-level provider affinity with epsilon-greedy exploration
+        MultiConnectionNntpClient? affinityProvider = null;
+        if (_affinityService != null)
+        {
+            var context = cancellationToken.GetContext<ConnectionUsageContext>();
+            var jobName = context.DetailsObject?.Text ?? context.Details;
+
+            if (!string.IsNullOrEmpty(jobName))
+            {
+                // Only log affinity decisions for buffer streaming operations
+                var logDecision = context.UsageType == ConnectionUsageType.BufferedStreaming;
+                var preferredIndex = _affinityService.GetPreferredProvider(jobName, Providers.Count, logDecision);
+                if (preferredIndex.HasValue && preferredIndex.Value >= 0 && preferredIndex.Value < Providers.Count)
+                {
+                    affinityProvider = Providers[preferredIndex.Value];
+                }
+            }
+        }
+
         return Providers
             .Where(x => x.ProviderType != ProviderType.Disabled)
             .OrderBy(x => x.ProviderType)
             .ThenByDescending(x => x.IdleConnections)
             .ThenByDescending(x => x.RemainingSemaphoreSlots)
-            .Prepend(preferredProvider)
+            .Prepend(preferredProvider)     // Stream-level stickiness
+            .Prepend(affinityProvider)      // NZB-level affinity (HIGHEST priority - overrides stream stickiness)
             .Where(x => x is not null)
             .Select(x => x!)
             .Distinct();
     }
 
-    private IEnumerable<MultiConnectionNntpClient> GetBalancedProviders()
+    private IEnumerable<MultiConnectionNntpClient> GetBalancedProviders(CancellationToken cancellationToken = default)
     {
-        // Balanced strategy for BufferedStream:
-        // 1. Prioritize Pooled providers.
-        // 2. Within Pooled, prioritize those with available connections.
-        // 3. Then prefer lower latency.
-        // 4. Fallback to Backups.
+        // Balanced strategy for BufferedStream with NZB-level affinity support:
+        // 1. Prioritize affinity provider (learned performance)
+        // 2. Then Pooled providers sorted by available connections and latency
+        // 3. Fallback to Backups
+
+        // Check for NZB-level provider affinity
+        MultiConnectionNntpClient? affinityProvider = null;
+        if (_affinityService != null)
+        {
+            var context = cancellationToken.GetContext<ConnectionUsageContext>();
+            var jobName = context.DetailsObject?.Text ?? context.Details;
+
+            if (!string.IsNullOrEmpty(jobName))
+            {
+                // Log affinity decisions for buffer streaming
+                var logDecision = context.UsageType == ConnectionUsageType.BufferedStreaming;
+                var preferredIndex = _affinityService.GetPreferredProvider(jobName, Providers.Count, logDecision);
+                if (preferredIndex.HasValue && preferredIndex.Value >= 0 && preferredIndex.Value < Providers.Count)
+                {
+                    affinityProvider = Providers[preferredIndex.Value];
+                }
+            }
+        }
 
         var pooled = Providers
             .Where(x => x.ProviderType == ProviderType.Pooled)
@@ -258,7 +345,11 @@ public class MultiProviderNntpClient : INntpClient
             .OrderBy(x => x.ProviderType) // Backup vs BackupOnly
             .ThenByDescending(x => x.IdleConnections);
 
-        return pooled.Concat(others);
+        return pooled.Concat(others)
+            .Prepend(affinityProvider)  // NZB-level affinity takes priority
+            .Where(x => x is not null)
+            .Select(x => x!)
+            .Distinct();
     }
 
     public Task ForceReleaseConnections(ConnectionUsageType? type = null)
