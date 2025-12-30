@@ -98,6 +98,10 @@ class Program
             Log.Warning("  → Applying PRAGMA mmap_size = 268435456 (256MB)");
             await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 268435456;").ConfigureAwait(false);
 
+            // Clear stale migration locks from previous failed attempts
+            Log.Warning("  → Clearing any stale migration locks...");
+            await databaseContext.Database.ExecuteSqlRawAsync("DELETE FROM __EFMigrationsLock WHERE 1=1;").ConfigureAwait(false);
+
             Log.Warning("  → Running migrations...");
             var argIndex = args.ToList().IndexOf("--db-migration");
             var targetMigration = args.Length > argIndex + 1 ? args[argIndex + 1] : null;
