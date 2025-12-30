@@ -56,8 +56,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-25-SEEK-CACHE");
-        Log.Warning("  FEATURE: Persistent Seek Cache & Adaptive Timeouts");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-30-DB-OPTIMIZATIONS");
+        Log.Warning("  FEATURE: Database PRAGMA Optimizations (5-10x faster migrations)");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
