@@ -269,13 +269,15 @@ public class HealthCheckService
             // update the database
             davItem.LastHealthCheck = DateTimeOffset.UtcNow;
 
-            // Calculate next health check with minimum 7-day interval
+            // Calculate next health check with configurable minimum interval
             // This accounts for local filesystem caching - new files don't need frequent checks
+            // Note: Priority/triggered checks (NextHealthCheck = MinValue) bypass this logic
             var age = davItem.LastHealthCheck - davItem.ReleaseDate;
             var interval = age; // Exponential backoff: interval = age
-            var minInterval = TimeSpan.FromDays(7);
+            var minIntervalDays = _configManager.GetMinHealthCheckIntervalDays();
+            var minInterval = TimeSpan.FromDays(minIntervalDays);
 
-            // Ensure minimum 7-day interval between checks
+            // Ensure minimum interval between checks (configurable, default 7 days)
             if (interval < minInterval)
                 interval = minInterval;
 

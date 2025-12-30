@@ -228,6 +228,35 @@ public class ConfigManager
                && GetArrConfig().GetInstanceCount() > 0;
     }
 
+    public int GetMinHealthCheckIntervalDays()
+    {
+        var defaultValue = 7; // Default to 7 days minimum interval
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("repair.min-check-interval-days"));
+        return configValue != null ? int.Parse(configValue) : defaultValue;
+    }
+
+    public bool IsAnalysisEnabled()
+    {
+        var defaultValue = true;
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("analysis.enable"));
+        return (configValue != null ? bool.Parse(configValue) : defaultValue);
+    }
+
+    public int GetMaxConcurrentAnalyses()
+    {
+        return int.Parse(
+            StringUtil.EmptyToNull(GetConfigValue("analysis.max-concurrent"))
+            ?? "3"
+        );
+    }
+
+    public bool IsProviderAffinityEnabled()
+    {
+        var defaultValue = true;
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("provider-affinity.enable"));
+        return (configValue != null ? bool.Parse(configValue) : defaultValue);
+    }
+
     public bool IsStatsEnabled()
     {
         var defaultValue = false;
