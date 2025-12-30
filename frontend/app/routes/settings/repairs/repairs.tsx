@@ -65,6 +65,21 @@ export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) 
                     The background health-check job will not use any more than this number of connections. Will default to your overall Max Connections if left empty.
                 </Form.Text>
             </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="min-check-interval-input">Minimum Health Check Interval (Days)</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isValidMinCheckInterval(config["repair.min-check-interval-days"]) && styles.error])}
+                    type="text"
+                    id="min-check-interval-input"
+                    aria-describedby="min-check-interval-help"
+                    placeholder={"7"}
+                    value={config["repair.min-check-interval-days"] || ""}
+                    onChange={e => setNewConfig({ ...config, "repair.min-check-interval-days": e.target.value })} />
+                <Form.Text id="min-check-interval-help" muted>
+                    The minimum number of days between routine health checks. New files will wait at least this many days before being checked. Default: 7 days. Note: Priority/triggered checks (streaming failures, manual repairs) bypass this setting.
+                </Form.Text>
+            </Form.Group>
         </div>
     );
 }
@@ -72,15 +87,23 @@ export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) 
 export function isRepairsSettingsUpdated(config: Record<string, string>, newConfig: Record<string, string>) {
     return config["repair.enable"] !== newConfig["repair.enable"]
         || config["repair.connections"] !== newConfig["repair.connections"]
+        || config["repair.min-check-interval-days"] !== newConfig["repair.min-check-interval-days"]
         || config["media.library-dir"] !== newConfig["media.library-dir"];
 }
 
 export function isRepairsSettingsValid(newConfig: Record<string, string>) {
-    return isValidRepairsConnections(newConfig["repair.connections"]);
+    return isValidRepairsConnections(newConfig["repair.connections"])
+        && isValidMinCheckInterval(newConfig["repair.min-check-interval-days"]);
 }
 
 function isValidRepairsConnections(repairsConnections: string): boolean {
     return repairsConnections === "" || isNonNegativeInteger(repairsConnections);
+}
+
+function isValidMinCheckInterval(minCheckInterval: string): boolean {
+    if (minCheckInterval === "") return true; // Empty defaults to 7
+    const num = Number(minCheckInterval);
+    return Number.isInteger(num) && num >= 1 && minCheckInterval.trim() === num.toString();
 }
 
 function isNonNegativeInteger(value: string) {
