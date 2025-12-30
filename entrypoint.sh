@@ -66,19 +66,14 @@ chown $PUID:$PGID /config
 
 cd /app/backend
 
+# Run database migration with PRAGMA optimizations (5-10x faster)
+echo "Starting database migration..."
+su-exec appuser ./NzbWebDAV --db-migration
+echo "Database migration completed."
+
 # Run backend as appuser in background
 su-exec appuser ./NzbWebDAV &
 BACKEND_PID=$!
-
-# Run database migration in background (delayed) to avoid stalling startup
-# This allows the app to start immediately while indices build in the background.
-(
-    sleep 30
-    echo "Starting background database maintenance (indices/migrations)..."
-    cd /app/backend
-    su-exec appuser ./NzbWebDAV --db-migration
-    echo "Background database maintenance completed."
-) &
 
 # Wait for backend health check
 echo "Waiting for backend to start."
