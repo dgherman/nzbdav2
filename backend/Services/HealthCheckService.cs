@@ -268,7 +268,18 @@ public class HealthCheckService
 
             // update the database
             davItem.LastHealthCheck = DateTimeOffset.UtcNow;
-            davItem.NextHealthCheck = davItem.ReleaseDate + 2 * (davItem.LastHealthCheck - davItem.ReleaseDate);
+
+            // Calculate next health check with minimum 7-day interval
+            // This accounts for local filesystem caching - new files don't need frequent checks
+            var age = davItem.LastHealthCheck - davItem.ReleaseDate;
+            var interval = age; // Exponential backoff: interval = age
+            var minInterval = TimeSpan.FromDays(7);
+
+            // Ensure minimum 7-day interval between checks
+            if (interval < minInterval)
+                interval = minInterval;
+
+            davItem.NextHealthCheck = davItem.LastHealthCheck + interval;
             dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
             {
                 Id = Guid.NewGuid(),
