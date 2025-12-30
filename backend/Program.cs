@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -56,8 +56,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-04-QUEUE-REORDER");
-        Log.Warning("  FEATURE: Queue items can now be reordered via UI (move to top/bottom)");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-25-SEEK-CACHE");
+        Log.Warning("  FEATURE: Persistent Seek Cache & Adaptive Timeouts");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -80,11 +80,31 @@ class Program
         // run database migration, if necessary.
         if (args.Contains("--db-migration"))
         {
+            Log.Information("Starting database migration with optimizations...");
+
+            // Apply PRAGMA optimizations for faster migrations (5-10x speedup)
+            await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA journal_mode = WAL;").ConfigureAwait(false);
+            await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA synchronous = NORMAL;").ConfigureAwait(false);
+            await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA cache_size = -64000;").ConfigureAwait(false);
+            await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA temp_store = MEMORY;").ConfigureAwait(false);
+            await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 268435456;").ConfigureAwait(false);
+
             var argIndex = args.ToList().IndexOf("--db-migration");
             var targetMigration = args.Length > argIndex + 1 ? args[argIndex + 1] : null;
-            await databaseContext.Database.MigrateAsync(targetMigration, SigtermUtil.GetCancellationToken()).ConfigureAwait(false);
+            await databaseContext.Database.MigrateAsync(targetMigration).ConfigureAwait(false);
+
+            Log.Information("Database migration finished.");
             return;
         }
+
+        // Apply runtime database optimizations for better query performance
+        Log.Debug("Applying database runtime optimizations...");
+        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA journal_mode = WAL;").ConfigureAwait(false);
+        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA synchronous = NORMAL;").ConfigureAwait(false);
+        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA cache_size = -64000;").ConfigureAwait(false);
+        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA temp_store = MEMORY;").ConfigureAwait(false);
+        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 268435456;").ConfigureAwait(false);
+        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA busy_timeout = 5000;").ConfigureAwait(false);
 
         // initialize the config-manager
         var configManager = new ConfigManager();
@@ -120,11 +140,13 @@ class Program
             .AddSingleton(configManager)
             .AddSingleton(websocketManager)
             .AddSingleton<BandwidthService>()
+            .AddSingleton<NzbProviderAffinityService>()
             .AddSingleton<ProviderErrorService>()
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ArrMonitoringService>()
             .AddSingleton<HealthCheckService>()
+            .AddSingleton<NzbAnalysisService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
