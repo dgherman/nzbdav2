@@ -24,3 +24,4 @@ nuget
 *.md
 !README.md
 !UPSTREAM_ANALYSIS.md
+!OPTIMIZATIONS.md
