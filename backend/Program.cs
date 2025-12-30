@@ -80,20 +80,30 @@ class Program
         // run database migration, if necessary.
         if (args.Contains("--db-migration"))
         {
-            Log.Information("Starting database migration with optimizations...");
+            Log.Warning("Starting database migration with PRAGMA optimizations...");
 
             // Apply PRAGMA optimizations for faster migrations (5-10x speedup)
+            Log.Warning("  → Applying PRAGMA journal_mode = WAL");
             await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA journal_mode = WAL;").ConfigureAwait(false);
+
+            Log.Warning("  → Applying PRAGMA synchronous = NORMAL");
             await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA synchronous = NORMAL;").ConfigureAwait(false);
+
+            Log.Warning("  → Applying PRAGMA cache_size = -64000 (64MB cache)");
             await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA cache_size = -64000;").ConfigureAwait(false);
+
+            Log.Warning("  → Applying PRAGMA temp_store = MEMORY");
             await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA temp_store = MEMORY;").ConfigureAwait(false);
+
+            Log.Warning("  → Applying PRAGMA mmap_size = 268435456 (256MB)");
             await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 268435456;").ConfigureAwait(false);
 
+            Log.Warning("  → Running migrations...");
             var argIndex = args.ToList().IndexOf("--db-migration");
             var targetMigration = args.Length > argIndex + 1 ? args[argIndex + 1] : null;
             await databaseContext.Database.MigrateAsync(targetMigration).ConfigureAwait(false);
 
-            Log.Information("Database migration finished.");
+            Log.Warning("Database migration finished successfully!");
             return;
         }
 
