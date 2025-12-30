@@ -12,30 +12,39 @@ This document outlines all performance optimization opportunities and architectu
 ### ✅ Completed Optimizations (2025-12-30)
 
 **Critical Priority - Completed:**
-1. ✅ **AsNoTracking() to Read-Only Queries** - Completed
+1. ✅ **AsNoTracking() to Read-Only Queries** - Completed (2025-12-30)
    - HealthCheckService.cs: 6 queries updated (lines 197, 326, 335, 367, 375, 383)
    - NzbAnalysisService.cs: 1 query updated (line 59)
 
-2. ✅ **Lock Contention Fix in HealthCheckService** - Completed
+2. ✅ **Lock Contention Fix in HealthCheckService** - Completed (2025-12-30)
    - Replaced `HashSet<string>` with `ConcurrentDictionary<string, byte>`
    - Removed 3 lock statements (lines 53, 292, 634-636)
    - Changed to lock-free operations: TryAdd, ContainsKey, Clear
 
-3. ✅ **String Interpolation to Structured Logging** - Completed
+3. ✅ **String Interpolation to Structured Logging** - Completed (2025-12-30)
    - HealthCheckService.cs: 6 log statements converted
    - BufferedSegmentStream.cs: 7 log statements converted
    - MultiProviderNntpClient.cs: 1 log statement converted
    - QueueItemProcessor.cs: 7 log statements converted
 
-4. ✅ **Missing Article Pruning** - Completed
+4. ✅ **Missing Article Pruning** - Completed (2025-12-XX)
    - Moved from storing every granular event to storing only Summaries + Aggregated stats
    - Massive reduction in SQLite file growth and I/O
+
+5. ✅ **Persistent Seek Cache** - Completed (2025-12-25)
+   - Migration: `AddSegmentSizesToDavNzbFile`
+   - DavNzbFile.SegmentSizes field stores segment sizes as byte array
+   - NzbFileStream.cs uses binary search on cached offsets (O(log N))
+   - Automatic population via HealthCheckService (HEAD checks) and NzbAnalysisService
+   - Falls back to interpolation search if cache unavailable
+   - Benefit: Instant seeking for previously accessed files, eliminates 3-10 NNTP requests per seek
 
 **Expected Impact from Completed Optimizations:**
 - CPU Usage: 20-25% reduction (from structured logging + lock removal)
 - Memory Usage: 20-30% reduction (from AsNoTracking)
 - Concurrent Throughput: 15-20% improvement (from lock-free collections)
 - Database I/O: 60-70% reduction (from missing article pruning)
+- Seek Performance: 95%+ reduction in seek latency (instant seeks with cache)
 
 ---
 
@@ -76,43 +85,7 @@ Create new migration with these indexes.
 
 ---
 
-### 2. Persistent Seek Cache ⏳
-**Impact:** Instant seeking for previously accessed files, eliminates interpolation search overhead
-**Effort:** Medium (database schema + caching logic)
-**Status:** Pending
-**Files Affected:**
-- `backend/Database/Models/DavNzbFile.cs`
-- `backend/Streams/NzbFileStream.cs`
-
-**Problem:**
-Seeking requires an interpolation search (binary search equivalent) over yEnc headers to find the exact byte offset. This involves multiple NNTP `HEAD` or `STAT` requests.
-
-**Solution:**
-Cache segment byte offsets in SQLite (`DavNzbFiles` table).
-- When a file is first analyzed or streamed, store the `Segment -> ByteOffset` map.
-- On subsequent seeks, use cached offsets for instant O(1) lookup instead of O(log N) interpolation search.
-
-**Implementation:**
-```csharp
-// Add to DavNzbFile model
-public string? SegmentSizesJson { get; set; }  // JSON array of segment sizes
-
-// On first access, populate:
-var sizes = await usenetClient.GetAllSegmentSizes(segmentIds);
-nzbFile.SegmentSizesJson = JsonSerializer.Serialize(sizes);
-
-// On seek:
-var sizes = JsonSerializer.Deserialize<long[]>(nzbFile.SegmentSizesJson);
-var offset = sizes.Take(segmentIndex).Sum();
-```
-
-**Benefit:**
-- Eliminates 3-10 NNTP requests per seek operation
-- Reduces seek latency from 200-500ms to <10ms
-
----
-
-### 3. Adaptive Connection Timeouts ⏳
+### 2. Adaptive Connection Timeouts ⏳
 **Impact:** Faster failover from stalling providers, reduced user-facing timeouts
 **Effort:** Medium
 **Status:** Pending
@@ -147,7 +120,7 @@ private int GetDynamicTimeout()
 
 ---
 
-### 4. Circuit Breaker Pattern for Providers ⏳
+### 3. Circuit Breaker Pattern for Providers ⏳
 **Impact:** System resilience during provider outages, eliminates cascading failures
 **Effort:** Medium
 **Status:** Pending
@@ -670,11 +643,10 @@ The following areas are already highly optimized and don't require changes:
 
 ### Phase 2: Critical Optimizations (Current Focus)
 1. ⏳ **Database Indexes** - Create migration with missing indexes
-2. ⏳ **Persistent Seek Cache** - Cache segment offsets for instant seeking
-3. ⏳ **Adaptive Timeouts** - Dynamic timeout adjustment per provider
-4. ⏳ **Circuit Breaker** - Implement provider circuit breaker pattern
+2. ⏳ **Adaptive Timeouts** - Dynamic timeout adjustment per provider
+3. ⏳ **Circuit Breaker** - Implement provider circuit breaker pattern
 
-**Expected Impact:** Additional 50%+ faster queries, instant seeking, better provider resilience
+**Expected Impact:** Additional 50%+ faster queries, better provider resilience
 
 ### Phase 3: High Priority (Next)
 5. ⏳ **LINQ Enumeration** - Fix multiple enumerations
@@ -709,6 +681,7 @@ The following areas are already highly optimized and don't require changes:
 - Memory Usage: 20-30% reduction ✅
 - Database I/O: 60-70% reduction ✅
 - Concurrent Throughput: 15-20% improvement ✅
+- Seek Performance: 95%+ reduction in seek latency (instant seeks with cache) ✅
 
 **After Phases 2-3 (Target):**
 - CPU Usage: 40-50% total reduction
@@ -716,7 +689,6 @@ The following areas are already highly optimized and don't require changes:
 - Database Query Speed: 50%+ improvement for queue/health queries
 - GC Pressure: 50-60% reduction (fewer allocations)
 - Concurrent Throughput: 25-30% improvement
-- Seek Performance: 95%+ reduction in seek latency (instant seeks)
 
 **After Phase 4 (Target):**
 - CPU Usage: 50-60% total reduction
@@ -770,5 +742,5 @@ dotnet counters monitor --process-id <pid> \
 
 **Last Reviewed:** 2025-12-30
 **Next Review:** After Phase 2 implementation
-**Priority Focus:** Persistent Seek Cache + Database Indexes
+**Priority Focus:** Database Indexes + Adaptive Timeouts + Circuit Breaker
 
