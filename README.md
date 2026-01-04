@@ -30,6 +30,7 @@ This fork introduces significant architectural and feature improvements over the
 
 ### 🚀 Smart Buffering Engine
 *   **Read-Ahead Buffering**: Implements a custom `BufferedSegmentStream` that pre-fetches segments into memory, ensuring smooth playback and eliminating stutter during high-bitrate streams.
+*   **Persistent Seek Cache**: Automatically caches segment byte offsets in the database during health checks or manual analysis. This enables **instant seeking** for previously accessed files by bypassing slow NNTP-based interpolation searches.
 *   **Optimized Seeking**: Intelligent segment seeking and stream management for faster seek times.
 
 ### 🧠 Intelligent Connection Management
@@ -268,36 +269,13 @@ volumes:
 
 # Changelog
 
-## v0.1.0 (2025-12-06)
-*   **Smart Buffering Engine**: Added `BufferedSegmentStream` for read-ahead buffering and optimized seeking.
-*   **Intelligent Connection Management**: Implemented priority queuing for streaming vs. background tasks and smart load balancing.
-*   **UI Stats Dashboard**:
-    *   Added real-time bandwidth and connection monitoring.
-    *   Added granular connection details including file age (e.g., "5d ago").
-    *   Updated provider cards to display specific server host addresses.
-    *   Added an idle latency check (ping) for inactive servers.
-*   **System Logs**: Enhanced log console with per-level filtering and optimized storage (10k limit per level).
-*   **Tech Stack**: Upgraded backend to .NET 9.0 and frontend to React Router v7.
+## v0.1.26 (2026-01-04)
+*   **Fix**: Resolved a critical issue where the download queue could become permanently stuck ("looping") during high system load (e.g., streaming or intensive Sonarr scanning). This was caused by connection pool starvation where queue tasks were deprioritized and unable to acquire connections. Queue tasks now compete fairly for resources.
 
-## v0.1.1 (2025-12-07)
-*   **Missing Articles Log**: Added a persistent log and UI table to track missing article events, useful for diagnosing provider retention issues.
-*   **Connection Status Badges**: Added visual indicators ("Backup", "Secondary") to active connections to show when a provider is being used as a fallback or for load-balancing retries.
-*   **Persistent Logging**: Missing article events are now saved to the database to survive restarts.
-
-## v0.1.2 (2025-12-07)
-*   **Latency Measurement Refinement**: Switched latency calculation to an Exponential Moving Average (EMA) for smoother, more stable readings, especially during periods of sparse activity. Latency is now recorded for lightweight NNTP operations only and includes periodic ping checks for active providers to ensure continuous measurement.
-*   **Improved Timeout Logging**: Timeout messages in the logs now include the specific provider's server address, instead of just its index, for easier identification and debugging.
-*   **Connection Status Accuracy**: Corrected logic for "Backup" and "Secondary" connection badges to accurately reflect provider usage during fallback and load-balancing scenarios.
-*   **Missing Article Events Persistence**: Ensured missing article events are persisted to the database, preventing loss of data on application restart.
-
-## v0.1.3 (2025-12-08)
-*   **Missing Articles Logging Fix**: Fixed critical bug where missing articles were not being logged to the database due to `ProviderErrorService` not being passed to `MultiProviderNntpClient`.
-*   **Enhanced Missing Articles Detection**: Added Info level logging when missing articles are detected, including provider hostname, segment ID, and filename for better diagnostics.
-*   **Improved Timeout Diagnostics**: Timeout logs now correctly show provider server addresses by embedding the information in exception messages, resolving issues with context disposal during exception unwinding.
-*   **Expandable Missing Articles Table**: Reimplemented the Missing Articles UI table with grouping by provider and filename, featuring expandable tree view to show individual segment details and segment count badges.
-*   **Log Management**: Added "Clear Log" buttons to both Missing Articles and Deleted Files tables, with backend DELETE endpoints (`/api/stats/missing-articles` and `/api/stats/deleted-files`) for easy log maintenance.
-*   **Health Check Context Fix**: Health check operations now properly set connection context with actual item names instead of generic "Health Check" label, improving log readability.
-
+## v0.1.25 (2025-12-25)
+*   **Optimization**: Implemented **Persistent Seek Cache**. Segment sizes and offsets are now cached in the database (via `DavNzbFiles` table), enabling instant O(log N) seeking and significantly reducing NNTP overhead for video playback.
+*   **Maintenance**: Added `POST /api/maintenance/analyze/{id}` endpoint to manually populate the seek cache for specific NZB files.
+*   **Reliability**: Automated cache population during routine and urgent `HEAD` health checks.
 
 ## v0.1.24 (2025-12-17)
 *   **Logging**: Fixed a build error by ensuring `global::Usenet.Exceptions.NntpException` is correctly referenced in `ThreadSafeNntpClient.GetSegmentStreamAsync` to suppress stack traces for 'Received invalid response' errors.
