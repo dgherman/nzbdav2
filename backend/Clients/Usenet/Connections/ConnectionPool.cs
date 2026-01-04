@@ -80,17 +80,16 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
 
 
-        // Determine if we need to reserve slots for higher-priority traffic (Streaming)
-        // Background tasks (Queue, HealthCheck, Repair) must leave some capacity available.
-        // We reserve 25% of the pool for Streaming.
+        // Determine if we need to reserve slots for higher-priority callers.
+        // Background tasks (HealthCheck, Repair) must leave some capacity available.
+        // We reserve 25% of the pool for Streaming and Queue.
         var reservedSlots = 0;
-        if (usageContext.UsageType == ConnectionUsageType.Queue ||
-            usageContext.UsageType == ConnectionUsageType.HealthCheck ||
+        if (usageContext.UsageType == ConnectionUsageType.HealthCheck ||
             usageContext.UsageType == ConnectionUsageType.Repair)
         {
             // Reserve ~16% of slots for high-priority traffic.
             // This allows background tasks to balloon up to ~84% utilization
-            // while keeping a buffer for streaming starts.
+            // while keeping a buffer for streaming/queue starts.
             reservedSlots = Math.Max(1, _maxConnections / 6);
         }
 
