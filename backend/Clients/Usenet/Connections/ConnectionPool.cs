@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Clients.Usenet;
 
 namespace NzbWebDAV.Clients.Usenet.Connections;
 
@@ -46,6 +47,13 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     // Track active connections by usage type
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ActiveConnectionInfo> _activeConnections = new();
     private record ActiveConnectionInfo(T Connection, ConnectionUsageContext Context);
+
+    // Track doomed connections (marked for release)
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<T, bool> _doomedConnections = new();
+
+    // Circuit breaker state
+    private int _consecutiveConnectionFailures;
+    private DateTimeOffset _lastConnectionFailure = DateTimeOffset.MinValue;
 
     /* ------------------------------------------------------------------------------ */
 
@@ -112,18 +120,38 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         // Try to reuse an existing idle connection.
         while (_idleConnections.TryPop(out var item))
         {
-            if (!item.IsExpired(IdleTimeout))
+            if (item.IsExpired(IdleTimeout))
             {
+                // Stale – destroy and continue looking.
+                await DisposeConnectionAsync(item.Connection).ConfigureAwait(false);
+                Interlocked.Decrement(ref _live);
                 TriggerConnectionPoolChangedEvent();
-                _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext);
-                
-                return BuildLock(item.Connection, connectionId);
+                continue;
             }
 
-            // Stale – destroy and continue looking.
-            await DisposeConnectionAsync(item.Connection).ConfigureAwait(false);
-            Interlocked.Decrement(ref _live);
+            // Health check for long-idle connections (>30s) before reuse
+            if (unchecked(Environment.TickCount64 - item.LastTouchedMillis) > 30000 && item.Connection is INntpClient client)
+            {
+                try
+                {
+                    // Quick liveness check
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    await client.DateAsync(cts.Token).ConfigureAwait(false);
+                }
+                catch
+                {
+                    // Failed check - discard
+                    await DisposeConnectionAsync(item.Connection).ConfigureAwait(false);
+                    Interlocked.Decrement(ref _live);
+                    TriggerConnectionPoolChangedEvent();
+                    continue;
+                }
+            }
+
             TriggerConnectionPoolChangedEvent();
+            _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext);
+            
+            return BuildLock(item.Connection, connectionId);
         }
 
         // Need a fresh connection.
@@ -133,13 +161,32 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
         while (true)
         {
+            // Circuit breaker check
+            if (_consecutiveConnectionFailures > 5)
+            {
+                var cooldown = TimeSpan.FromSeconds(5);
+                var timeSinceFailure = DateTimeOffset.UtcNow - _lastConnectionFailure;
+                if (timeSinceFailure < cooldown)
+                {
+                    var wait = cooldown - timeSinceFailure;
+                    Serilog.Log.Warning("[GlobalPool] Circuit breaker active. Pausing connection attempts for {Wait}s.", wait.TotalSeconds);
+                    await Task.Delay(wait, linked.Token).ConfigureAwait(false);
+                }
+            }
+
             try
             {
                 conn = await _factory(linked.Token).ConfigureAwait(false);
+                
+                // Reset circuit breaker on success
+                Interlocked.Exchange(ref _consecutiveConnectionFailures, 0);
                 break;
             }
             catch (Exception ex)
             {
+                // Update circuit breaker stats
+                Interlocked.Increment(ref _consecutiveConnectionFailures);
+                _lastConnectionFailure = DateTimeOffset.UtcNow;
                 // Check for socket exhaustion errors (AddressInUse, TryAgain/EAGAIN)
                 // We check string message too because sometimes it's wrapped or platform specific
                 var isSocketExhaustion = ex.ToString().Contains("Address already in use") || 
@@ -186,9 +233,10 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Forcefully disposes active connections matching the given type (or all if null).
+    /// Gracefully marks active connections matching the given type (or all if null) for release.
+    /// They will be disposed when returned to the pool.
     /// </summary>
-    public async Task ForceReleaseConnections(ConnectionUsageType? type = null)
+    public Task ForceReleaseConnections(ConnectionUsageType? type = null)
     {
         var targets = _activeConnections
             .Where(x => type == null || x.Value.Context.UsageType == type.Value)
@@ -196,36 +244,11 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
         foreach (var target in targets)
         {
-            // Remove from tracking so Return/Destroy won't double-process (though they handle missing keys)
-            // Actually, we want Return/Destroy to still run to release the gate.
-            // But if we dispose the connection here, Return will put a disposed connection back in pool?
-            // No, Return should check. But Return implementation is generic.
-            
-            // If we dispose here, the caller (who holds the lock) will eventually crash/finish.
-            // They will call Return or Destroy.
-            // If they call Return, they put 'conn' back.
-            // 'conn' is disposed.
-            // Next user gets disposed conn.
-            
-            // We should try to remove it from _activeConnections to mark it?
-            // Or rely on Return logic?
-            // Return logic:
-            // _activeConnections.TryRemove(connectionId, out var usageContext);
-            // _idleConnections.Push(new Pooled(connection, ...));
-            
-            // Ideally we want the caller to call 'Destroy' instead of 'Return'.
-            // But we can't control the caller.
-            
-            // So we MUST dispose it. And we accept that a disposed connection might land in idle pool.
-            // We should improve GetConnectionLockAsync to check for disposal?
-            // Or T doesn't expose IsDisposed.
-            
-            // Hack: We can try to rely on 'INntpClient' having 'IsConnected'.
-            // But T is generic.
-            
-            // For now, let's just dispose. Most libs throw ObjectDisposedException on use.
-            await DisposeConnectionAsync(target.Value.Connection);
+            // Mark as doomed. Return() will check this list and dispose instead of pooling.
+            _doomedConnections.TryAdd(target.Value.Connection, true);
         }
+        
+        return Task.CompletedTask;
     }
 
     /* ========================== core helpers ====================================== */
@@ -245,7 +268,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         _activeConnections.TryRemove(connectionId, out var info);
         var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
 
-        if (Volatile.Read(ref _disposed) == 1)
+        if (Volatile.Read(ref _disposed) == 1 || _doomedConnections.TryRemove(connection, out _))
         {
             _ = DisposeConnectionAsync(connection); // fire & forget
             Interlocked.Decrement(ref _live);
