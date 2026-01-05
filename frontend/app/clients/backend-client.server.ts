@@ -87,8 +87,9 @@ class BackendClient {
         return data.queue;
     }
 
-    public async getHistory(limit: number): Promise<HistoryResponse> {
-        const url = process.env.BACKEND_URL + `/api?mode=history&pageSize=${limit}`;
+    public async getHistory(limit: number, showHidden: boolean = false): Promise<HistoryResponse> {
+        const showHiddenParam = showHidden ? '&show_hidden=1' : '';
+        const url = process.env.BACKEND_URL + `/api?mode=history&pageSize=${limit}${showHiddenParam}`;
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
@@ -145,6 +146,28 @@ class BackendClient {
         }
         const data = await response.json();
         return data.items;
+    }
+
+    public async searchWebdav(query: string, directory: string): Promise<SearchResult[]> {
+        const url = process.env.BACKEND_URL + "/api/search-webdav";
+
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, {
+            method: "POST",
+            headers: { "x-api-key": apiKey },
+            body: (() => {
+                const form = new FormData();
+                form.append("query", query);
+                form.append("directory", directory);
+                return form;
+            })()
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to search webdav: ${(await response.json()).error}`);
+        }
+        const data = await response.json();
+        return data.results;
     }
 
     public async getConfig(keys: string[]): Promise<ConfigItem[]> {
@@ -360,6 +383,33 @@ class BackendClient {
         if (!response.ok) throw new Error(`Failed to trigger repair: ${(await response.json()).error}`);
     }
 
+    public async getActiveAnalyses(): Promise<AnalysisItem[]> {
+        const url = process.env.BACKEND_URL + "/api/maintenance/active-analyses";
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get active analyses: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async getFileDetails(davItemId: string): Promise<FileDetails> {
+        const url = process.env.BACKEND_URL + `/api/file-details/${davItemId}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get file details: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async resetProviderStats(jobName?: string): Promise<{ message: string; deletedCount: number }> {
+        const url = process.env.BACKEND_URL + `/api/reset-provider-stats${jobName ? `?jobName=${encodeURIComponent(jobName)}` : ''}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, {
+            method: 'POST',
+            headers: { "x-api-key": apiKey }
+        });
+        if (!response.ok) throw new Error(`Failed to reset provider stats: ${(await response.json()).error}`);
+        return response.json();
+    }
+
     }
 
     
@@ -444,6 +494,22 @@ class BackendClient {
 
         size: number | null | undefined,
 
+        davItemId: string | null | undefined,
+
+    }
+
+    export type SearchResult = {
+
+        name: string,
+
+        path: string,
+
+        isDirectory: boolean,
+
+        size: number | null | undefined,
+
+        davItemId: string | null | undefined,
+
     }
 
     
@@ -493,6 +559,8 @@ class BackendClient {
         name: string,
 
         path: string,
+
+        jobName?: string | null,
 
         releaseDate: string | null,
 
@@ -581,6 +649,10 @@ class BackendClient {
         usageType: ConnectionUsageType,
 
         details: string | null,
+
+        jobName?: string | null,
+
+        davItemId?: string | null,
 
         isBackup?: boolean,
 
@@ -1188,8 +1260,50 @@ class BackendClient {
 
     
 
-            
+            export type AnalysisItem = {
+                id: string,
+                name: string,
+                jobName?: string,
+                progress: number,
+                startedAt: string
+            }
 
-    
+    export type FileDetails = {
+        davItemId: string;
+        name: string;
+        path: string;
+        jobName?: string;
+        fileSize: number;
+        createdAt: string | null;
+        lastHealthCheck: string | null;
+        nextHealthCheck: string | null;
+        missingArticleCount: number;
+        totalSegments: number;
+        minSegmentSize: number | null;
+        maxSegmentSize: number | null;
+        avgSegmentSize: number | null;
+        providerStats: ProviderStatistic[];
+        latestHealthCheckResult: HealthCheckInfoType | null;
+    }
+
+    export type ProviderStatistic = {
+        providerIndex: number;
+        successfulSegments: number;
+        failedSegments: number;
+        totalBytes: number;
+        totalTimeMs: number;
+        lastUsed: string;
+        averageSpeedBps: number;
+        successRate: number;
+    }
+
+    export type HealthCheckInfoType = {
+        result: HealthResult;
+        repairStatus: RepairAction;
+        message: string | null;
+        createdAt: string;
+    }
+
+
 
     

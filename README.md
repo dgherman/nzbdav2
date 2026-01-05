@@ -269,8 +269,12 @@ volumes:
 
 # Changelog
 
+## v0.1.27 (2026-01-05)
+*   **Performance**: Implemented "Smart Analysis" for media files. The system now intelligently detects uniform segment sizes by checking only the first, second, and last segments of a file. If confirmed uniform, it skips the full segment-by-segment analysis, reducing the number of required network requests from thousands (O(N)) to just three (O(1)) for standard releases. This dramatically speeds up the "Analyzing..." phase for new content.
+
 ## v0.1.26 (2026-01-04)
 *   **Fix**: Resolved a critical issue where the download queue could become permanently stuck ("looping") during high system load (e.g., streaming or intensive Sonarr scanning). This was caused by connection pool starvation where queue tasks were deprioritized and unable to acquire connections. Queue tasks now compete fairly for resources.
+*   **Fix**: Resolved an issue where processing 7z archives could hang indefinitely if the file structure required extensive seeking or was corrupted. Added a timeout and improved logging for 7z header processing to fail fast and prevent queue stalling.
 
 ## v0.1.25 (2025-12-25)
 *   **Optimization**: Implemented **Persistent Seek Cache**. Segment sizes and offsets are now cached in the database (via `DavNzbFiles` table), enabling instant O(log N) seeking and significantly reducing NNTP overhead for video playback.

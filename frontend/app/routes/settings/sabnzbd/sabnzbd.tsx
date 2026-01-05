@@ -173,6 +173,21 @@ export function SabnzbdSettings({ config, setNewConfig }: SabnzbdSettingsProps) 
             </Form.Group>
             <hr />
             <Form.Group>
+                <Form.Label htmlFor="history-retention-hours-input">History Retention (Hours)</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isValidHistoryRetention(config["api.history-retention-hours"]) && styles.error])}
+                    type="text"
+                    id="history-retention-hours-input"
+                    aria-describedby="history-retention-hours-help"
+                    placeholder="24"
+                    value={config["api.history-retention-hours"]}
+                    onChange={e => setNewConfig({ ...config, "api.history-retention-hours": e.target.value })} />
+                <Form.Text id="history-retention-hours-help" muted>
+                    Successfully imported or failed history items will be automatically removed after this many hours. Default is 24 hours.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
                 <Form.Check
                     className={styles.input}
                     type="checkbox"
@@ -232,11 +247,13 @@ export function isSabnzbdSettingsUpdated(config: Record<string, string>, newConf
         || config["api.import-strategy"] !== newConfig["api.import-strategy"]
         || config["api.completed-downloads-dir"] !== newConfig["api.completed-downloads-dir"]
         || config["general.base-url"] !== newConfig["general.base-url"]
+        || config["api.history-retention-hours"] !== newConfig["api.history-retention-hours"]
 }
 
 export function isSabnzbdSettingsValid(newConfig: Record<string, string>) {
     return isValidCategories(newConfig["api.categories"])
-        && isValidQueueConnections(newConfig["api.max-queue-connections"]);
+        && isValidQueueConnections(newConfig["api.max-queue-connections"])
+        && isValidHistoryRetention(newConfig["api.history-retention-hours"]);
 }
 
 export function generateNewApiKey(): string {
@@ -256,4 +273,8 @@ function isAlphaNumericWithDashes(input: string): boolean {
 
 function isValidQueueConnections(maxQueueConnections: string): boolean {
     return maxQueueConnections === "" || isPositiveInteger(maxQueueConnections);
+}
+
+function isValidHistoryRetention(historyRetentionHours: string): boolean {
+    return historyRetentionHours === "" || isPositiveInteger(historyRetentionHours);
 }

@@ -103,6 +103,14 @@
     border-bottom: none;
 }
 
+.tableRow {
+    transition: background-color 0.2s ease;
+}
+
+.tableRow:hover {
+    background-color: rgba(255, 255, 255, 0.05);
+}
+
 .nameContainer {
     display: flex;
     flex-direction: column;
@@ -115,6 +123,21 @@
     font-size: 0.95em;
     line-height: 1.3;
     word-break: break-all;
+}
+
+.jobName {
+    font-weight: 600;
+    color: hsl(180, 7%, 85%);
+    font-size: 0.95em;
+    line-height: 1.3;
+    word-break: break-all;
+}
+
+.fileNameSmall {
+    font-size: 0.85em; /* Smaller than normal name */
+    color: hsl(180, 7%, 65%); /* Slightly dimmer */
+    word-break: break-all;
+    line-height: 1.3;
 }
 
 .path {

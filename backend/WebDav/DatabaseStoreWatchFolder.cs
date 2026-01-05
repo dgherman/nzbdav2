@@ -12,6 +12,8 @@ using NzbWebDAV.Queue;
 using NzbWebDAV.WebDav.Requests;
 using NzbWebDAV.Websocket;
 
+using NzbWebDAV.Services;
+
 namespace NzbWebDAV.WebDav;
 
 public class DatabaseStoreWatchFolder(
@@ -21,7 +23,8 @@ public class DatabaseStoreWatchFolder(
     ConfigManager configManager,
     UsenetStreamingClient usenetClient,
     QueueManager queueManager,
-    WebsocketManager websocketManager
+    WebsocketManager websocketManager,
+    NzbAnalysisService nzbAnalysisService
 ) : DatabaseStoreCollection(
     davDirectory,
     httpContext,
@@ -29,7 +32,8 @@ public class DatabaseStoreWatchFolder(
     configManager,
     usenetClient,
     queueManager,
-    websocketManager
+    websocketManager,
+    nzbAnalysisService
 )
 {
     protected override async Task<IStoreItem?> GetItemAsync(GetItemRequest request)
@@ -43,7 +47,7 @@ public class DatabaseStoreWatchFolder(
 
     protected override async Task<IStoreItem[]> GetAllItemsAsync(CancellationToken cancellationToken)
     {
-        return (await dbClient.GetQueueItems(null, 0, int.MaxValue, cancellationToken).ConfigureAwait(false))
+        return (await dbClient.GetQueueItems(null, 0, int.MaxValue, null, cancellationToken).ConfigureAwait(false))
             .Select(x => new DatabaseStoreQueueItem(x, dbClient))
             .Select(IStoreItem (x) => x)
             .ToArray();
@@ -53,7 +57,7 @@ public class DatabaseStoreWatchFolder(
     {
         var controller = new AddFileController(null!, dbClient, queueManager, configManager, websocketManager);
         using var streamReader = new StreamReader(request.Stream);
-        var nzbFileContents = await streamReader.ReadToEndAsync(request.CancellationToken).ConfigureAwait(false);
+        var nzbFileContents = await streamReader.ReadToEndAsync().ConfigureAwait(false);
         var addFileRequest = new AddFileRequest()
         {
             FileName = request.Name,

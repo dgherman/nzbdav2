@@ -1,0 +1,104 @@
+.container {
+    background-color: var(--bs-body-bg);
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+    padding: 1.5rem;
+}
+
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 1.5rem;
+}
+
+.title {
+    margin: 0;
+    font-size: 1.25rem;
+    font-weight: 600;
+}
+
+.count {
+    background-color: var(--bs-secondary-bg);
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.875rem;
+    font-weight: 500;
+}
+
+.emptyState {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem 1rem;
+    text-align: center;
+    background-color: var(--bs-tertiary-bg);
+    border-radius: 8px;
+    border: 1px dashed var(--bs-border-color);
+}
+
+.emptyIcon {
+    font-size: 2.5rem;
+    margin-bottom: 1rem;
+    opacity: 0.5;
+}
+
+.emptyTitle {
+    font-size: 1.125rem;
+    font-weight: 600;
+    margin-bottom: 0.5rem;
+}
+
+.emptyDescription {
+    color: var(--bs-secondary-color);
+    max-width: 400px;
+    font-size: 0.9rem;
+}
+
+.tableContainer {
+    overflow-x: auto;
+}
+
+.table {
+    margin-bottom: 0;
+}
+
+.table th {
+    font-weight: 600;
+    color: var(--bs-secondary-color);
+    font-size: 0.85rem;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    border-bottom-width: 1px;
+}
+
+.tableRow td {
+    vertical-align: middle;
+    padding: 1rem 0.75rem;
+}
+
+.name {
+    font-weight: 500;
+    color: var(--bs-body-color);
+}
+
+.fileNameSmall {
+    font-size: 0.85rem;
+    color: var(--bs-secondary-color);
+}
+
+.jobName {
+    font-weight: 600;
+    color: var(--bs-body-color);
+    margin-bottom: 0.1rem;
+}
+
+.itemContainer {
+    display: flex;
+    flex-direction: column;
+}
+
+.progressBadge {
+    min-width: 60px;
+}

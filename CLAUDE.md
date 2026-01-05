@@ -191,7 +191,9 @@ Log.Warning("  FEATURE: Database PRAGMA Optimizations (5-10x faster migrations)"
 
 **Database Location**
 - SQLite database: `{CONFIG_PATH}/db.sqlite`
+- Development/testing location: `/opt/docker_local/nzbdav/config/db.sqlite`
 - Managed by EF Core migrations
+- **IMPORTANT:** Run migrations before testing changes: `dotnet run -- --db-migration` (from backend directory)
 
 **Config Storage**
 - Settings stored in `ConfigItems` table
@@ -221,6 +223,33 @@ Log.Warning("  FEATURE: Database PRAGMA Optimizations (5-10x faster migrations)"
 - Used during health checks to repair missing segments
 - Validates and repairs damaged NZB content
 
+## Log Analysis
+
+**CRITICAL: Docker logs contain ANSI color codes**
+
+When analyzing Docker logs with grep, you MUST strip ANSI escape sequences first:
+
+```bash
+# WRONG - grep will match ANSI codes
+docker logs nzbdav 2>&1 | grep "some pattern"
+
+# CORRECT - strip ANSI codes first
+docker logs nzbdav 2>&1 | sed 's/\x1b\[[0-9;]*m//g' | grep "some pattern"
+
+# Or use --no-color if available
+docker logs --no-color nzbdav 2>&1 | grep "some pattern"
+```
+
+**Why this matters:**
+- ANSI codes like `[38;5;0242m` can interfere with grep patterns
+- Without stripping, searches for exact text may miss matches
+- Pattern matching becomes unreliable
+
+**Always strip ANSI codes when:**
+- Searching for specific log patterns
+- Counting occurrences
+- Extracting structured data from logs
+
 ## Testing Notes
 
 **Health Check Testing**
@@ -237,3 +266,85 @@ Log.Warning("  FEATURE: Database PRAGMA Optimizations (5-10x faster migrations)"
 - Upload NZB via `/queue` page or SABnzbd API
 - Monitor WebSocket messages for progress updates
 - Check history page for completion status and symlink paths
+
+## Performance Troubleshooting
+
+### Slow Download Speeds
+
+If experiencing slow download speeds (< 10 MB/s), check for these common issues:
+
+**1. Provider Timeouts**
+- **Symptom**: Logs show `[BufferedStream] Worker X timed out` or `Timeout in FetchSegmentsAsync`
+- **Root Cause**: Provider-level performance issues, NOT system-level problems
+  - **Verified**: Network connectivity, DNS resolution, CPU, memory, and Docker networking are all functioning normally
+  - **Actual cause**: Specific Usenet providers are slow, geographically distant, throttling, or under heavy load
+  - **Evidence**: Some providers work perfectly (0 timeouts) while others consistently timeout on the same segments
+- **Diagnosis**:
+  ```bash
+  # Check for timeout errors with elapsed time
+  docker logs nzbdav 2>&1 | grep "timed out" | tail -20
+
+  # Count timeouts by provider
+  docker logs nzbdav 2>&1 | grep "timed out" | grep -oP 'provider: \K[^)]+' | sort | uniq -c | sort -rn
+
+  # Check if timeouts hit the configured limit (e.g., 60s)
+  docker logs nzbdav 2>&1 | grep "after.*s \(Segment" | grep -oP 'after \K[0-9.]+' | sort -n | tail -10
+  ```
+- **Solutions**:
+  - **Increase operation timeout** (default 60s for segments):
+    ```sql
+    INSERT OR REPLACE INTO ConfigItems (ConfigName, ConfigValue)
+    VALUES ('usenet.operation-timeout', '180');  -- 3 minutes
+    ```
+  - **Disable problematic provider** temporarily via Settings > Usenet page
+  - **Reduce max connections** for slow providers (shifts capacity to faster providers)
+  - **Reorder providers** to prioritize faster ones in the provider configuration
+
+**2. Worker Cancellations**
+- **Symptom**: Logs show `[BufferedStream] Worker X canceled after processing Y segments`
+- **Expected behavior**:
+  - For multipart files: Workers may be canceled when seeking across RAR parts (cached for 30s)
+  - For sequential playback: Workers should complete all segments without cancellation
+- **Problem indicators**:
+  - Workers canceled after < 50 segments on sequential download
+  - Frequent "Workers have not completed after 2 minutes" warnings
+  - Cancellations with "Elapsed: < 1s" (immediate cancellations)
+- **Causes**:
+  - Provider timeouts (see #1 above)
+  - Client disconnecting/seeking frequently
+  - Stream cache not working (check CombinedStream code)
+
+**3. Provider Performance Analysis**
+- Check provider statistics for a specific file:
+  ```sql
+  SELECT ProviderIndex, SuccessfulSegments, FailedSegments,
+         ROUND(CAST(TotalBytes AS REAL) / TotalTimeMs * 1000 / 1024 / 1024, 2) as SpeedMBps
+  FROM NzbProviderStats
+  WHERE JobName LIKE '%YourFileName%'
+  ORDER BY ProviderIndex;
+  ```
+- **Good provider**: > 90% success rate, > 1.5 MB/s per connection
+- **Problem provider**: < 70% success rate, < 0.5 MB/s, or high timeout frequency
+
+**4. Configuration Tuning**
+- **Connections per stream** (Settings > WebDAV):
+  - Default: 25 concurrent connections
+  - Higher = faster but more memory usage
+  - Recommended range: 20-40 connections
+- **Stream buffer size** (Settings > WebDAV):
+  - Default: 50 segments (actual: Math.max(50, connections * 5))
+  - Each segment ~300-500 KB
+  - Increase for smoother playback on high-latency connections
+- **Provider max connections**:
+  - Total across all providers should be 150-250 for optimal performance
+  - Distribute based on provider reliability (more to faster providers)
+
+**5. Multipart File Performance**
+- **Stream caching**: CombinedStream caches up to 3 recently used parts for 30 seconds
+- **Sequential playback**: Should see zero cancellations, full buffer utilization
+- **Random seeking**: Expect occasional cache expiration cancellations (normal)
+- **Check cache effectiveness**:
+  ```bash
+  # Look for cache hits vs misses in debug logs
+  docker logs nzbdav 2>&1 | grep "CombinedStream\|cache"
+  ```

@@ -73,6 +73,12 @@ public class ArrClient(string host, string apiKey)
         return Get<ArrHistory>($"/history{query}");
     }
 
+    public Task<ArrHistory> GetRecentImportsAsync(int pageSize = 100)
+    {
+        // Fetch recent "DownloadFolderImported" events (Type 3)
+        return Get<ArrHistory>($"/history?page=1&pageSize={pageSize}&sortKey=date&sortDirection=descending&eventType={(int)ArrEventType.DownloadFolderImported}");
+    }
+
     public async Task<bool> MarkHistoryFailedAsync(int historyId)
     {
         var request = new HttpRequestMessage(HttpMethod.Post, GetRequestUri($"/history/failed/{historyId}"));

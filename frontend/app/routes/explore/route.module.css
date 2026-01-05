@@ -9,6 +9,77 @@
     position: absolute;
 }
 
+.search-form {
+    display: flex;
+    gap: 10px;
+    margin-top: 15px;
+    margin-bottom: 15px;
+}
+
+.search-input {
+    flex: 1;
+    padding: 12px 15px;
+    background-color: #002b36;
+    border: 1px solid #ffffff20;
+    border-radius: 10px;
+    color: #93a1a1;
+    font-size: 16px;
+    outline: none;
+}
+
+.search-input:focus {
+    border-color: #268bd2;
+    background-color: #073642;
+}
+
+.search-input::placeholder {
+    color: #586e75;
+    opacity: 0.8;
+}
+
+.search-button,
+.clear-button {
+    padding: 12px 20px;
+    background-color: #268bd2;
+    border: none;
+    border-radius: 10px;
+    color: #fdf6e3;
+    font-size: 16px;
+    cursor: pointer;
+    white-space: nowrap;
+}
+
+.search-button:hover,
+.clear-button:hover {
+    background-color: #2aa198;
+}
+
+.search-button:disabled {
+    background-color: #586e75;
+    cursor: not-allowed;
+}
+
+.clear-button {
+    background-color: #dc322f;
+}
+
+.clear-button:hover {
+    background-color: #cb4b16;
+}
+
+.no-results {
+    padding: 20px;
+    text-align: center;
+    color: #586e75;
+}
+
+.item-path {
+    font-size: 12px;
+    color: #586e75;
+    opacity: 0.6;
+    margin-top: 3px;
+}
+
 .item {
     padding: 15px;
     display: flex;

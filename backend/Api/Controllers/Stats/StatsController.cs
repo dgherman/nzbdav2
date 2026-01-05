@@ -65,10 +65,106 @@ public class StatsController(
     [HttpGet("connections")]
     public Task<IActionResult> GetActiveConnections()
     {
-        return ExecuteSafely(() =>
+        return ExecuteSafely(async () =>
         {
             var connections = streamingClient.GetActiveConnectionsByProvider();
-            return Task.FromResult<IActionResult>(Ok(connections));
+
+            // First pass: Extract all unique job names and paths
+            var allJobNames = new HashSet<string>();
+            var allPaths = new HashSet<string>();
+
+            foreach (var (_, contextList) in connections)
+            {
+                foreach (var context in contextList)
+                {
+                    if (string.IsNullOrEmpty(context.Details)) continue;
+
+                    var parts = context.Details.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                    if (parts.Length >= 3 && parts[0] == "content")
+                    {
+                        allJobNames.Add(parts[2]);
+                        allPaths.Add(context.Details);
+                        allPaths.Add("/" + context.Details); // Also try with leading slash
+                    }
+                }
+            }
+
+            // Single database query to get all relevant DavItems
+            var jobNamesList = allJobNames.ToList();
+            var pathsList = allPaths.ToList();
+
+            var davItems = await dbContext.Items
+                .AsNoTracking()
+                .Where(x => pathsList.Contains(x.Path) ||
+                           (x.Type == DavItem.ItemType.NzbFile && jobNamesList.Any(job => x.Path.Contains("/" + job + "/"))))
+                .Select(x => new { x.Id, x.Path })
+                .ToListAsync();
+
+            // Create lookup maps
+            var pathToIdMap = davItems.ToDictionary(x => x.Path, x => x.Id.ToString());
+            var jobNameToIdMap = new Dictionary<string, string>();
+            foreach (var item in davItems)
+            {
+                foreach (var jobName in jobNamesList)
+                {
+                    if (item.Path.Contains("/" + jobName + "/") && !jobNameToIdMap.ContainsKey(jobName))
+                    {
+                        jobNameToIdMap[jobName] = item.Id.ToString();
+                        break;
+                    }
+                }
+            }
+
+            // Second pass: Transform connections using the lookup maps
+            var transformed = new Dictionary<int, List<object>>();
+
+            foreach (var (providerIndex, contextList) in connections)
+            {
+                var transformedList = new List<object>();
+
+                foreach (var context in contextList)
+                {
+                    var fullPath = context.Details;
+                    string? jobName = null;
+                    string? davItemId = null;
+
+                    if (!string.IsNullOrEmpty(fullPath))
+                    {
+                        var parts = fullPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 3 && parts[0] == "content")
+                        {
+                            jobName = parts[2];
+
+                            // Try to get davItemId from lookup maps
+                            if (!pathToIdMap.TryGetValue(fullPath, out davItemId))
+                            {
+                                pathToIdMap.TryGetValue("/" + fullPath, out davItemId);
+                            }
+
+                            // If still not found, try job name lookup
+                            if (davItemId == null)
+                            {
+                                jobNameToIdMap.TryGetValue(jobName, out davItemId);
+                            }
+                        }
+                    }
+
+                    transformedList.Add(new
+                    {
+                        usageType = (int)context.UsageType,
+                        details = fullPath,
+                        jobName = jobName ?? fullPath,
+                        davItemId = davItemId,
+                        isBackup = context.IsBackup,
+                        isSecondary = context.IsSecondary,
+                        isImported = context.IsImported
+                    });
+                }
+
+                transformed[providerIndex] = transformedList;
+            }
+
+            return Ok(transformed);
         });
     }
 

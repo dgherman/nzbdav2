@@ -14,7 +14,7 @@ namespace NzbWebDAV.Par2Recovery.Packets
             Header = header;
         }
 
-        public async Task ReadAsync(Stream stream)
+        public async Task ReadAsync(Stream stream, CancellationToken cancellationToken = default)
         {
             // Determine the length of the body as the given packet length, minus the length of the header.
             var bodyLength = Header.PacketLength - (ulong)Marshal.SizeOf<Par2PacketHeader>();
@@ -29,7 +29,7 @@ namespace NzbWebDAV.Par2Recovery.Packets
 
             // Read the calculated number of bytes from the stream.
             var body = new byte[bodyLength];
-            await stream.ReadExactlyAsync(body.AsMemory(0, (int)bodyLength)).ConfigureAwait(false);
+            await stream.ReadExactlyAsync(body.AsMemory(0, (int)bodyLength), cancellationToken).ConfigureAwait(false);
 
             // Pass the body to the further implementation for parsing.
             ParseBody(body);

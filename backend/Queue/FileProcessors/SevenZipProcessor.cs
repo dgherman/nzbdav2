@@ -9,6 +9,7 @@ using NzbWebDAV.Queue.DeobfuscationSteps._3.GetFileInfos;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Utils;
 using SharpCompress.Common;
+using Serilog;
 
 namespace NzbWebDAV.Queue.FileProcessors;
 
@@ -35,32 +36,56 @@ public class SevenZipProcessor : BaseProcessor
 
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
-        var multipartFile = await GetMultipartFile().ConfigureAwait(false);
-        var usageContext = _ct.GetContext<ConnectionUsageContext>();
-        await using var stream = new MultipartFileStream(multipartFile, _client, usageContext);
-        var sevenZipEntries = await SevenZipUtil.GetSevenZipEntriesAsync(stream, _archivePassword, _ct).ConfigureAwait(false);
-        if (sevenZipEntries.Any(x => x.CompressionType != CompressionType.None))
-        {
-            const string message = "Only uncompressed 7z files are supported.";
-            throw new Unsupported7zCompressionMethodException(message);
-        }
+        var filename = _fileInfos.FirstOrDefault()?.FileName ?? "Unknown";
+        Log.Information("[SevenZipProcessor] Starting processing for {Filename}", filename);
 
-        if (sevenZipEntries.Any(x => x.IsEncrypted && x.IsSolid))
+        try
         {
-            // TODO: Add support for solid 7z archives
-            const string message = "Password-protected 7z archives cannot be solid.";
-            throw new NonRetryableDownloadException(message);
-        }
+            var multipartFile = await GetMultipartFile().ConfigureAwait(false);
+            var usageContext = _ct.GetContext<ConnectionUsageContext>();
+            await using var stream = new MultipartFileStream(multipartFile, _client, usageContext);
 
-        return new Result()
-        {
-            SevenZipFiles = sevenZipEntries.Select(x => new SevenZipFile()
+            // Use a specific timeout for header reading to prevent indefinite hangs
+            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(5));
+
+            var sevenZipEntries = await SevenZipUtil.GetSevenZipEntriesAsync(stream, _archivePassword, timeoutCts.Token).ConfigureAwait(false);
+            
+            Log.Information("[SevenZipProcessor] Successfully read 7z headers for {Filename}. Entries: {Count}", filename, sevenZipEntries.Count);
+
+            if (sevenZipEntries.Any(x => x.CompressionType != CompressionType.None))
             {
-                PathWithinArchive = x.PathWithinArchive,
-                DavMultipartFileMeta = GetDavMultipartFileMeta(x, multipartFile),
-                ReleaseDate = _fileInfos.First().ReleaseDate,
-            }).ToList(),
-        };
+                const string message = "Only uncompressed 7z files are supported.";
+                throw new Unsupported7zCompressionMethodException(message);
+            }
+
+            if (sevenZipEntries.Any(x => x.IsEncrypted && x.IsSolid))
+            {
+                // TODO: Add support for solid 7z archives
+                const string message = "Password-protected 7z archives cannot be solid.";
+                throw new NonRetryableDownloadException(message);
+            }
+
+            return new Result()
+            {
+                SevenZipFiles = sevenZipEntries.Select(x => new SevenZipFile()
+                {
+                    PathWithinArchive = x.PathWithinArchive,
+                    DavMultipartFileMeta = GetDavMultipartFileMeta(x, multipartFile),
+                    ReleaseDate = _fileInfos.First().ReleaseDate,
+                }).ToList(),
+            };
+        }
+        catch (OperationCanceledException) when (!_ct.IsCancellationRequested)
+        {
+            Log.Error("[SevenZipProcessor] Timed out reading 7z headers for {Filename}", filename);
+            throw new TimeoutException($"Timed out reading 7z headers for {filename}");
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[SevenZipProcessor] Failed to process {Filename}: {Error}", filename, ex.Message);
+            throw;
+        }
     }
 
     private async Task<MultipartFile> GetMultipartFile()

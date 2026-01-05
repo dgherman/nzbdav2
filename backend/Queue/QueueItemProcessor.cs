@@ -8,6 +8,7 @@ using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Queue.DeobfuscationSteps._1.FetchFirstSegment;
 using NzbWebDAV.Queue.DeobfuscationSteps._2.GetPar2FileDescriptors;
@@ -37,7 +38,8 @@ public class QueueItemProcessor(
 {
     public async Task ProcessAsync()
     {
-        Log.Information("[Queue] Starting processing for {JobName} ({Id})", queueItem.JobName, queueItem.Id);
+        Log.Warning("!!! DEBUG: QueueItemProcessor STARTING for {JobName} ({Id}) !!!", queueItem.JobName, queueItem.Id);
+        Log.Information("[QueueItemProcessor] Starting processing for {JobName} ({Id})", queueItem.JobName, queueItem.Id);
         // initialize
         var startTime = DateTime.Now;
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Downloading");
@@ -45,15 +47,30 @@ public class QueueItemProcessor(
         // process the job
         try
         {
+            Log.Debug("[QueueItemProcessor] Calling ProcessQueueItemAsync for {JobName}", queueItem.JobName);
             await ProcessQueueItemAsync(startTime).ConfigureAwait(false);
+            Log.Information("[QueueItemProcessor] Successfully completed processing for {JobName}", queueItem.JobName);
         }
 
         // When a queue-item is removed while processing,
         // then we need to clear any db changes and finish early.
         catch (Exception e) when (e.GetBaseException() is OperationCanceledException or TaskCanceledException)
         {
-            Log.Information("Processing of queue item {JobName} was cancelled.", queueItem.JobName);
-            // No need to clear change tracker as we use short-lived contexts now
+            try
+            {
+                Log.Warning("[QueueItemProcessor] Processing of queue item {JobName} ({Id}) was cancelled. Exception: {Exception}",
+                    queueItem.JobName, queueItem.Id, e.GetBaseException().Message);
+                using var scope = scopeFactory.CreateScope();
+                var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+                Log.Debug("[QueueItemProcessor] Marking cancelled item {JobName} as completed in history", queueItem.JobName);
+                await MarkQueueItemCompleted(dbClient, startTime, error: "Processing was cancelled (timeout or manual cancellation)", failureReason: GetFailureReason(e)).ConfigureAwait(false);
+                Log.Information("[QueueItemProcessor] Successfully moved cancelled item {JobName} to history", queueItem.JobName);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[QueueItemProcessor] Failed to mark cancelled queue item {JobName} as completed: {Error}",
+                    queueItem.JobName, ex.Message);
+            }
         }
 
         // when a retryable error is encountered
@@ -64,7 +81,8 @@ public class QueueItemProcessor(
         {
             try
             {
-                Log.Error("Failed to process job, {JobName} -- {Message}", queueItem.JobName, e.Message);
+                Log.Warning("[QueueItemProcessor] Retryable error processing job {JobName} ({Id}): {Message}. Will retry in 1 minute.",
+                    queueItem.JobName, queueItem.Id, e.Message);
                 using var scope = scopeFactory.CreateScope();
                 var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
                 
@@ -80,12 +98,17 @@ public class QueueItemProcessor(
                 {
                     item.PauseUntil = DateTime.Now.AddMinutes(1);
                     await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                    Log.Debug("[QueueItemProcessor] Set PauseUntil to {PauseUntil} for retryable error", item.PauseUntil);
+                }
+                else
+                {
+                    Log.Warning("[QueueItemProcessor] Could not find queue item {Id} to set PauseUntil", queueItem.Id);
                 }
                 _ = websocketManager.SendMessage(WebsocketTopic.QueueItemStatus, $"{queueItem.Id}|Queued");
             }
             catch (Exception ex)
             {
-                Log.Error(ex, ex.Message);
+                Log.Error(ex, "[QueueItemProcessor] Error handling retryable exception: {Error}", ex.Message);
             }
         }
 
@@ -96,13 +119,18 @@ public class QueueItemProcessor(
         {
             try
             {
+                Log.Error(e, "[QueueItemProcessor] Fatal error processing job {JobName} ({Id}): {Message}. Moving to history as failed.",
+                    queueItem.JobName, queueItem.Id, e.Message);
                 using var scope = scopeFactory.CreateScope();
                 var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
-                await MarkQueueItemCompleted(dbClient, startTime, error: e.Message).ConfigureAwait(false);
+                Log.Debug("[QueueItemProcessor] Marking failed item {JobName} as completed in history", queueItem.JobName);
+                await MarkQueueItemCompleted(dbClient, startTime, error: e.Message, failureReason: GetFailureReason(e)).ConfigureAwait(false);
+                Log.Information("[QueueItemProcessor] Successfully moved failed item {JobName} to history", queueItem.JobName);
             }
             catch (Exception ex)
             {
-                Log.Error(ex, "Failed to mark queue item as completed");
+                Log.Error(ex, "[QueueItemProcessor] Failed to mark queue item {JobName} as completed: {Error}",
+                    queueItem.JobName, ex.Message);
             }
         }
     }
@@ -125,7 +153,7 @@ public class QueueItemProcessor(
             if (isDuplicateNzb && duplicateNzbBehavior == "mark-failed")
             {
                 const string error = "Duplicate nzb: the download folder for this nzb already exists.";
-                await MarkQueueItemCompleted(dbClient, startTime, error, () => Task.FromResult(existingMountFolder)).ConfigureAwait(false);
+                await MarkQueueItemCompleted(dbClient, startTime, error, "Duplicate NZB", () => Task.FromResult(existingMountFolder)).ConfigureAwait(false);
                 return;
             }
         }
@@ -137,33 +165,68 @@ public class QueueItemProcessor(
         using var _1 = ct.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Queue, queueItem.JobName));
 
         // read the nzb document
+        Log.Debug("[QueueItemProcessor] Parsing NZB document for {JobName}. NZB size: {NzbSizeBytes} bytes",
+            queueItem.JobName, queueNzbContents.NzbContents.Length);
+        var parseStartTime = DateTime.UtcNow;
         var documentBytes = Encoding.UTF8.GetBytes(queueNzbContents.NzbContents);
         using var stream = new MemoryStream(documentBytes);
         var nzb = await NzbDocument.LoadAsync(stream).ConfigureAwait(false);
         var archivePassword = nzb.MetaData.GetValueOrDefault("password")?.FirstOrDefault();
         var nzbFiles = nzb.Files.Where(x => x.Segments.Count > 0).ToList();
+        var parseElapsed = DateTime.UtcNow - parseStartTime;
+        Log.Information("[QueueItemProcessor] Successfully parsed NZB for {JobName}. Files: {FileCount}, Total segments: {SegmentCount}, Elapsed: {ElapsedMs}ms",
+            queueItem.JobName, nzbFiles.Count, nzbFiles.Sum(f => f.Segments.Count), parseElapsed.TotalMilliseconds);
+
+        if (archivePassword != null)
+        {
+            Log.Information("[QueueItemProcessor] Archive password detected for {JobName}", queueItem.JobName);
+        }
 
         // step 0 -- perform article existence pre-check against cache
         // https://github.com/nzbdav-dev/nzbdav/issues/101
+        Log.Debug("[QueueItemProcessor] Step 0: Pre-checking article existence against cache for {JobName}...", queueItem.JobName);
         var articlesToPrecheck = nzbFiles.SelectMany(x => x.Segments).Select(x => x.MessageId.Value);
         healthCheckService.CheckCachedMissingSegmentIds(articlesToPrecheck);
+        Log.Debug("[QueueItemProcessor] Step 0 complete: Pre-checked {ArticleCount} articles for {JobName}", articlesToPrecheck.Count(), queueItem.JobName);
 
         // step 1 -- get name and size of each nzb file
+        Log.Information("[QueueItemProcessor] Step 1: Starting deobfuscation for {JobName}. Processing {FileCount} files (progress 0-50%)...",
+            queueItem.JobName, nzbFiles.Count);
+        var step1StartTime = DateTime.UtcNow;
         var part1Progress = progress
             .Scale(50, 100)
             .ToPercentage(nzbFiles.Count);
+
+        Log.Debug("[QueueItemProcessor] Step 1a: Fetching first segments for {FileCount} files in {JobName}...", nzbFiles.Count, queueItem.JobName);
         var segments = await FetchFirstSegmentsStep.FetchFirstSegments(
             nzbFiles, usenetClient, configManager, ct, part1Progress).ConfigureAwait(false);
+        Log.Information("[QueueItemProcessor] Step 1a complete: Fetched {SegmentCount} first segments for {JobName}",
+            segments.Count, queueItem.JobName);
+
+        Log.Debug("[QueueItemProcessor] Step 1b: Extracting Par2 file descriptors for {JobName}...", queueItem.JobName);
         var par2FileDescriptors = await GetPar2FileDescriptorsStep.GetPar2FileDescriptors(
             segments, usenetClient, ct).ConfigureAwait(false);
+        Log.Information("[QueueItemProcessor] Step 1b complete: Found {Par2Count} Par2 file descriptors for {JobName}",
+            par2FileDescriptors.Count, queueItem.JobName);
+
+        Log.Debug("[QueueItemProcessor] Step 1c: Building file info objects for {JobName}...", queueItem.JobName);
         var fileInfos = GetFileInfosStep.GetFileInfos(
             segments, par2FileDescriptors);
+        var step1Elapsed = DateTime.UtcNow - step1StartTime;
+        Log.Information("[QueueItemProcessor] Step 1 complete: Deobfuscation finished for {JobName}. FileInfos: {FileInfoCount}, Elapsed: {ElapsedSeconds}s",
+            queueItem.JobName, fileInfos.Count, step1Elapsed.TotalSeconds);
 
         // step 1b -- batch fetch file sizes for files without Par2 descriptors
         var filesWithoutSize = fileInfos.Where(f => f.FileSize == null).Select(f => f.NzbFile).ToList();
         if (filesWithoutSize.Count > 0)
         {
+            Log.Debug("[QueueItemProcessor] Step 1d: Fetching file sizes for {FileCount} files without Par2 descriptors in {JobName}...",
+                filesWithoutSize.Count, queueItem.JobName);
+            var fileSizeStartTime = DateTime.UtcNow;
             var fileSizes = await usenetClient.GetFileSizesBatchAsync(filesWithoutSize, concurrency, ct).ConfigureAwait(false);
+            var fileSizeElapsed = DateTime.UtcNow - fileSizeStartTime;
+            Log.Information("[QueueItemProcessor] Step 1d complete: Fetched {FileCount} file sizes for {JobName}. Elapsed: {ElapsedSeconds}s",
+                fileSizes.Count, queueItem.JobName, fileSizeElapsed.TotalSeconds);
             foreach (var fileInfo in fileInfos.Where(f => f.FileSize == null))
             {
                 if (fileSizes.TryGetValue(fileInfo.NzbFile, out var size))
@@ -174,15 +237,24 @@ public class QueueItemProcessor(
         }
 
         // step 2 -- perform file processing
+        Log.Information("[QueueItemProcessor] Step 2: Creating file processors for {JobName}. FileInfos: {FileInfoCount}",
+            queueItem.JobName, fileInfos.Count);
         var fileProcessors = GetFileProcessors(fileInfos, archivePassword).ToList();
+        Log.Information("[QueueItemProcessor] Step 2: Created {ProcessorCount} file processors for {JobName} (progress 50-100%)",
+            fileProcessors.Count, queueItem.JobName);
 
         // Safe limit: totalConnections / maxConnectionsPerFile = 145 / 5 = 29
         var fileConcurrency = Math.Max(1, Math.Min(concurrency, providerConfig.TotalPooledConnections / 5));
+        Log.Debug("[QueueItemProcessor] Step 2: File processing concurrency: {FileConcurrency} for {JobName}", fileConcurrency, queueItem.JobName);
 
         var part2Progress = progress
             .Offset(50)
             .Scale(50, 100)
             .ToPercentage(fileProcessors.Count);
+
+        Log.Information("[QueueItemProcessor] Step 2: Starting file processing for {ProcessorCount} processors in {JobName}...",
+            fileProcessors.Count, queueItem.JobName);
+        var step2StartTime = DateTime.UtcNow;
         var fileProcessingResultsAll = await fileProcessors
             .Select(x => x!.ProcessAsync())
             .WithConcurrencyAsync(fileConcurrency)
@@ -191,6 +263,9 @@ public class QueueItemProcessor(
             .Where(x => x is not null)
             .Select(x => x!)
             .ToList();
+        var step2Elapsed = DateTime.UtcNow - step2StartTime;
+        Log.Information("[QueueItemProcessor] Step 2 complete: File processing finished for {JobName}. Results: {ResultCount}, Elapsed: {ElapsedSeconds}s",
+            queueItem.JobName, fileProcessingResults.Count, step2Elapsed.TotalSeconds);
 
         // step 3 -- Optionally check full article existence
         var checkedFullHealth = false;
@@ -200,42 +275,68 @@ public class QueueItemProcessor(
                 .Where(x => x.IsRar || FilenameUtil.IsImportantFileType(x.FileName))
                 .SelectMany(x => x.NzbFile.GetSegmentIds())
                 .ToList();
+            Log.Information("[QueueItemProcessor] Step 3: Starting article existence check for {JobName}. Articles: {ArticleCount} (progress 100+)",
+                queueItem.JobName, articlesToCheck.Count);
+            var step3StartTime = DateTime.UtcNow;
             var part3Progress = progress
                 .Offset(100)
                 .ToPercentage(articlesToCheck.Count);
             await usenetClient.CheckAllSegmentsAsync(articlesToCheck, concurrency, part3Progress, ct).ConfigureAwait(false);
+            var step3Elapsed = DateTime.UtcNow - step3StartTime;
+            Log.Information("[QueueItemProcessor] Step 3 complete: Article existence check finished for {JobName}. Elapsed: {ElapsedSeconds}s",
+                queueItem.JobName, step3Elapsed.TotalSeconds);
             checkedFullHealth = true;
+        }
+        else
+        {
+            Log.Debug("[QueueItemProcessor] Step 3: Skipping article existence check (disabled in config) for {JobName}", queueItem.JobName);
         }
 
         // Scope 2: Final DB update
+        Log.Information("[QueueItemProcessor] Step 4: Starting database update for {JobName}...", queueItem.JobName);
+        var step4StartTime = DateTime.UtcNow;
         using (var scope = scopeFactory.CreateScope())
         {
             var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
             // update the database
-            await MarkQueueItemCompleted(dbClient, startTime, error: null, async () =>
+            await MarkQueueItemCompleted(dbClient, startTime, error: null, failureReason: null, databaseOperations: async () =>
             {
+                Log.Debug("[QueueItemProcessor] Step 4a: Creating category and mount folders for {JobName}...", queueItem.JobName);
                 var categoryFolder = await GetOrCreateCategoryFolder(dbClient).ConfigureAwait(false);
                 var mountFolder = await CreateMountFolder(dbClient, categoryFolder, existingMountFolder, duplicateNzbBehavior).ConfigureAwait(false);
+
+                Log.Debug("[QueueItemProcessor] Step 4b: Running aggregators for {JobName}...", queueItem.JobName);
                 new RarAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
                 new FileAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
                 new SevenZipAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
                 new MultipartMkvAggregator(dbClient, mountFolder, checkedFullHealth).UpdateDatabase(fileProcessingResults);
 
+                Log.Debug("[QueueItemProcessor] Step 4c: Running post-processors for {JobName}...", queueItem.JobName);
                 // post-processing
                 new RenameDuplicatesPostProcessor(dbClient).RenameDuplicates();
                 new BlacklistedExtensionPostProcessor(configManager, dbClient).RemoveBlacklistedExtensions();
 
                 // validate video files found
                 if (configManager.IsEnsureImportableVideoEnabled())
+                {
+                    Log.Debug("[QueueItemProcessor] Step 4d: Validating importable video for {JobName}...", queueItem.JobName);
                     new EnsureImportableVideoValidator(dbClient).ThrowIfValidationFails();
+                }
 
                 // create strm files, if necessary
                 if (configManager.GetImportStrategy() == "strm")
+                {
+                    Log.Debug("[QueueItemProcessor] Step 4e: Creating STRM files for {JobName}...", queueItem.JobName);
                     await new CreateStrmFilesPostProcessor(configManager, dbClient).CreateStrmFilesAsync().ConfigureAwait(false);
+                }
 
+                Log.Debug("[QueueItemProcessor] Step 4f: All database operations complete for {JobName}", queueItem.JobName);
                 return mountFolder;
             }).ConfigureAwait(false);
         }
+        var step4Elapsed = DateTime.UtcNow - step4StartTime;
+        Log.Information("[QueueItemProcessor] Step 4 complete: Database update finished for {JobName}. Elapsed: {ElapsedSeconds}s",
+            queueItem.JobName, step4Elapsed.TotalSeconds);
     }
 
     private IEnumerable<BaseProcessor> GetFileProcessors
@@ -244,36 +345,65 @@ public class QueueItemProcessor(
         string? archivePassword
     )
     {
+        Log.Debug("[GetFileProcessors] Processing {FileInfoCount} file infos", fileInfos.Count);
         var maxConnections = configManager.GetMaxQueueConnections();
         var groups = fileInfos
             .DistinctBy(x => x.FileName)
             .GroupBy(GetGroup);
 
+        var groupList = groups.ToList();
+        Log.Information("[GetFileProcessors] Grouped files into {GroupCount} groups: {GroupSummary}",
+            groupList.Count,
+            string.Join(", ", groupList.Select(g => $"{g.Key}={g.Count()}")));
+
         // Calculate adaptive concurrency per RAR to avoid connection pool exhaustion
         // WithConcurrencyAsync will run multiple RARs in parallel, so we need to limit per-RAR connections
-        var rarCount = groups.Count(g => g.Key == "rar");
+        var rarCount = groupList.Count(g => g.Key == "rar");
         var connectionsPerRar = rarCount > 0
             ? Math.Max(1, Math.Min(5, maxConnections / Math.Max(1, rarCount / 3)))
             : 1;
-        Log.Debug("[Queue] Adaptive RAR concurrency: {ConnectionsPerRar} connections per RAR ({RarCount} RAR files, {MaxConnections} total connections)", connectionsPerRar, rarCount, maxConnections);
+        Log.Debug("[GetFileProcessors] Adaptive RAR concurrency: {ConnectionsPerRar} connections per RAR ({RarCount} RAR files, {MaxConnections} total connections)", connectionsPerRar, rarCount, maxConnections);
 
-        foreach (var group in groups)
+        foreach (var group in groupList)
         {
-            Log.Debug("[Queue] Processing group '{GroupKey}' with {FileCount} files. First file: {FirstFileName}", group.Key, group.Count(), group.First().FileName);
+            Log.Debug("[GetFileProcessors] Processing group '{GroupKey}' with {FileCount} files. First file: {FirstFileName}",
+                group.Key, group.Count(), group.First().FileName);
 
             if (group.Key == "7z")
+            {
+                Log.Debug("[GetFileProcessors] Creating SevenZipProcessor for {FileCount} files", group.Count());
                 yield return new SevenZipProcessor(group.ToList(), usenetClient, archivePassword, ct);
+            }
 
             else if (group.Key == "rar")
-                foreach (var fileInfo in group)
+            {
+                var rarFiles = group.ToList();
+                Log.Debug("[GetFileProcessors] Creating {ProcessorCount} RarProcessors", rarFiles.Count);
+                foreach (var fileInfo in rarFiles)
+                {
+                    Log.Debug("[GetFileProcessors] Creating RarProcessor for: {FileName} (Size: {FileSize})",
+                        fileInfo.FileName, fileInfo.FileSize);
                     yield return new RarProcessor(fileInfo, usenetClient, archivePassword, ct, connectionsPerRar);
+                }
+            }
 
             else if (group.Key == "multipart-mkv")
+            {
+                Log.Debug("[GetFileProcessors] Creating MultipartMkvProcessor for {FileCount} files", group.Count());
                 yield return new MultipartMkvProcessor(group.ToList(), usenetClient, ct);
+            }
 
             else if (group.Key == "other")
-                foreach (var fileInfo in group)
+            {
+                var otherFiles = group.ToList();
+                Log.Debug("[GetFileProcessors] Creating {ProcessorCount} FileProcessors", otherFiles.Count);
+                foreach (var fileInfo in otherFiles)
+                {
+                    Log.Debug("[GetFileProcessors] Creating FileProcessor for: {FileName} (Size: {FileSize})",
+                        fileInfo.FileName, fileInfo.FileSize);
                     yield return new FileProcessor(fileInfo, usenetClient, ct);
+                }
+            }
         }
 
         yield break;
@@ -368,12 +498,14 @@ public class QueueItemProcessor(
         throw new Exception("Duplicate nzb with more than 100 existing copies.");
     }
 
-    private HistoryItem CreateHistoryItem(DavItem? mountFolder, DateTime jobStartTime, string? errorMessage = null)
+    private HistoryItem CreateHistoryItem(DavItem? mountFolder, DateTime jobStartTime, string? errorMessage = null, string? failureReason = null)
     {
+        var now = DateTime.Now;
         return new HistoryItem()
         {
             Id = queueItem.Id,
-            CreatedAt = DateTime.Now,
+            CreatedAt = now,
+            CompletedAt = now,
             FileName = queueItem.FileName,
             JobName = queueItem.JobName,
             Category = queueItem.Category,
@@ -384,6 +516,23 @@ public class QueueItemProcessor(
             DownloadTimeSeconds = (int)(DateTime.Now - jobStartTime).TotalSeconds,
             FailMessage = errorMessage,
             DownloadDirId = mountFolder?.Id,
+            NzbContents = queueNzbContents.NzbContents,
+            FailureReason = failureReason,
+        };
+    }
+
+    private static string GetFailureReason(Exception exception)
+    {
+        var baseException = exception.GetBaseException();
+        return baseException switch
+        {
+            UsenetArticleNotFoundException => "Missing Articles",
+            OperationCanceledException or TaskCanceledException => "Timeout/Cancelled",
+            CouldNotConnectToUsenetException or CouldNotLoginToUsenetException => "Connection Error",
+            PasswordProtectedRarException or PasswordProtected7zException => "Password Protected",
+            UnsupportedRarCompressionMethodException or Unsupported7zCompressionMethodException => "Unsupported Format",
+            NoVideoFilesFoundException => "No Video Files",
+            _ => "Unknown Error"
         };
     }
 
@@ -392,22 +541,60 @@ public class QueueItemProcessor(
         DavDatabaseClient dbClient,
         DateTime startTime,
         string? error = null,
+        string? failureReason = null,
         Func<Task<DavItem?>>? databaseOperations = null
     )
     {
+        Log.Information("[QueueItemProcessor] MarkQueueItemCompleted called for {JobName} ({Id}). Error: {Error}",
+            queueItem.JobName, queueItem.Id, error ?? "None");
+
         dbClient.Ctx.ChangeTracker.Clear();
         var mountFolder = databaseOperations != null ? await databaseOperations.Invoke().ConfigureAwait(false) : null;
-        var historyItem = CreateHistoryItem(mountFolder, startTime, error);
+        var historyItem = CreateHistoryItem(mountFolder, startTime, error, failureReason);
         var historySlot = GetHistoryResponse.HistorySlot.FromHistoryItem(historyItem, mountFolder, configManager);
-        
+
+        Log.Debug("[QueueItemProcessor] Removing queue item {Id} from QueueItems table", queueItem.Id);
         // Ensure queueItem is attached to this context before removing
         dbClient.Ctx.QueueItems.Entry(queueItem).State = EntityState.Deleted;
-        
+
+        Log.Debug("[QueueItemProcessor] Adding history item {Id} to HistoryItems table. Status: {Status}",
+            historyItem.Id, historyItem.DownloadStatus);
         dbClient.Ctx.HistoryItems.Add(historyItem);
+
+        Log.Debug("[QueueItemProcessor] Saving changes to database...");
         await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+        Log.Information("[QueueItemProcessor] Successfully moved queue item {JobName} ({Id}) to history. Status: {Status}, CompletedAt: {CompletedAt}",
+            queueItem.JobName, historyItem.Id, historyItem.DownloadStatus, historyItem.CompletedAt);
+
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemRemoved, queueItem.Id.ToString());
         _ = websocketManager.SendMessage(WebsocketTopic.HistoryItemAdded, historySlot.ToJson());
         _ = RefreshMonitoredDownloads();
+
+        // All history items (including failed) are now retained for 1 hour via ArrMonitoringService cleanup
+    }
+
+    private async Task RemoveFailedHistoryItemAfterDelay(Guid id, TimeSpan delay)
+    {
+        try
+        {
+            Log.Information("[QueueItemProcessor] Scheduling auto-removal of failed item {Id} in {Minutes} minutes", id, delay.TotalMinutes);
+            await Task.Delay(delay, CancellationToken.None).ConfigureAwait(false);
+
+            using var scope = scopeFactory.CreateScope();
+            var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
+            Log.Information("[QueueItemProcessor] Auto-removing failed item {Id}", id);
+            
+            // Remove the item
+            await dbClient.RemoveHistoryItemsAsync([id], true, CancellationToken.None).ConfigureAwait(false);
+            await dbClient.SaveChanges(CancellationToken.None).ConfigureAwait(false);
+            
+            // Notify frontend
+            _ = websocketManager.SendMessage(WebsocketTopic.HistoryItemRemoved, id.ToString());
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[QueueItemProcessor] Failed to auto-remove history item {Id}", id);
+        }
     }
 
     private async Task RefreshMonitoredDownloads()

@@ -1,7 +1,7 @@
 ﻿using Microsoft.Extensions.Caching.Memory;
 using NzbWebDAV.Streams;
 using Usenet.Nzb;
-using Usenet.Yenc;
+using UsenetSharp.Models;
 
 namespace NzbWebDAV.Clients.Usenet;
 
@@ -26,7 +26,7 @@ public class CachingNntpClient(INntpClient client, MemoryCache cache) : Wrapping
         return stream;
     }
 
-    public override async Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken ct)
+    public override async Task<UsenetYencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken ct)
     {
         var cacheKey = segmentId;
         return (await cache.GetOrCreateAsync(cacheKey, cacheEntry =>

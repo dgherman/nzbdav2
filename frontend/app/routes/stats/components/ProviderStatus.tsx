@@ -1,5 +1,8 @@
 import { Card, Row, Col, Table, Badge } from "react-bootstrap";
+import { useState, useCallback } from "react";
 import type { ProviderBandwidthSnapshot, ConnectionUsageContext } from "~/clients/backend-client.server";
+import type { FileDetails } from "~/types/file-details";
+import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
 
 interface Props {
     bandwidth: ProviderBandwidthSnapshot[];
@@ -13,7 +16,8 @@ function getTypeLabel(type: number) {
         2: "Stream",
         3: "Health",
         4: "Repair",
-        5: "Buffer"
+        5: "Buffer",
+        6: "Analysis"
     };
     return map[type] || "Unknown";
 }
@@ -25,17 +29,63 @@ function getTypeColor(type: number) {
         2: "success",
         3: "warning",
         4: "danger",
-        5: "primary"
+        5: "primary",
+        6: "light"
     };
     return map[type] || "secondary";
 }
 
 export function ProviderStatus({ bandwidth, connections }: Props) {
+    const [showDetailsModal, setShowDetailsModal] = useState(false);
+    const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
+    const [loadingFileDetails, setLoadingFileDetails] = useState(false);
+
     // Get all provider indices
     const providerIndices = new Set([
         ...bandwidth.map(b => b.providerIndex),
         ...Object.keys(connections).map(Number)
     ]);
+
+    const onFileClick = useCallback(async (davItemId: string) => {
+        setShowDetailsModal(true);
+        setLoadingFileDetails(true);
+        setSelectedFileDetails(null);
+
+        try {
+            const response = await fetch(`/api/file-details/${davItemId}`);
+            if (response.ok) {
+                const fileDetails = await response.json();
+                setSelectedFileDetails(fileDetails);
+            } else {
+                console.error('Failed to fetch file details:', await response.text());
+            }
+        } catch (error) {
+            console.error('Error fetching file details:', error);
+        } finally {
+            setLoadingFileDetails(false);
+        }
+    }, []);
+
+    const onHideDetailsModal = useCallback(() => {
+        setShowDetailsModal(false);
+        setSelectedFileDetails(null);
+    }, []);
+
+    const onResetFileStats = useCallback(async (jobName: string) => {
+        try {
+            const url = `/api/reset-provider-stats?jobName=${encodeURIComponent(jobName)}`;
+            const response = await fetch(url, { method: 'POST' });
+            if (response.ok) {
+                setSelectedFileDetails(prev => prev ? { ...prev, providerStats: [] } : null);
+                alert('Provider statistics for this file have been reset successfully.');
+            } else {
+                alert('Failed to reset provider statistics.');
+            }
+        } catch (error) {
+            console.error('Error resetting provider stats:', error);
+            alert('An error occurred while resetting provider statistics.');
+        }
+    }, []);
 
     const formatSpeed = (bytesPerSec: number) => {
         if (bytesPerSec === 0) return "0 B/s";
@@ -59,12 +109,12 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                     const bw = bandwidth.find(b => b.providerIndex === index);
                     const conns = connections[index] || [];
                     
-                    // Group connections by type and details
-                    const groupedConns: { usageType: number; details: string | null; isBackup?: boolean; isSecondary?: boolean; count: number }[] = [];
+                    // Group connections by type and jobName
+                    const groupedConns: { usageType: number; details: string | null; jobName?: string | null; davItemId?: string | null; isBackup?: boolean; isSecondary?: boolean; count: number }[] = [];
                     const connMap = new Map<string, number>();
 
                     for (const c of conns) {
-                        const key = `${c.usageType}|${c.details || ""}|${c.isBackup}|${c.isSecondary}`;
+                        const key = `${c.usageType}|${c.jobName || c.details || ""}|${c.isBackup}|${c.isSecondary}`;
                         if (connMap.has(key)) {
                             groupedConns[connMap.get(key)!].count++;
                         } else {
@@ -118,9 +168,24 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                                                 Retry
                                                             </Badge>
                                                         )}
-                                                        <span style={{fontSize: '0.8rem', wordBreak: 'break-word'}}>
-                                                            {c.details || "No details"}
-                                                        </span>
+                                                        {c.davItemId ? (
+                                                            <span
+                                                                onClick={() => onFileClick(c.davItemId!)}
+                                                                style={{
+                                                                    fontSize: '0.8rem',
+                                                                    wordBreak: 'break-word',
+                                                                    cursor: 'pointer',
+                                                                    textDecoration: 'underline',
+                                                                    color: '#6ea8fe'
+                                                                }}
+                                                            >
+                                                                {c.jobName || c.details || "No details"}
+                                                            </span>
+                                                        ) : (
+                                                            <span style={{fontSize: '0.8rem', wordBreak: 'break-word'}}>
+                                                                {c.jobName || c.details || "No details"}
+                                                            </span>
+                                                        )}
                                                     </div>
                                                 ))}
                                                 {groupedConns.length > 10 && (
@@ -137,6 +202,13 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                     );
                 })}
             </Row>
+            <FileDetailsModal
+                show={showDetailsModal}
+                onHide={onHideDetailsModal}
+                fileDetails={selectedFileDetails}
+                loading={loadingFileDetails}
+                onResetStats={onResetFileStats}
+            />
         </div>
     );
 }

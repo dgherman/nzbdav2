@@ -13,11 +13,9 @@ public class DavMultipartFileStream(
     ConnectionUsageContext? usageContext = null
 ) : Stream
 {
-    private long _position = 0;
     private CombinedStream? _innerStream;
     private bool _disposed;
     private readonly ConnectionUsageContext _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
-    private CancellationTokenSource? _streamCts;
 
 
     public override void Flush()
@@ -32,22 +30,18 @@ public class DavMultipartFileStream(
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
-        if (_innerStream == null) _innerStream = GetFileStream(_position, cancellationToken);
+        if (_innerStream == null) _innerStream = GetCombinedStream();
         var read = await _innerStream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
-        _position += read;
         return read;
     }
 
     public override long Seek(long offset, SeekOrigin origin)
     {
-        var absoluteOffset = origin == SeekOrigin.Begin ? offset
-            : origin == SeekOrigin.Current ? _position + offset
-            : throw new InvalidOperationException("SeekOrigin must be Begin or Current.");
-        if (_position == absoluteOffset) return _position;
-        _position = absoluteOffset;
-        _innerStream?.Dispose();
-        _innerStream = null;
-        return _position;
+        // Initialize stream if not already created
+        if (_innerStream == null) _innerStream = GetCombinedStream();
+
+        // Use CombinedStream's built-in seeking
+        return _innerStream.Seek(offset, origin);
     }
 
     public override void SetLength(long value)
@@ -67,56 +61,46 @@ public class DavMultipartFileStream(
 
     public override long Position
     {
-        get => _position;
+        get => _innerStream?.Position ?? 0;
         set => Seek(value, SeekOrigin.Begin);
     }
 
-
-    private (int filePartIndex, long filePartOffset) SeekFilePart(long byteOffset)
+    private CombinedStream GetCombinedStream()
     {
-        long offset = 0;
-        for (var i = 0; i < fileParts.Length; i++)
+        // Build list of stream factories with their lengths for seekable CombinedStream
+        var parts = new List<(Func<Task<Stream>> StreamFactory, long Length)>();
+
+        foreach (var filePart in fileParts)
         {
-            var filePart = fileParts[i];
-            var nextOffset = offset + filePart.FilePartByteRange.Count;
-            if (byteOffset < nextOffset)
-                return (i, offset);
-            offset = nextOffset;
+            var capturedPart = filePart; // Capture for closure
+            parts.Add((
+                StreamFactory: () =>
+                {
+                    // Use buffered streaming with stream caching for optimal performance
+                    // CombinedStream now caches recently used parts to avoid re-creating buffers
+                    var stream = usenet.GetFileStream(
+                        capturedPart.SegmentIds,
+                        capturedPart.SegmentIdByteRange.Count,
+                        concurrentConnections,
+                        _usageContext,
+                        useBufferedStreaming: true
+                    );
+                    // Seek to the start of this part within the RAR file
+                    stream.Seek(capturedPart.FilePartByteRange.StartInclusive, SeekOrigin.Begin);
+                    // Limit the stream to only this part's length
+                    return Task.FromResult(stream.LimitLength(capturedPart.FilePartByteRange.Count));
+                },
+                Length: capturedPart.FilePartByteRange.Count
+            ));
         }
 
-        throw new SeekPositionNotFoundException($"Corrupt file. Cannot seek to byte position {byteOffset}.");
-    }
-
-    private CombinedStream GetFileStream(long rangeStart, CancellationToken cancellationToken)
-    {
-        if (rangeStart == 0) return GetCombinedStream(0, 0, cancellationToken);
-        var (filePartIndex, filePartOffset) = SeekFilePart(rangeStart);
-        var stream = GetCombinedStream(filePartIndex, rangeStart - filePartOffset, cancellationToken);
-        return stream;
-    }
-
-    private CombinedStream GetCombinedStream(int firstFilePartIndex, long additionalOffset, CancellationToken ct)
-    {
-        // Create a child cancellation token that will live for the stream's lifetime
-        _streamCts?.Dispose();
-        _streamCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-
-        var streams = fileParts[firstFilePartIndex..]
-            .Select((x, i) =>
-            {
-                var offset = (i == 0) ? additionalOffset : 0;
-                var stream = usenet.GetFileStream(x.SegmentIds, x.SegmentIdByteRange.Count, concurrentConnections, _usageContext);
-                stream.Seek(x.FilePartByteRange.StartInclusive + offset, SeekOrigin.Begin);
-                return Task.FromResult(stream.LimitLength(x.FilePartByteRange.Count - offset));
-            });
-        return new CombinedStream(streams);
+        return new CombinedStream(parts, maxCachedStreams: 0);
     }
 
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
         _innerStream?.Dispose();
-        _streamCts?.Dispose();
         _disposed = true;
     }
 
@@ -124,7 +108,6 @@ public class DavMultipartFileStream(
     {
         if (_disposed) return;
         if (_innerStream != null) await _innerStream.DisposeAsync().ConfigureAwait(false);
-        _streamCts?.Dispose();
         _disposed = true;
         GC.SuppressFinalize(this);
     }

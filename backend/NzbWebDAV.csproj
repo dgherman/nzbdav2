@@ -22,7 +22,15 @@
     </ItemGroup>
 
     <ItemGroup>
+      <ProjectReference Include="Libs\UsenetSharp\UsenetSharp\UsenetSharp.csproj" />
+    </ItemGroup>
+
+    <ItemGroup>
       <EmbeddedResource Include="Api\SabControllers\GetConfig\config_template.json" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <Compile Remove="Libs\**" />
     </ItemGroup>
 
 </Project>

@@ -30,6 +30,9 @@ const topicSubscriptions = {
 }
 
 const maxItems = 100;
+const queuePageSize = 20;
+const historyPageSize = 20;
+
 export async function loader({ request }: Route.LoaderArgs) {
     var queuePromise = backendClient.getQueue(maxItems);
     var historyPromise = backendClient.getHistory(maxItems);
@@ -46,8 +49,62 @@ export async function loader({ request }: Route.LoaderArgs) {
 export default function Queue(props: Route.ComponentProps) {
     const [queueSlots, setQueueSlots] = useState<PresentationQueueSlot[]>(props.loaderData.queueSlots);
     const [historySlots, setHistorySlots] = useState<PresentationHistorySlot[]>(props.loaderData.historySlots);
+    const [totalQueueCount, setTotalQueueCount] = useState(props.loaderData.totalQueueCount);
+    const [totalHistoryCount, setTotalHistoryCount] = useState(props.loaderData.totalHistoryCount);
+    const [showHidden, setShowHidden] = useState(true);
+    const [queueCurrentPage, setQueueCurrentPage] = useState(1);
+    const [queueSearchQuery, setQueueSearchQuery] = useState('');
+    const [historyCurrentPage, setHistoryCurrentPage] = useState(1);
+    const [historySearchQuery, setHistorySearchQuery] = useState('');
+    const [failureReason, setFailureReason] = useState<string | undefined>(undefined);
+    const [statusFilter, setStatusFilter] = useState('all');
     const disableLiveView = queueSlots.length == maxItems || historySlots.length == maxItems;
     const error = props.actionData?.error;
+
+    // Refresh queue when page or search changes
+    useEffect(() => {
+        const refreshQueue = async () => {
+            try {
+                const searchParam = queueSearchQuery ? `&search=${encodeURIComponent(queueSearchQuery)}` : '';
+                const start = (queueCurrentPage - 1) * queuePageSize;
+                const response = await fetch(`/api?mode=queue&start=${start}&limit=${queuePageSize}${searchParam}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.queue?.slots) {
+                        setQueueSlots(data.queue.slots);
+                        setTotalQueueCount(data.queue.noofslots || 0);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to refresh queue', e);
+            }
+        };
+        refreshQueue();
+    }, [queueCurrentPage, queueSearchQuery]);
+
+    // Refresh history when showHidden, page, search, or failureReason changes
+    useEffect(() => {
+        const refreshHistory = async () => {
+            try {
+                const showHiddenParam = showHidden ? '&show_hidden=1' : '';
+                const searchParam = historySearchQuery ? `&search=${encodeURIComponent(historySearchQuery)}` : '';
+                const failureReasonParam = failureReason ? `&failure_reason=${encodeURIComponent(failureReason)}` : '';
+                const statusParam = statusFilter !== 'all' ? `&status=${statusFilter}` : '';
+                const start = (historyCurrentPage - 1) * historyPageSize;
+                const response = await fetch(`/api?mode=history&start=${start}&pageSize=${historyPageSize}${showHiddenParam}${searchParam}${failureReasonParam}${statusParam}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    if (data.history?.slots) {
+                        setHistorySlots(data.history.slots);
+                        setTotalHistoryCount(data.history.noofslots || 0);
+                    }
+                }
+            } catch (e) {
+                console.error('Failed to refresh history', e);
+            }
+        };
+        refreshHistory();
+    }, [showHidden, historyCurrentPage, historySearchQuery, failureReason, statusFilter]);
 
     // queue events
     const onAddQueueSlot = useCallback((queueSlot: QueueSlot) => {
@@ -107,6 +164,27 @@ export default function Queue(props: Route.ComponentProps) {
     const onRemoveHistorySlots = useCallback((ids: Set<string>) => {
         setHistorySlots(slots => slots.filter(x => !ids.has(x.nzo_id)));
     }, [setHistorySlots]);
+
+    const onRetryHistoryItem = useCallback(async (nzo_id: string) => {
+        try {
+            const response = await fetch(`/api?mode=history&name=requeue&nzo_id=${encodeURIComponent(nzo_id)}`);
+            if (response.ok) {
+                const data = await response.json();
+                if (data.status === true) {
+                    console.log(`Successfully requeued item ${nzo_id}, new queue item: ${data.nzo_id}`);
+                } else {
+                    console.error('Failed to requeue item:', data.error);
+                    alert(`Failed to requeue: ${data.error || 'Unknown error'}`);
+                }
+            } else {
+                console.error('Failed to requeue item:', response.statusText);
+                alert(`Failed to requeue: ${response.statusText}`);
+            }
+        } catch (e) {
+            console.error('Failed to requeue item', e);
+            alert('Failed to requeue item. Please try again.');
+        }
+    }, []);
 
     // websocket
     const onWebsocketMessage = useCallback((topic: string, message: string) => {
@@ -183,27 +261,48 @@ export default function Queue(props: Route.ComponentProps) {
             }
 
             {/* queue */}
-            <div className={styles.section}>
-                {queueSlots.length > 0 ?
-                    <QueueTable queueSlots={queueSlots}
+            {(queueSlots.length > 0 || queueSearchQuery || queueCurrentPage > 1) ?
+                <div className={styles.section}>
+                    <QueueTable
+                        queueSlots={queueSlots}
+                        totalCount={totalQueueCount}
+                        currentPage={queueCurrentPage}
+                        pageSize={queuePageSize}
+                        searchQuery={queueSearchQuery}
+                        onPageChange={setQueueCurrentPage}
+                        onSearchChange={setQueueSearchQuery}
                         onIsSelectedChanged={onSelectQueueSlots}
                         onIsRemovingChanged={onRemovingQueueSlots}
                         onRemoved={onRemoveQueueSlots}
-                    /> :
-                    <EmptyQueue />}
-            </div>
-
-            {/* history */}
-            {historySlots.length > 0 &&
-                <div className={styles.section}>
-                    <HistoryTable
-                        historySlots={historySlots}
-                        onIsSelectedChanged={onSelectHistorySlots}
-                        onIsRemovingChanged={onRemovingHistorySlots}
-                        onRemoved={onRemoveHistorySlots}
                     />
+                </div> :
+                <div className={styles.section}>
+                    <EmptyQueue />
                 </div>
             }
+
+            {/* history - always show the table */}
+            <div className={styles.section}>
+                <HistoryTable
+                    historySlots={historySlots}
+                    showHidden={showHidden}
+                    totalCount={totalHistoryCount}
+                    currentPage={historyCurrentPage}
+                    pageSize={historyPageSize}
+                    searchQuery={historySearchQuery}
+                    failureReason={failureReason}
+                    statusFilter={statusFilter}
+                    onShowHiddenChanged={setShowHidden}
+                    onPageChange={setHistoryCurrentPage}
+                    onSearchChange={setHistorySearchQuery}
+                    onFailureReasonChange={setFailureReason}
+                    onStatusFilterChange={setStatusFilter}
+                    onIsSelectedChanged={onSelectHistorySlots}
+                    onIsRemovingChanged={onRemovingHistorySlots}
+                    onRemoved={onRemoveHistorySlots}
+                    onRetry={onRetryHistoryItem}
+                />
+            </div>
         </div>
     );
 }

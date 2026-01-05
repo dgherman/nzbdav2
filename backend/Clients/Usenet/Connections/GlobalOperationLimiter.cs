@@ -1,4 +1,7 @@
+using NzbWebDAV.Config;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Logging;
+using Serilog;
 
 namespace NzbWebDAV.Clients.Usenet.Connections;
 
@@ -14,16 +17,20 @@ public class GlobalOperationLimiter : IDisposable
     private readonly SemaphoreSlim _queueSemaphore;
     private readonly SemaphoreSlim _healthCheckSemaphore;
     private readonly SemaphoreSlim _streamingSemaphore;
+    private readonly ConfigManager? _configManager;
 
     public GlobalOperationLimiter(
         int maxQueueConnections,
         int maxHealthCheckConnections,
-        int totalConnections)
+        int totalConnections,
+        ConfigManager? configManager = null)
     {
+        _configManager = configManager;
+
         // Ensure values are at least 1 to prevent SemaphoreSlim errors
         maxQueueConnections = Math.Max(1, maxQueueConnections);
         maxHealthCheckConnections = Math.Max(1, maxHealthCheckConnections);
-        
+
         var maxStreamingConnections = Math.Max(1, totalConnections - maxQueueConnections - maxHealthCheckConnections);
 
         _guaranteedLimits = new Dictionary<ConnectionUsageType, int>
@@ -33,6 +40,7 @@ public class GlobalOperationLimiter : IDisposable
             { ConnectionUsageType.Streaming, maxStreamingConnections },
             { ConnectionUsageType.BufferedStreaming, maxStreamingConnections },
             { ConnectionUsageType.Repair, maxHealthCheckConnections }, // Share with HealthCheck
+            { ConnectionUsageType.Analysis, maxHealthCheckConnections }, // Share with HealthCheck
             { ConnectionUsageType.Unknown, maxStreamingConnections }
         };
 
@@ -52,17 +60,26 @@ public class GlobalOperationLimiter : IDisposable
 
     /// <summary>
     /// Acquires a permit for the given operation type. Must be released via ReleasePermit.
+    /// CRITICAL: This method respects cancellation tokens to prevent deadlocks when tasks timeout.
     /// </summary>
     public async Task<OperationPermit> AcquirePermitAsync(ConnectionUsageType usageType, CancellationToken cancellationToken = default)
     {
         var semaphore = GetSemaphoreForType(usageType);
         var guaranteedLimit = _guaranteedLimits[usageType];
 
-        Serilog.Log.Verbose("[GlobalPool] Requesting permit for {UsageType}. Current usage: {UsageBreakdown}. Semaphore available: {SemaphoreAvailable}",
+        // Extract context to get file/job details
+        var context = cancellationToken.GetContext<ConnectionUsageContext>();
+        var fileDetails = context.Details;
+
+        LogDebugForType(usageType, "Requesting permit for {UsageType}. Current usage: {UsageBreakdown}. Semaphore available: {SemaphoreAvailable}",
             usageType, GetUsageBreakdown(), semaphore.CurrentCount);
 
-        // Wait for the operation-specific semaphore
+        var waitStartTime = DateTime.UtcNow;
+
+        // Wait for the operation-specific semaphore - MUST respect cancellation token to prevent deadlocks!
         await semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        var waitElapsed = DateTime.UtcNow - waitStartTime;
 
         // Track usage
         int currentUsage;
@@ -72,14 +89,40 @@ public class GlobalOperationLimiter : IDisposable
             currentUsage = _currentUsage[usageType];
         }
 
-        Serilog.Log.Verbose("[GlobalPool] Acquired permit for {UsageType}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total breakdown: {UsageBreakdown}",
-            usageType, currentUsage, guaranteedLimit, GetUsageBreakdown());
+        if (waitElapsed.TotalSeconds > 2)
+        {
+            if (fileDetails != null)
+            {
+                Serilog.Log.Debug("[GlobalPool] Acquired permit for {UsageType} after waiting {WaitSeconds}s. File: {FileDetails}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
+                    usageType, waitElapsed.TotalSeconds, fileDetails, currentUsage, guaranteedLimit, GetUsageBreakdown());
+            }
+            else
+            {
+                Serilog.Log.Debug("[GlobalPool] Acquired permit for {UsageType} after waiting {WaitSeconds}s. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
+                    usageType, waitElapsed.TotalSeconds, currentUsage, guaranteedLimit, GetUsageBreakdown());
+            }
+        }
+        else
+        {
+            if (fileDetails != null)
+            {
+                LogInfoForType(usageType, "Acquired permit for {UsageType}. File: {FileDetails}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
+                    usageType, fileDetails, currentUsage, guaranteedLimit, GetUsageBreakdown());
+            }
+            else
+            {
+                LogInfoForType(usageType, "Acquired permit for {UsageType}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
+                    usageType, currentUsage, guaranteedLimit, GetUsageBreakdown());
+            }
+        }
 
-        return new OperationPermit(this, usageType, semaphore);
+        return new OperationPermit(this, usageType, semaphore, DateTime.UtcNow, fileDetails);
     }
 
-    private void ReleasePermit(ConnectionUsageType usageType, SemaphoreSlim semaphore)
+    private void ReleasePermit(ConnectionUsageType usageType, SemaphoreSlim semaphore, DateTime acquiredAt, string? fileDetails)
     {
+        var heldDuration = DateTime.UtcNow - acquiredAt;
+
         int currentUsage;
         lock (_lock)
         {
@@ -87,13 +130,55 @@ public class GlobalOperationLimiter : IDisposable
             {
                 _currentUsage[usageType]--;
             }
+            else
+            {
+                Serilog.Log.Error("[GlobalPool] CRITICAL: Attempted to release permit for {UsageType} but usage counter is already 0! This indicates a double-release bug.",
+                    usageType);
+            }
             currentUsage = _currentUsage[usageType];
         }
 
         semaphore.Release();
 
-        Serilog.Log.Verbose("[GlobalPool] Released permit for {UsageType}. Current usage: {CurrentUsage}. Total breakdown: {UsageBreakdown}",
-            usageType, currentUsage, GetUsageBreakdown());
+        if (heldDuration.TotalMinutes > 5)
+        {
+            if (fileDetails != null)
+            {
+                Serilog.Log.Warning("[GlobalPool] Released permit for {UsageType} after holding for {HeldMinutes:F1} minutes. File: {FileDetails}. Current usage: {CurrentUsage}. Total: {UsageBreakdown}",
+                    usageType, heldDuration.TotalMinutes, fileDetails, currentUsage, GetUsageBreakdown());
+            }
+            else
+            {
+                Serilog.Log.Warning("[GlobalPool] Released permit for {UsageType} after holding for {HeldMinutes:F1} minutes. Current usage: {CurrentUsage}. Total: {UsageBreakdown}",
+                    usageType, heldDuration.TotalMinutes, currentUsage, GetUsageBreakdown());
+            }
+        }
+        else if (heldDuration.TotalSeconds > 30)
+        {
+            if (fileDetails != null)
+            {
+                LogInfoForType(usageType, "Released permit for {UsageType} after {HeldSeconds:F1}s. File: {FileDetails}. Current usage: {CurrentUsage}. Total: {UsageBreakdown}",
+                    usageType, heldDuration.TotalSeconds, fileDetails, currentUsage, GetUsageBreakdown());
+            }
+            else
+            {
+                LogInfoForType(usageType, "Released permit for {UsageType} after {HeldSeconds:F1}s. Current usage: {CurrentUsage}. Total: {UsageBreakdown}",
+                    usageType, heldDuration.TotalSeconds, currentUsage, GetUsageBreakdown());
+            }
+        }
+        else
+        {
+            if (fileDetails != null)
+            {
+                LogDebugForType(usageType, "Released permit for {UsageType} after {HeldSeconds:F1}s. File: {FileDetails}. Current usage: {CurrentUsage}. Total: {UsageBreakdown}",
+                    usageType, heldDuration.TotalSeconds, fileDetails, currentUsage, GetUsageBreakdown());
+            }
+            else
+            {
+                LogDebugForType(usageType, "Released permit for {UsageType} after {HeldSeconds:F1}s. Current usage: {CurrentUsage}. Total: {UsageBreakdown}",
+                    usageType, heldDuration.TotalSeconds, currentUsage, GetUsageBreakdown());
+            }
+        }
     }
 
     private SemaphoreSlim GetSemaphoreForType(ConnectionUsageType type)
@@ -103,6 +188,7 @@ public class GlobalOperationLimiter : IDisposable
             ConnectionUsageType.Queue => _queueSemaphore,
             ConnectionUsageType.HealthCheck => _healthCheckSemaphore,
             ConnectionUsageType.Repair => _healthCheckSemaphore, // Share with HealthCheck
+            ConnectionUsageType.Analysis => _healthCheckSemaphore, // Share with HealthCheck
             ConnectionUsageType.Streaming => _streamingSemaphore,
             ConnectionUsageType.BufferedStreaming => _streamingSemaphore,
             _ => _streamingSemaphore
@@ -121,6 +207,49 @@ public class GlobalOperationLimiter : IDisposable
         }
     }
 
+    private void LogDebugForType(ConnectionUsageType usageType, string message, params object[] args)
+    {
+        if (_configManager == null)
+        {
+            Serilog.Log.Debug("[GlobalPool] " + message, args);
+            return;
+        }
+
+        var component = GetComponentForType(usageType);
+        if (_configManager.IsDebugLogEnabled(component))
+        {
+            Serilog.Log.Debug("[GlobalPool] " + message, args);
+        }
+    }
+
+    private void LogInfoForType(ConnectionUsageType usageType, string message, params object[] args)
+    {
+        // HealthCheck operations should log at Debug level to reduce noise
+        if (usageType == ConnectionUsageType.HealthCheck || usageType == ConnectionUsageType.Repair || usageType == ConnectionUsageType.Analysis)
+        {
+            LogDebugForType(usageType, message, args);
+            return;
+        }
+
+        // Information logs should ALWAYS show regardless of component debug settings
+        // Only Debug logs are filtered by component
+        Log.Information("[GlobalPool] " + message, args);
+    }
+
+    private static string GetComponentForType(ConnectionUsageType usageType)
+    {
+        return usageType switch
+        {
+            ConnectionUsageType.Queue => LogComponents.Queue,
+            ConnectionUsageType.HealthCheck => LogComponents.HealthCheck,
+            ConnectionUsageType.Repair => LogComponents.HealthCheck,
+            ConnectionUsageType.Analysis => LogComponents.Analysis,
+            ConnectionUsageType.Streaming => LogComponents.BufferedStream,
+            ConnectionUsageType.BufferedStreaming => LogComponents.BufferedStream,
+            _ => LogComponents.Usenet
+        };
+    }
+
     public void Dispose()
     {
         _queueSemaphore.Dispose();
@@ -131,23 +260,34 @@ public class GlobalOperationLimiter : IDisposable
 
     /// <summary>
     /// Represents a permit to perform an operation. Must be disposed to release the permit.
+    /// CRITICAL: This is a class (reference type) to prevent struct copying issues that cause permit leaks.
     /// </summary>
-    public readonly struct OperationPermit : IDisposable
+    public sealed class OperationPermit : IDisposable
     {
         private readonly GlobalOperationLimiter _limiter;
         private readonly ConnectionUsageType _usageType;
         private readonly SemaphoreSlim _semaphore;
+        private readonly DateTime _acquiredAt;
+        private readonly string? _fileDetails;
+        private int _disposed; // 0 = not disposed, 1 = disposed
 
-        internal OperationPermit(GlobalOperationLimiter limiter, ConnectionUsageType usageType, SemaphoreSlim semaphore)
+        internal OperationPermit(GlobalOperationLimiter limiter, ConnectionUsageType usageType, SemaphoreSlim semaphore, DateTime acquiredAt, string? fileDetails)
         {
             _limiter = limiter;
             _usageType = usageType;
             _semaphore = semaphore;
+            _acquiredAt = acquiredAt;
+            _fileDetails = fileDetails;
         }
 
         public void Dispose()
         {
-            _limiter.ReleasePermit(_usageType, _semaphore);
+            // Thread-safe dispose guard: only release permit once
+            // Prevents double-dispose bugs that caused Queue permit leaks
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                _limiter.ReleasePermit(_usageType, _semaphore, _acquiredAt, _fileDetails);
+            }
         }
     }
 }

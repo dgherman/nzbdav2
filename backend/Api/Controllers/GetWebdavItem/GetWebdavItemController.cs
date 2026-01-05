@@ -72,6 +72,16 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
         {
             Response.StatusCode = 401;
         }
+        catch (BadHttpRequestException ex)
+        {
+            Response.StatusCode = ex.StatusCode;
+            await Response.WriteAsync(ex.Message, HttpContext.RequestAborted).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Response.StatusCode = 500;
+            await Response.WriteAsync($"Error streaming file: {ex.Message}", HttpContext.RequestAborted).ConfigureAwait(false);
+        }
     }
 
     private static string GetContentType(string item)

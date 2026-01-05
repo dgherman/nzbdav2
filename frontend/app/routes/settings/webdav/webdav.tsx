@@ -57,6 +57,21 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
             </Form.Group>
             <hr />
             <Form.Group>
+                <Form.Label htmlFor="stream-buffer-size-input">Stream Buffer Size (segments)</Form.Label>
+                <Form.Control
+                    {...className([styles.input, !isValidStreamBufferSize(config["usenet.stream-buffer-size"]) && styles.error])}
+                    type="text"
+                    id="stream-buffer-size-input"
+                    aria-describedby="stream-buffer-size-help"
+                    placeholder="50"
+                    value={config["usenet.stream-buffer-size"]}
+                    onChange={e => setNewConfig({ ...config, "usenet.stream-buffer-size": e.target.value })} />
+                <Form.Text id="stream-buffer-size-help" muted>
+                    Number of segments to buffer ahead during streaming. Higher values (50-100) provide smoother playback but use more memory. Each segment is ~300-500KB.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
                 <Form.Check
                     className={styles.input}
                     type="checkbox"
@@ -105,6 +120,7 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
     return config["webdav.user"] !== newConfig["webdav.user"]
         || config["webdav.pass"] !== newConfig["webdav.pass"]
         || config["usenet.connections-per-stream"] !== newConfig["usenet.connections-per-stream"]
+        || config["usenet.stream-buffer-size"] !== newConfig["usenet.stream-buffer-size"]
         || config["webdav.show-hidden-files"] !== newConfig["webdav.show-hidden-files"]
         || config["webdav.enforce-readonly"] !== newConfig["webdav.enforce-readonly"]
         || config["webdav.preview-par2-files"] !== newConfig["webdav.preview-par2-files"]
@@ -112,7 +128,8 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
 
 export function isWebdavSettingsValid(newConfig: Record<string, string>) {
     return isValidUser(newConfig["webdav.user"])
-        && isValidConnectionsPerStream(newConfig["usenet.connections-per-stream"]);
+        && isValidConnectionsPerStream(newConfig["usenet.connections-per-stream"])
+        && isValidStreamBufferSize(newConfig["usenet.stream-buffer-size"]);
 }
 
 function isValidUser(user: string): boolean {
@@ -122,4 +139,8 @@ function isValidUser(user: string): boolean {
 
 function isValidConnectionsPerStream(value: string): boolean {
     return isPositiveInteger(value);
+}
+
+function isValidStreamBufferSize(value: string): boolean {
+    return isPositiveInteger(value) && parseInt(value) >= 10 && parseInt(value) <= 500;
 }

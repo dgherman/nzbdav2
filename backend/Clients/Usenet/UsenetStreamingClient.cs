@@ -1,4 +1,4 @@
-﻿using System.Text.Json;
+using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Clients.Usenet.Models;
@@ -8,7 +8,7 @@ using NzbWebDAV.Extensions;
 using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Websocket;
-using Usenet.Nntp.Responses;
+using UsenetSharp.Models;
 using Usenet.Nzb;
 
 namespace NzbWebDAV.Clients.Usenet;
@@ -20,19 +20,22 @@ public class UsenetStreamingClient
     private readonly ConfigManager _configManager;
     private readonly BandwidthService _bandwidthService;
     private readonly ProviderErrorService _providerErrorService;
+    private readonly NzbProviderAffinityService _affinityService;
     private ConnectionPoolStats? _connectionPoolStats;
 
     public UsenetStreamingClient(
-        ConfigManager configManager, 
+        ConfigManager configManager,
         WebsocketManager websocketManager,
         BandwidthService bandwidthService,
-        ProviderErrorService providerErrorService)
+        ProviderErrorService providerErrorService,
+        NzbProviderAffinityService affinityService)
     {
         // initialize private members
         _websocketManager = websocketManager;
         _configManager = configManager;
         _bandwidthService = bandwidthService;
         _providerErrorService = providerErrorService;
+        _affinityService = affinityService;
 
         // get connection settings from config-manager
         var providerConfig = configManager.GetUsenetProviderConfig();
@@ -56,17 +59,90 @@ public class UsenetStreamingClient
         };
     }
 
-    public List<ConnectionUsageContext> GetActiveConnections()
+    public async Task<long[]> AnalyzeNzbAsync(string[] segmentIds, int concurrency, IProgress<int>? progress, CancellationToken ct)
     {
-        return _connectionPoolStats?.GetActiveConnections() ?? new List<ConnectionUsageContext>();
-    }
+        // Copy context from parent token
+        using var childCt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var _1 = childCt.Token.SetScopedContext(ct.GetContext<LastSuccessfulProviderContext>());
+        using var _2 = childCt.Token.SetScopedContext(ct.GetContext<ConnectionUsageContext>());
+        var token = childCt.Token;
+        var usageContext = token.GetContext<ConnectionUsageContext>();
+        var timeoutSeconds = _configManager.GetUsenetOperationTimeout();
 
-    public Dictionary<int, List<ConnectionUsageContext>> GetActiveConnectionsByProvider()
-    {
-        return _connectionPoolStats?.GetActiveConnectionsByProvider() ?? new Dictionary<int, List<ConnectionUsageContext>>();
-    }
+        // Optimization: Smart Analysis for uniform segment sizes
+        if (segmentIds.Length > 2)
+        {
+            try
+            {
+                using var fastCheckCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                fastCheckCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+                using var _ = fastCheckCts.Token.SetScopedContext(usageContext);
 
-    public async Task CheckAllSegmentsAsync
+                // Check first, second (to confirm uniformity), and last segment
+                var first = await _client.GetSegmentYencHeaderAsync(segmentIds[0], fastCheckCts.Token).ConfigureAwait(false);
+                var second = await _client.GetSegmentYencHeaderAsync(segmentIds[1], fastCheckCts.Token).ConfigureAwait(false);
+                var last = await _client.GetSegmentYencHeaderAsync(segmentIds[^1], fastCheckCts.Token).ConfigureAwait(false);
+
+                // If first two segments match in size
+                if (first.PartSize == second.PartSize)
+                {
+                    // Calculate expected total size based on uniformity assumption
+                    // Total = (Size * (N-1)) + LastSize
+                    long expectedTotal = (first.PartSize * (segmentIds.Length - 1)) + last.PartSize;
+
+                    // Calculate actual total size from last segment's YEnc header
+                    // Last segment header contains "begin" offset and its own size
+                    long actualTotal = last.PartOffset + last.PartSize;
+
+                    if (expectedTotal == actualTotal)
+                    {
+                        Serilog.Log.Debug("[UsenetStreamingClient] Smart Analysis: Uniform segments detected ({Size} bytes). Skipping full scan for {Count} segments.", first.PartSize, segmentIds.Length);
+                        
+                        var fastSizes = new long[segmentIds.Length];
+                        Array.Fill(fastSizes, first.PartSize);
+                        fastSizes[^1] = last.PartSize;
+                        
+                        progress?.Report(segmentIds.Length);
+                        return fastSizes;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Warning(ex, "[UsenetStreamingClient] Smart Analysis failed/skipped. Falling back to full scan.");
+            }
+        }
+
+        var sizes = new long[segmentIds.Length];
+        var tasks = segmentIds
+            .Select(async (id, index) =>
+            {
+                using var segmentCts = CancellationTokenSource.CreateLinkedTokenSource(token);
+                segmentCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
+                using var _ = segmentCts.Token.SetScopedContext(usageContext);
+
+                var header = await _client.GetSegmentYencHeaderAsync(id, segmentCts.Token).ConfigureAwait(false);
+                sizes[index] = header.PartSize;
+                return index;
+            })
+            .WithConcurrencyAsync(concurrency);
+
+        var processed = 0;
+        try
+        {            await foreach (var _ in tasks.ConfigureAwait(false))
+            {
+                progress?.Report(++processed);
+            }
+        }
+        catch (Exception)
+        {
+            await childCt.CancelAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        return sizes;
+    }
+    public async Task<long[]?> CheckAllSegmentsAsync
     (
         IEnumerable<string> segmentIds,
         int concurrency,
@@ -75,38 +151,37 @@ public class UsenetStreamingClient
         bool useHead = true
     )
     {
+        if (useHead)
+        {
+            return await AnalyzeNzbAsync(segmentIds.ToArray(), concurrency, progress, cancellationToken).ConfigureAwait(false);
+        }
+
         // No need to copy ReservedPooledConnectionsContext - operation limits handle this now
         using var childCt = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var _1 = childCt.Token.SetScopedContext(cancellationToken.GetContext<LastSuccessfulProviderContext>());
         using var _2 = childCt.Token.SetScopedContext(cancellationToken.GetContext<ConnectionUsageContext>());
         var token = childCt.Token;
         var usageContext = token.GetContext<ConnectionUsageContext>();
+        var timeoutSeconds = _configManager.GetUsenetOperationTimeout();
 
         var tasks = segmentIds
             .Select(async x =>
             {
                 using var segmentCts = CancellationTokenSource.CreateLinkedTokenSource(token);
-                segmentCts.CancelAfter(TimeSpan.FromSeconds(60));
+                segmentCts.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
                 using var _ = segmentCts.Token.SetScopedContext(usageContext);
                 try
                 {
-                    if (useHead)
-                    {
-                        // HEAD: More reliable, slower (downloads headers)
-                        await _client.GetArticleHeadersAsync(x, segmentCts.Token).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        // STAT: Faster, but can be inaccurate (only checks metadata existence)
-                        var result = await _client.StatAsync(x, segmentCts.Token).ConfigureAwait(false);
-                        if (result.ResponseType != NntpStatResponseType.ArticleExists)
-                            throw new UsenetArticleNotFoundException(x);
-                    }
+                    // STAT: Faster, but can be inaccurate (only checks metadata existence)
+                    var result = await _client.StatAsync(x, segmentCts.Token).ConfigureAwait(false);
+                    if (!result.ArticleExists)
+                        throw new UsenetArticleNotFoundException(x);
+
                     return x;
                 }
                 catch (OperationCanceledException) when (!token.IsCancellationRequested && segmentCts.IsCancellationRequested)
                 {
-                    throw new TimeoutException($"{(useHead ? "Head" : "Stat")} timed out for segment {x}");
+                    throw new TimeoutException($"Stat timed out for segment {x}");
                 }
             })
             .WithConcurrencyAsync(concurrency);
@@ -124,23 +199,34 @@ public class UsenetStreamingClient
             await childCt.CancelAsync().ConfigureAwait(false);
             throw;
         }
+
+        return null;
     }
 
     public async Task<NzbFileStream> GetFileStream(NzbFile nzbFile, int concurrentConnections, CancellationToken ct)
     {
+        var usageContext = new ConnectionUsageContext(ConnectionUsageType.Streaming);
+        using var linkedCt = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var _ = linkedCt.Token.SetScopedContext(usageContext);
+
         var segmentIds = nzbFile.GetSegmentIds();
-        var fileSize = await _client.GetFileSizeAsync(nzbFile, ct).ConfigureAwait(false);
-        return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections);
+        var fileSize = await _client.GetFileSizeAsync(nzbFile, linkedCt.Token).ConfigureAwait(false);
+        var bufferSize = _configManager.GetStreamBufferSize();
+        return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections, usageContext, bufferSize: bufferSize);
     }
 
-    public NzbFileStream GetFileStream(NzbFile nzbFile, long fileSize, int concurrentConnections)
+    public NzbFileStream GetFileStream(NzbFile nzbFile, long fileSize, int concurrentConnections, long[]? segmentSizes = null)
     {
-        return new NzbFileStream(nzbFile.GetSegmentIds(), fileSize, _client, concurrentConnections);
+        var bufferSize = _configManager.GetStreamBufferSize();
+        var usageContext = new ConnectionUsageContext(ConnectionUsageType.Streaming);
+        return new NzbFileStream(nzbFile.GetSegmentIds(), fileSize, _client, concurrentConnections, usageContext, bufferSize: bufferSize, segmentSizes: segmentSizes);
     }
 
-    public NzbFileStream GetFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null, bool useBufferedStreaming = true, int bufferSize = 10)
+    public NzbFileStream GetFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null, bool useBufferedStreaming = true, int? bufferSize = null, long[]? segmentSizes = null)
     {
-        return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections, usageContext, useBufferedStreaming, bufferSize);
+        // Use config value if not specified
+        var actualBufferSize = bufferSize ?? _configManager.GetStreamBufferSize();
+        return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections, usageContext, useBufferedStreaming, actualBufferSize, segmentSizes);
     }
 
     public Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders, CancellationToken ct)
@@ -232,7 +318,8 @@ public class UsenetStreamingClient
         var globalLimiter = new GlobalOperationLimiter(
             maxQueueConnections,
             maxHealthCheckConnections,
-            totalPooledConnectionCount
+            totalPooledConnectionCount,
+            _configManager
         );
 
         var providerClients = providerConfig.Providers
@@ -246,7 +333,7 @@ public class UsenetStreamingClient
                 operationTimeout
             ))
             .ToList();
-        return new MultiProviderNntpClient(providerClients, _providerErrorService);
+        return new MultiProviderNntpClient(providerClients, _providerErrorService, _affinityService);
     }
 
     private MultiConnectionNntpClient CreateProviderClient
@@ -263,30 +350,33 @@ public class UsenetStreamingClient
         var connectionPool = CreateNewConnectionPool(
             maxConnections: connectionDetails.MaxConnections,
             pooledSemaphore: pooledSemaphore,
-            connectionFactory: ct => CreateNewConnection(connectionDetails, ct),
+            connectionFactory: ct => CreateNewConnection(connectionDetails, _bandwidthService, providerIndex, ct),
             onConnectionPoolChanged: connectionPoolStats.GetOnConnectionPoolChanged(providerIndex),
             connectionPoolStats: connectionPoolStats,
             providerIndex: providerIndex
         );
         return new MultiConnectionNntpClient(
-            connectionPool, 
-            connectionDetails.Type, 
-            globalLimiter, 
-            _bandwidthService, 
-            providerErrorService, 
-            providerIndex, 
-            connectionDetails.Host, 
-            operationTimeout
+            connectionPool,
+            connectionDetails.Type,
+            globalLimiter,
+            _bandwidthService,
+            providerErrorService,
+            providerIndex,
+            connectionDetails.Host,
+            operationTimeout,
+            _configManager
         );
     }
 
     public static async ValueTask<INntpClient> CreateNewConnection
     (
         UsenetProviderConfig.ConnectionDetails connectionDetails,
+        BandwidthService bandwidthService,
+        int providerIndex,
         CancellationToken cancellationToken
     )
     {
-        var connection = new ThreadSafeNntpClient();
+        var connection = new ThreadSafeNntpClient(bandwidthService, providerIndex);
         var host = connectionDetails.Host;
         var port = connectionDetails.Port;
         var useSsl = connectionDetails.UseSsl;
@@ -320,5 +410,10 @@ public class UsenetStreamingClient
             return multiProvider.ForceReleaseConnections(type);
         }
         return Task.CompletedTask;
+    }
+
+    public Dictionary<int, List<ConnectionUsageContext>> GetActiveConnectionsByProvider()
+    {
+        return _connectionPoolStats?.GetActiveConnectionsByProvider() ?? new Dictionary<int, List<ConnectionUsageContext>>();
     }
 }

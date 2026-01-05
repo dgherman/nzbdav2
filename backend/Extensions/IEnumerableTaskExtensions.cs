@@ -65,7 +65,8 @@ public static class IEnumerableTaskExtensions
     public static async IAsyncEnumerable<T> WithConcurrencyAsync<T>
     (
         this IEnumerable<Task<T>> tasks,
-        int concurrency
+        int concurrency,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default
     )
     {
         if (concurrency < 1)
@@ -75,24 +76,52 @@ public static class IEnumerableTaskExtensions
         var totalStarted = 0;
         var totalCompleted = 0;
 
-        foreach (var task in tasks)
+        try
         {
-            runningTasks.Add(task);
-            totalStarted++;
+            foreach (var task in tasks)
+            {
+                runningTasks.Add(task);
+                totalStarted++;
 
-            if (runningTasks.Count < concurrency) continue;
-            var completedTask = await Task.WhenAny(runningTasks).ConfigureAwait(false);
-            runningTasks.Remove(completedTask);
-            totalCompleted++;
-            yield return await completedTask.ConfigureAwait(false);
+                if (runningTasks.Count < concurrency) continue;
+                var completedTask = await Task.WhenAny(runningTasks).ConfigureAwait(false);
+                runningTasks.Remove(completedTask);
+                totalCompleted++;
+                yield return await completedTask.ConfigureAwait(false);
+            }
+
+            while (runningTasks.Count > 0)
+            {
+                var completedTask = await Task.WhenAny(runningTasks).ConfigureAwait(false);
+                runningTasks.Remove(completedTask);
+                totalCompleted++;
+                yield return await completedTask.ConfigureAwait(false);
+            }
         }
-
-        while (runningTasks.Count > 0)
+        finally
         {
-            var completedTask = await Task.WhenAny(runningTasks).ConfigureAwait(false);
-            runningTasks.Remove(completedTask);
-            totalCompleted++;
-            yield return await completedTask.ConfigureAwait(false);
+            // CRITICAL: Wait for all running tasks to complete to ensure proper resource cleanup
+            // If we don't do this, tasks that are still running will leak connections
+            if (runningTasks.Count > 0)
+            {
+                Serilog.Log.Warning("[WithConcurrencyAsync] Exception occurred with {RunningTasks} tasks still running. Waiting for cleanup...",
+                    runningTasks.Count);
+
+                // Wait for all remaining tasks to complete (successfully or with exception)
+                // This ensures that all streams are properly disposed via their 'await using' blocks
+                // Cast to base Task type to use SuppressThrowing (not supported on Task<T>)
+                try
+                {
+                    await ((Task)Task.WhenAll(runningTasks)).ConfigureAwait(ConfigureAwaitOptions.SuppressThrowing);
+                }
+                catch
+                {
+                    // Suppressed - we just need cleanup to complete
+                }
+
+                Serilog.Log.Debug("[WithConcurrencyAsync] All {RunningTasks} tasks have completed cleanup",
+                    runningTasks.Count);
+            }
         }
     }
 }

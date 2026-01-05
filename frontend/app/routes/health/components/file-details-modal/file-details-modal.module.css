@@ -1,0 +1,60 @@
+.loadingContainer {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 3rem;
+    gap: 1rem;
+}
+
+.errorContainer {
+    padding: 2rem;
+    text-align: center;
+    color: var(--bs-danger);
+}
+
+.detailsContainer {
+    display: flex;
+    flex-direction: column;
+    gap: 1.5rem;
+}
+
+.section h5 {
+    margin-bottom: 0.75rem;
+    font-size: 1rem;
+    font-weight: 600;
+    color: var(--bs-body-color);
+}
+
+.labelCell {
+    font-weight: 600;
+    width: 30%;
+    background-color: var(--bs-light);
+}
+
+.valueCell {
+    word-break: break-all;
+}
+
+.numberCell {
+    text-align: center;
+    white-space: nowrap;
+}
+
+.dateCell {
+    text-align: center;
+}
+
+.tableScrollContainer {
+    overflow-x: auto;
+}
+
+@media (max-width: 768px) {
+    .labelCell {
+        width: 40%;
+    }
+
+    .section h5 {
+        font-size: 0.9rem;
+    }
+}

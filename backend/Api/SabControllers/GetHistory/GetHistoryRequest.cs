@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
 using NzbWebDAV.Config;
+using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 
 namespace NzbWebDAV.Api.SabControllers.GetHistory;
@@ -10,6 +11,10 @@ public class GetHistoryRequest
     public int Limit { get; init; } = int.MaxValue;
     public string? Category { get; init; }
     public List<Guid> NzoIds { get; init; } = [];
+    public bool ShowHidden { get; init; } = false;
+    public string? Search { get; init; }
+    public string? FailureReason { get; init; }
+    public HistoryItem.DownloadStatusOption? Status { get; init; }
     public CancellationToken CancellationToken { get; set; }
 
 
@@ -19,8 +24,22 @@ public class GetHistoryRequest
         var limitParam = context.GetQueryParam("limit");
         var pageSizeParam = context.GetQueryParam("pageSize");
         var nzoIdsParam = context.GetQueryParam("nzo_ids");
+        var showHiddenParam = context.GetQueryParam("show_hidden");
+        var statusParam = context.GetQueryParam("status");
         Category = context.GetQueryParam("category");
+        Search = context.GetQueryParam("search");
+        FailureReason = context.GetQueryParam("failure_reason");
         CancellationToken = context.RequestAborted;
+
+        if (statusParam != null && Enum.TryParse<HistoryItem.DownloadStatusOption>(statusParam, true, out var status))
+        {
+            Status = status;
+        }
+
+        if (showHiddenParam is not null)
+        {
+            ShowHidden = showHiddenParam == "1" || showHiddenParam.ToLower() == "true";
+        }
 
         if (startParam is not null)
         {

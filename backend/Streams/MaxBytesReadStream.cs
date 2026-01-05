@@ -3,6 +3,7 @@ namespace NzbWebDAV.Streams;
 public class MaxBytesReadStream(Stream stream, long maxBytes) : Stream
 {
     private long _totalBytesRead = 0;
+    private readonly long _maxPosition = maxBytes; // Limit seek position to prevent hanging on far seeks
 
     public override void Flush() => stream.Flush();
 
@@ -37,7 +38,19 @@ public class MaxBytesReadStream(Stream stream, long maxBytes) : Stream
         }
     }
 
-    public override long Seek(long offset, SeekOrigin origin) => stream.Seek(offset, origin);
+    public override long Seek(long offset, SeekOrigin origin)
+    {
+        var newPosition = stream.Seek(offset, origin);
+
+        // Enforce position limit - if seeking beyond max, fail fast to prevent hanging on reads
+        if (newPosition > _maxPosition)
+        {
+            throw new IOException($"Seek position {newPosition} exceeds maximum allowed position of {_maxPosition} bytes. " +
+                "This usually indicates a corrupt RAR archive or multi-volume RAR with headers beyond the readable range.");
+        }
+
+        return newPosition;
+    }
     public override void SetLength(long value) => stream.SetLength(value);
     public override void Write(byte[] buffer, int offset, int count) => stream.Write(buffer, offset, count);
 

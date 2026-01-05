@@ -16,11 +16,12 @@ export type HealthTableProps = {
     onSearchChange: (search: string) => void,
     onShowAllChange: (showAll: boolean) => void,
     onRunHealthCheck: (id: string) => void,
+    onItemClick: (id: string) => void,
 }
 
-export function HealthTable({ 
-    isEnabled, 
-    healthCheckItems, 
+export function HealthTable({
+    isEnabled,
+    healthCheckItems,
     totalCount,
     page,
     pageSize,
@@ -29,7 +30,8 @@ export function HealthTable({
     onPageChange,
     onSearchChange,
     onShowAllChange,
-    onRunHealthCheck
+    onRunHealthCheck,
+    onItemClick
 }: HealthTableProps) {
 
     const totalPages = Math.ceil(totalCount / pageSize);
@@ -104,10 +106,18 @@ export function HealthTable({
                             </thead>
                             <tbody>
                                 {healthCheckItems.map(item => (
-                                    <tr key={item.id} className={styles.tableRow}>
+                                    <tr
+                                        key={item.id}
+                                        className={styles.tableRow}
+                                        onClick={() => onItemClick(item.id)}
+                                        style={{ cursor: 'pointer' }}
+                                    >
                                         <td className={styles.nameCell}>
                                             <div className={styles.nameContainer}>
-                                                <div className={styles.name}><Truncate>{item.name}</Truncate></div>
+                                                {item.jobName && (
+                                                    <div className={styles.jobName}><Truncate>{item.jobName}</Truncate></div>
+                                                )}
+                                                <div className={item.jobName ? styles.fileNameSmall : styles.name}><Truncate>{item.name}</Truncate></div>
                                                 <div className={styles.path}><Truncate>{item.path}</Truncate></div>
                                                 <div className={styles.mobile}>
                                                     <DateDetailsTable item={item} onRunHealthCheck={onRunHealthCheck} />

@@ -61,6 +61,7 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
                 Id = x.Id.ToString(),
                 Name = x.Name,
                 Path = x.Path,
+                JobName = Path.GetFileName(Path.GetDirectoryName(x.Path)),
                 ReleaseDate = x.ReleaseDate,
                 LastHealthCheck = x.LastHealthCheck,
                 NextHealthCheck = x.NextHealthCheck == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow : x.NextHealthCheck,

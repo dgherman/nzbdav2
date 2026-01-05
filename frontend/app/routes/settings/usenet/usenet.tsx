@@ -66,6 +66,9 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     const [connections, setConnections] = useState<{[index: number]: ConnectionCounts}>({});
     const providerConfig = useMemo(() => parseProviderConfig(config["usenet.providers"]), [config]);
     const [statsEnabled, setStatsEnabled] = useState(config["stats.enable"] !== "false");
+    const [analysisEnabled, setAnalysisEnabled] = useState(config["analysis.enable"] !== "false");
+    const [maxConcurrentAnalyses, setMaxConcurrentAnalyses] = useState(config["analysis.max-concurrent"] || "3");
+    const [providerAffinityEnabled, setProviderAffinityEnabled] = useState(config["provider-affinity.enable"] !== "false");
     const [hideSamples, setHideSamples] = useState(config["usenet.hide-samples"] === "true");
     const [streamBufferSize, setStreamBufferSize] = useState(config["usenet.stream-buffer-size"] || "100");
     const [operationTimeout, setOperationTimeout] = useState(config["usenet.operation-timeout"] || "90");
@@ -74,6 +77,23 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     const handleStatsEnableChange = useCallback((checked: boolean) => {
         setStatsEnabled(checked);
         setNewConfig(prev => ({ ...prev, "stats.enable": checked.toString() }));
+    }, [setNewConfig]);
+
+    const handleAnalysisEnableChange = useCallback((checked: boolean) => {
+        setAnalysisEnabled(checked);
+        setNewConfig(prev => ({ ...prev, "analysis.enable": checked.toString() }));
+    }, [setNewConfig]);
+
+    const handleMaxConcurrentAnalysesChange = useCallback((value: string) => {
+        setMaxConcurrentAnalyses(value);
+        if (isPositiveInteger(value)) {
+            setNewConfig(prev => ({ ...prev, "analysis.max-concurrent": value }));
+        }
+    }, [setNewConfig]);
+
+    const handleProviderAffinityEnableChange = useCallback((checked: boolean) => {
+        setProviderAffinityEnabled(checked);
+        setNewConfig(prev => ({ ...prev, "provider-affinity.enable": checked.toString() }));
     }, [setNewConfig]);
 
     const handleHideSamplesChange = useCallback((checked: boolean) => {
@@ -178,6 +198,87 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                             Enable Bandwidth Stats
                         </label>
                     </div>
+                </div>
+                <div className={styles["form-group"]}>
+                    <div className={styles["form-checkbox-wrapper"]}>
+                        <input
+                            type="checkbox"
+                            id="analysis-enable"
+                            className={styles["form-checkbox"]}
+                            checked={analysisEnabled}
+                            onChange={(e) => handleAnalysisEnableChange(e.target.checked)}
+                        />
+                        <label htmlFor="analysis-enable" className={styles["form-checkbox-label"]}>
+                            Enable Automatic File Analysis
+                        </label>
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--bs-secondary-color)', marginTop: '4px' }}>
+                        When enabled, NZB files are analyzed in the background to improve seeking performance.
+                        This may consume bandwidth.
+                    </div>
+                </div>
+                <div className={styles["form-group"]}>
+                    <label htmlFor="max-concurrent-analyses" className={styles["form-label"]}>
+                        Max Concurrent Analyses
+                    </label>
+                    <input
+                        type="text"
+                        id="max-concurrent-analyses"
+                        className={`${styles["form-input"]} ${!isPositiveInteger(maxConcurrentAnalyses) ? styles.error : ""}`}
+                        placeholder="3"
+                        value={maxConcurrentAnalyses}
+                        onChange={(e) => handleMaxConcurrentAnalysesChange(e.target.value)}
+                        style={{ maxWidth: '200px' }}
+                        disabled={!analysisEnabled}
+                    />
+                    <div>
+                        Maximum number of files to analyze simultaneously. Each analysis uses 10 connections. (Default: 3)
+                    </div>
+                </div>
+                <div className={styles["form-group"]}>
+                    <div className={styles["form-checkbox-wrapper"]}>
+                        <input
+                            type="checkbox"
+                            id="provider-affinity-enable"
+                            className={styles["form-checkbox"]}
+                            checked={providerAffinityEnabled}
+                            onChange={(e) => handleProviderAffinityEnableChange(e.target.checked)}
+                        />
+                        <label htmlFor="provider-affinity-enable" className={styles["form-checkbox-label"]}>
+                            Enable Provider Affinity (Smart Provider Selection)
+                        </label>
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--bs-secondary-color)', marginTop: '4px' }}>
+                        When enabled, the system learns which provider is fastest and most reliable for each NZB.
+                        Future downloads from the same NZB will prefer the best-performing provider. Tracks success rates and download speeds.
+                    </div>
+                    {providerAffinityEnabled && (
+                        <div style={{ marginTop: '12px' }}>
+                            <Button
+                                variant="outline-danger"
+                                size="sm"
+                                onClick={async () => {
+                                    if (confirm('Are you sure you want to reset all provider affinity statistics? This will clear performance data for all files.')) {
+                                        try {
+                                            const response = await fetch('/api/reset-provider-stats', { method: 'POST' });
+                                            if (response.ok) {
+                                                alert('All provider statistics have been reset successfully.');
+                                            } else {
+                                                alert('Failed to reset provider statistics.');
+                                            }
+                                        } catch (error) {
+                                            alert('Error resetting provider statistics: ' + error);
+                                        }
+                                    }
+                                }}
+                            >
+                                Reset All Provider Statistics
+                            </Button>
+                            <div style={{ fontSize: '0.8rem', color: 'var(--bs-secondary-color)', marginTop: '4px' }}>
+                                Clears all learned provider performance data. The system will relearn preferences as files are accessed.
+                            </div>
+                        </div>
+                    )}
                 </div>
                 <div className={styles["form-group"]}>
                     <div className={styles["form-checkbox-wrapper"]}>
@@ -747,6 +848,9 @@ function ProviderModal({ show, provider, onClose, onSave }: ProviderModalProps) 
 export function isUsenetSettingsUpdated(config: Record<string, string>, newConfig: Record<string, string>) {
     return config["usenet.providers"] !== newConfig["usenet.providers"]
         || config["stats.enable"] !== newConfig["stats.enable"]
+        || config["analysis.enable"] !== newConfig["analysis.enable"]
+        || config["analysis.max-concurrent"] !== newConfig["analysis.max-concurrent"]
+        || config["provider-affinity.enable"] !== newConfig["provider-affinity.enable"]
         || config["usenet.hide-samples"] !== newConfig["usenet.hide-samples"]
         || config["usenet.stream-buffer-size"] !== newConfig["usenet.stream-buffer-size"]
         || config["usenet.operation-timeout"] !== newConfig["usenet.operation-timeout"];

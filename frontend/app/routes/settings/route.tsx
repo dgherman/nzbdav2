@@ -10,6 +10,7 @@ import { isArrsSettingsUpdated, isArrsSettingsValid, ArrsSettings } from "./arrs
 import { Maintenance } from "./maintenance/maintenance";
 import { isRepairsSettingsUpdated, isRepairsSettingsValid, RepairsSettings } from "./repairs/repairs";
 import { GeneralSettings, isGeneralSettingsUpdated } from "./general/general";
+import { DebugSettings } from "./debug/debug";
 
 const defaultConfig = {
     "general.base-url": "",
@@ -29,6 +30,7 @@ const defaultConfig = {
     "usenet.connections-per-stream": "5",
     "usenet.stream-buffer-size": "100",
     "usenet.hide-samples": "false",
+    "usenet.operation-timeout": "90",
     "webdav.user": "admin",
     "webdav.pass": "",
     "webdav.show-hidden-files": "false",
@@ -39,7 +41,11 @@ const defaultConfig = {
     "arr.instances": "{\"RadarrInstances\":[],\"SonarrInstances\":[],\"QueueRules\":[]}",
     "repair.connections": "",
     "repair.enable": "false",
+    "repair.min-check-interval-days": "",
     "stats.enable": "false",
+    "analysis.enable": "true",
+    "analysis.max-concurrent": "3",
+    "provider-affinity.enable": "true",
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
@@ -150,6 +156,9 @@ function Body(props: BodyProps) {
                 </Tab>
                 <Tab eventKey="repairs" title={repairsTitle}>
                     <RepairsSettings config={newConfig} setNewConfig={setNewConfig} />
+                </Tab>
+                <Tab eventKey="debug" title="Debug Logs">
+                    <DebugSettings />
                 </Tab>
                 <Tab eventKey="maintenance" title="Maintenance">
                     <Maintenance savedConfig={config} />

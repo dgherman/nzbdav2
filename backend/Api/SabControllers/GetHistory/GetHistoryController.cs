@@ -21,6 +21,15 @@ public class GetHistoryController(
             query = query.Where(q => request.NzoIds.Contains(q.Id));
         if (request.Category != null)
             query = query.Where(q => q.Category == request.Category);
+        if (request.Status.HasValue)
+            query = query.Where(q => q.DownloadStatus == request.Status.Value);
+        // Always show hidden items - don't filter them out
+        // if (!request.ShowHidden)
+        //     query = query.Where(q => !q.IsHidden);
+        if (!string.IsNullOrWhiteSpace(request.Search))
+            query = query.Where(q => EF.Functions.Like(q.JobName, $"%{request.Search}%"));
+        if (!string.IsNullOrWhiteSpace(request.FailureReason))
+            query = query.Where(q => q.FailureReason == request.FailureReason);
 
         // get total count
         var totalCountPromise = query

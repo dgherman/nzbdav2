@@ -7,6 +7,8 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Queue;
 using NzbWebDAV.Websocket;
 
+using NzbWebDAV.Services;
+
 namespace NzbWebDAV.WebDav;
 
 public class DatabaseStore(
@@ -15,7 +17,8 @@ public class DatabaseStore(
     ConfigManager configManager,
     UsenetStreamingClient usenetClient,
     QueueManager queueManager,
-    WebsocketManager websocketManager
+    WebsocketManager websocketManager,
+    NzbAnalysisService nzbAnalysisService
 ) : IStore
 {
     private readonly DatabaseStoreCollection _root = new(
@@ -25,7 +28,8 @@ public class DatabaseStore(
         configManager,
         usenetClient,
         queueManager,
-        websocketManager
+        websocketManager,
+        nzbAnalysisService
     );
 
     public async Task<IStoreItem?> GetItemAsync(string path, CancellationToken cancellationToken)

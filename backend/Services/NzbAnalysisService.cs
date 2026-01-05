@@ -2,9 +2,11 @@ using System.Collections.Concurrent;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Extensions;
 using NzbWebDAV.Utils;
 using NzbWebDAV.Websocket;
 using Serilog;
@@ -42,7 +44,7 @@ public class NzbAnalysisService(
 
     private async Task PerformAnalysis(Guid fileId, string[] segmentIds)
     {
-        var info = new AnalysisInfo { Id = fileId, Name = "Initializing..." };
+        var info = new AnalysisInfo { Id = fileId, Name = "Queued" };
         if (!_activeAnalyses.TryAdd(fileId, info)) return;
 
         // Wait for available analysis slot
@@ -104,7 +106,15 @@ public class NzbAnalysisService(
                 }
             };
 
-            var sizes = await usenetClient.AnalyzeNzbAsync(segmentIds, 10, progressHook, CancellationToken.None).ConfigureAwait(false);
+            // Create cancellation token with usage context so analysis operations show up in stats
+            using var cts = new CancellationTokenSource();
+            var usageContext = new ConnectionUsageContext(
+                ConnectionUsageType.Analysis,
+                new ConnectionUsageDetails { Text = file.DavItem?.Path ?? info.Name }
+            );
+            using var _ = cts.Token.SetScopedContext(usageContext);
+
+            var sizes = await usenetClient.AnalyzeNzbAsync(segmentIds, 10, progressHook, cts.Token).ConfigureAwait(false);
 
             file.SetSegmentSizes(sizes);
             dbContext.NzbFiles.Update(file);

@@ -1,27 +1,33 @@
 import type { Route } from "./+types/route";
 import styles from "./route.module.css"
-import { backendClient } from "~/clients/backend-client.server";
+import { backendClient, type AnalysisItem } from "~/clients/backend-client.server";
+import type { FileDetails } from "~/types/file-details";
 import { HealthTable } from "./components/health-table/health-table";
+import { AnalysisTable } from "./components/analysis-table/analysis-table";
 import { HealthStats } from "./components/health-stats/health-stats";
+import { FileDetailsModal } from "./components/file-details-modal/file-details-modal";
 import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
-import { Alert } from "react-bootstrap";
+import { Alert, Tabs, Tab } from "react-bootstrap";
 
 const topicNames = {
     healthItemStatus: 'hs',
     healthItemProgress: 'hp',
+    analysisItemProgress: 'ap',
 }
 const topicSubscriptions = {
     [topicNames.healthItemStatus]: 'event',
     [topicNames.healthItemProgress]: 'event',
+    [topicNames.analysisItemProgress]: 'event',
 }
 
 export async function loader() {
     const enabledKey = 'repair.enable';
-    const [queueData, historyData, config] = await Promise.all([
+    const [queueData, historyData, config, analysisData] = await Promise.all([
         backendClient.getHealthCheckQueue(30),
         backendClient.getHealthCheckHistory(),
-        backendClient.getConfig([enabledKey])
+        backendClient.getConfig([enabledKey]),
+        backendClient.getActiveAnalyses()
     ]);
 
     return {
@@ -30,6 +36,7 @@ export async function loader() {
         queueItems: queueData.items,
         historyStats: historyData.stats,
         historyItems: historyData.items,
+        activeAnalyses: analysisData,
         isEnabled: config
             .filter(x => x.configName === enabledKey)
             .filter(x => x.configValue.toLowerCase() === "true")
@@ -41,11 +48,15 @@ export default function Health({ loaderData }: Route.ComponentProps) {
     const { isEnabled } = loaderData;
     const [historyStats, setHistoryStats] = useState(loaderData.historyStats);
     const [queueItems, setQueueItems] = useState(loaderData.queueItems);
+    const [analysisItems, setAnalysisItems] = useState<AnalysisItem[]>(loaderData.activeAnalyses);
     const [uncheckedCount, setUncheckedCount] = useState(loaderData.uncheckedCount);
     const [pendingCount, setPendingCount] = useState(loaderData.pendingCount);
     const [page, setPage] = useState(0);
     const [search, setSearch] = useState("");
     const [showAll, setShowAll] = useState(false);
+    const [showDetailsModal, setShowDetailsModal] = useState(false);
+    const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
+    const [loadingFileDetails, setLoadingFileDetails] = useState(false);
 
     // effects
     useEffect(() => {
@@ -113,15 +124,45 @@ export default function Health({ loaderData }: Route.ComponentProps) {
         });
     }, [setQueueItems]);
 
+    const onAnalysisItemProgress = useCallback((message: string) => {
+        const [id, progress, name, jobName] = message.split('|');
+        if (progress === "done") {
+            setAnalysisItems(items => items.filter(x => x.id !== id));
+            return;
+        }
+        if (progress === "error") {
+            setAnalysisItems(items => items.filter(x => x.id !== id));
+            return;
+        }
+        if (progress === "start") {
+            setAnalysisItems(items => {
+                if (items.find(x => x.id === id)) return items;
+                return [...items, { id, name: name || "Analyzing...", jobName: jobName || undefined, progress: 0, startedAt: new Date().toISOString() }];
+            });
+            return;
+        }
+
+        setAnalysisItems(items => {
+            const existing = items.find(x => x.id === id);
+            if (existing) {
+                return items.map(x => x.id === id ? { ...x, progress: Number(progress) } : x);
+            }
+            return items;
+        });
+    }, [setAnalysisItems]);
+
     // websocket
     const onWebsocketMessage = useCallback((topic: string, message: string) => {
         if (topic == topicNames.healthItemStatus)
             onHealthItemStatus(message);
         else if (topic == topicNames.healthItemProgress)
             onHealthItemProgress(message);
+        else if (topic == topicNames.analysisItemProgress)
+            onAnalysisItemProgress(message);
     }, [
         onHealthItemStatus,
-        onHealthItemProgress
+        onHealthItemProgress,
+        onAnalysisItemProgress
     ]);
 
     useEffect(() => {
@@ -173,7 +214,51 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
         }, [setQueueItems]);
 
-    
+    const onItemClick = useCallback(async (davItemId: string) => {
+        setShowDetailsModal(true);
+        setLoadingFileDetails(true);
+        setSelectedFileDetails(null);
+
+        try {
+            const response = await fetch(`/api/file-details/${davItemId}`);
+            if (response.ok) {
+                const fileDetails = await response.json();
+                setSelectedFileDetails(fileDetails);
+            } else {
+                console.error('Failed to fetch file details:', await response.text());
+            }
+        } catch (error) {
+            console.error('Error fetching file details:', error);
+        } finally {
+            setLoadingFileDetails(false);
+        }
+    }, []);
+
+    const onHideDetailsModal = useCallback(() => {
+        setShowDetailsModal(false);
+        setSelectedFileDetails(null);
+    }, []);
+
+    const onResetFileStats = useCallback(async (jobName: string) => {
+        try {
+            const response = await fetch(`/api/reset-provider-stats?jobName=${encodeURIComponent(jobName)}`, {
+                method: 'POST'
+            });
+
+            if (response.ok) {
+                // Refresh the file details to show updated (empty) stats
+                setSelectedFileDetails(prev => prev ? { ...prev, providerStats: [] } : null);
+                alert('Provider statistics for this file have been reset successfully.');
+            } else {
+                alert('Failed to reset provider statistics.');
+            }
+        } catch (error) {
+            console.error('Error resetting file provider stats:', error);
+            alert('Error resetting provider statistics: ' + error);
+        }
+    }, []);
+
+
 
         return (
 
@@ -217,35 +302,59 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
                 }
 
-                <div className={styles.section}>
+                                <div className={styles.section}>
 
-                    <HealthTable 
+                                    <Tabs defaultActiveKey="health" className="mb-3">
 
-                        isEnabled={isEnabled} 
+                                        <Tab eventKey="health" title="Health Check Queue">
 
-                        healthCheckItems={queueItems} 
+                                            <HealthTable
 
-                        totalCount={uncheckedCount}
+                                                isEnabled={isEnabled}
 
-                        page={page}
+                                                healthCheckItems={queueItems}
 
-                        pageSize={30}
+                                                totalCount={uncheckedCount}
 
-                        search={search}
+                                                page={page}
 
-                        showAll={showAll}
+                                                pageSize={30}
 
-                        onPageChange={setPage}
+                                                search={search}
 
-                        onSearchChange={(s) => { setSearch(s); setPage(0); }}
+                                                showAll={showAll}
 
-                        onShowAllChange={(val) => { setShowAll(val); setPage(0); }}
+                                                onPageChange={setPage}
 
-                        onRunHealthCheck={onRunHealthCheck}
+                                                onSearchChange={(s) => { setSearch(s); setPage(0); }}
 
-                    />
+                                                onShowAllChange={(val) => { setShowAll(val); setPage(0); }}
 
-                </div>
+                                                onRunHealthCheck={onRunHealthCheck}
+
+                                                onItemClick={onItemClick}
+
+                                            />
+
+                                        </Tab>
+
+                                        <Tab eventKey="analysis" title={`Active Analyses (${analysisItems.length})`}>
+
+                                            <AnalysisTable items={analysisItems} />
+
+                                        </Tab>
+
+                                    </Tabs>
+
+                                </div>
+
+                <FileDetailsModal
+                    show={showDetailsModal}
+                    onHide={onHideDetailsModal}
+                    fileDetails={selectedFileDetails}
+                    loading={loadingFileDetails}
+                    onResetStats={onResetFileStats}
+                />
 
             </div>
 

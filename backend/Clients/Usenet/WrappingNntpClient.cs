@@ -1,8 +1,7 @@
 ﻿using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Streams;
-using Usenet.Nntp.Responses;
+using UsenetSharp.Models;
 using Usenet.Nzb;
-using Usenet.Yenc;
 
 namespace NzbWebDAV.Clients.Usenet;
 
@@ -21,12 +20,12 @@ public abstract class WrappingNntpClient(INntpClient client) : INntpClient
         return Client.AuthenticateAsync(user, pass, cancellationToken);
     }
 
-    public virtual Task<NntpStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
+    public virtual Task<UsenetStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
     {
         return Client.StatAsync(segmentId, cancellationToken);
     }
 
-    public virtual Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken)
+    public virtual Task<UsenetDateResponse> DateAsync(CancellationToken cancellationToken)
     {
         return Client.DateAsync(cancellationToken);
     }
@@ -46,7 +45,7 @@ public abstract class WrappingNntpClient(INntpClient client) : INntpClient
         return Client.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken);
     }
 
-    public virtual Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
+    public virtual Task<UsenetYencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
     {
         return Client.GetSegmentYencHeaderAsync(segmentId, cancellationToken);
     }
@@ -61,7 +60,7 @@ public abstract class WrappingNntpClient(INntpClient client) : INntpClient
         return Client.WaitForReady(cancellationToken);
     }
 
-    public virtual Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
+    public virtual Task<UsenetGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
     {
         return Client.GroupAsync(group, cancellationToken);
     }

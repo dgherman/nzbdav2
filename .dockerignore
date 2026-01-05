@@ -1,0 +1,9 @@
+**/bin
+**/obj
+.git
+.vs
+.vscode
+.idea
+**/node_modules
+**/dist-node
+**/build

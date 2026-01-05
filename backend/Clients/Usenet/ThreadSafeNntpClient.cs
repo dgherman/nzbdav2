@@ -1,59 +1,80 @@
-﻿using NzbWebDAV.Clients.Usenet.Models;
+﻿using System.Diagnostics;
+using System.Collections.Immutable;
+using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
-using Usenet.Nntp;
-using Usenet.Nntp.Models;
-using Usenet.Nntp.Responses;
 using Usenet.Nzb;
-using Usenet.Yenc;
+using UsenetSharp.Clients;
+using UsenetSharp.Models;
+using UsenetSharp.Streams;
 using Serilog;
 
 namespace NzbWebDAV.Clients.Usenet;
 
 public class ThreadSafeNntpClient : INntpClient
 {
-    private readonly NntpConnection _connection;
-    private readonly NntpClient _client;
+    private readonly UsenetClient _client;
     private readonly SemaphoreSlim _semaphore = new(1, 1);
+    private readonly BandwidthService? _bandwidthService;
+    private readonly int _providerIndex;
     private string? _currentGroup;
 
-    public ThreadSafeNntpClient()
+    public ThreadSafeNntpClient(BandwidthService? bandwidthService = null, int providerIndex = -1)
     {
-        _connection = new NntpConnection();
-        _client = new NntpClient(_connection);
+        _client = new UsenetClient();
+        _bandwidthService = bandwidthService;
+        _providerIndex = providerIndex;
     }
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
     {
         // Reset state on connect
-        return Synchronized(() => { _currentGroup = null; return _client.ConnectAsync(host, port, useSsl); }, cancellationToken);
+        return Synchronized(async () => {
+            _currentGroup = null;
+            await _client.ConnectAsync(host, port, useSsl, cancellationToken).ConfigureAwait(false);
+            return true;
+        }, cancellationToken);
     }
 
     public Task<bool> AuthenticateAsync(string user, string pass, CancellationToken cancellationToken)
     {
-        return Synchronized(() => _client.Authenticate(user, pass), cancellationToken);
+        return Synchronized(async () => {
+            var response = await _client.AuthenticateAsync(user, pass, cancellationToken).ConfigureAwait(false);
+            return response.ResponseCode == 281;
+        }, cancellationToken);
     }
 
-
-    public Task<NntpStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
+    public Task<UsenetStatResponse> StatAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return Synchronized(() => _client.Stat(new NntpMessageId(segmentId)), cancellationToken);
+        return Synchronized(() => _client.StatAsync(new SegmentId(segmentId), cancellationToken), cancellationToken, recordLatency: true);
     }
 
-    public Task<NntpDateResponse> DateAsync(CancellationToken cancellationToken)
+    public Task<UsenetDateResponse> DateAsync(CancellationToken cancellationToken)
     {
-        return Synchronized(() => _client.Date(), cancellationToken);
+        return Synchronized(() => _client.DateAsync(cancellationToken), cancellationToken, recordLatency: true);
     }
 
     public Task<UsenetArticleHeaders> GetArticleHeadersAsync(string segmentId, CancellationToken cancellationToken)
     {
-        return Synchronized(() =>
+        return Synchronized(async () =>
         {
-            var headResponse = _client.Head(new NntpMessageId(segmentId));
-            if (headResponse?.Article?.Headers == null) throw new UsenetArticleNotFoundException(segmentId);
-            return new UsenetArticleHeaders(headResponse.Article.Headers);
-        }, cancellationToken);
+            var headResponse = await _client.HeadAsync(new SegmentId(segmentId), cancellationToken).ConfigureAwait(false);
+            if (headResponse.ResponseCode != 221 || headResponse.ArticleHeaders == null) 
+                throw new UsenetArticleNotFoundException(segmentId);
+            
+            // Convert Dictionary to ImmutableDictionary<string, ImmutableHashSet<string>>
+            // UsenetSharp returns Dictionary<string, string> where value is the full header value.
+            // The old Usenet library had ImmutableHashSet for multi-value headers.
+            // For now, we wrap the single string in a set.
+            var headers = headResponse.ArticleHeaders.Headers.ToImmutableDictionary(
+                kvp => kvp.Key,
+                kvp => ImmutableHashSet.Create(kvp.Value)
+            );
+            
+            return new UsenetArticleHeaders(headers);
+        }, cancellationToken, recordLatency: true);
     }
 
     public async Task<YencHeaderStream> GetSegmentStreamAsync
@@ -66,77 +87,119 @@ public class ThreadSafeNntpClient : INntpClient
         await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await Task.Run(() =>
+            // We use a manual tracking here instead of Synchronized because we need to handle the stream disposal
+            // and semaphore release carefully.
+            var start = Stopwatch.GetTimestamp();
+            
+            Stream innerStream;
+            UsenetArticleHeaders? articleHeaders = null;
+
+            if (includeHeaders)
+            {
+                var response = await _client.ArticleAsync(new SegmentId(segmentId), null, cancellationToken).ConfigureAwait(false);
+                if (response.ResponseCode != 220 || response.Stream == null) 
+                    throw new UsenetArticleNotFoundException(segmentId);
+                innerStream = response.Stream;
+                if (response.ArticleHeaders != null)
+                {
+                    var headers = response.ArticleHeaders.Headers.ToImmutableDictionary(
+                        kvp => kvp.Key,
+                        kvp => ImmutableHashSet.Create(kvp.Value)
+                    );
+                    articleHeaders = new UsenetArticleHeaders(headers);
+                }
+            }
+            else
+            {
+                var response = await _client.BodyAsync(new SegmentId(segmentId), null, cancellationToken).ConfigureAwait(false);
+                if (response.ResponseCode != 222 || response.Stream == null) 
+                    throw new UsenetArticleNotFoundException(segmentId);
+                innerStream = response.Stream;
+            }
+
+            if (_bandwidthService != null && _providerIndex >= 0)
+            {
+                var elapsedMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+                _bandwidthService.RecordLatency(_providerIndex, (int)elapsedMs);
+            }
+
+            // Wrap in YencStream for decoding
+            var yencStream = new YencStream(innerStream);
+            
+            // Read headers eagerly to ensure it's valid yEnc
+            var yencHeader = await yencStream.GetYencHeadersAsync(cancellationToken).ConfigureAwait(false);
+            if (yencHeader == null) throw new InvalidDataException("Missing yEnc headers");
+
+            return new YencHeaderStream(
+                yencHeader,
+                articleHeaders,
+                new BufferToEndStream(((Stream)yencStream).OnDispose(OnDispose))
+            );
+
+
+            void OnDispose()
             {
                 try
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var article = GetArticle(segmentId, includeHeaders);
-                    var stream = YencStreamDecoder.Decode(article.Body);
-                    return new YencHeaderStream(
-                        stream.Header,
-                        article.Headers,
-                        new BufferToEndStream(stream.OnDispose(OnDispose))
-                    );
-
-                    void OnDispose()
-                    {
-                        try
-                        {
-                            _semaphore.Release();
-                        }
-                        catch (ObjectDisposedException) { }
-                    }
+                    _semaphore.Release();
                 }
-                catch (Exception ex)
-                {
-                    // If the article is not found, or if there's a network IO exception (e.g. connection aborted),
-                    // or a protocol exception (invalid response), we just rethrow it. The caller (MultiProviderNntpClient)
-                    // is responsible for handling this (e.g. trying another provider).
-                    if (ex is UsenetArticleNotFoundException || ex is System.IO.IOException || ex is TimeoutException || ex is global::Usenet.Exceptions.NntpException || ex is ObjectDisposedException)
-                    {
-                        try
-                        {
-                            _semaphore.Release();
-                        }
-                        catch (ObjectDisposedException) { }
-                        throw;
-                    }
-
-                    // Check if the stack trace contains the specific line the user wants to suppress.
-                    // This is a heuristic to avoid suppressing all exceptions from this method,
-                    // but target only those that surface with this particular stack context.
-                    if (ex.StackTrace?.Contains("NzbWebDAV.Clients.Usenet.ThreadSafeNntpClient.GetSegmentStreamAsync") == true)
-                    {
-                        Log.Error("An error occurred in GetSegmentStreamAsync that would typically print a stack trace. Message: {ErrorMessage}", ex.Message);
-                    }
-                    else
-                    {
-                        // For other exceptions, log with stack trace
-                        Log.Error(ex, "An unhandled error occurred in GetSegmentStreamAsync.");
-                    }
-
-                    try
-                    {
-                        _semaphore.Release();
-                    }
-                    catch (ObjectDisposedException) { }
-                    throw;
-                }
-            }, cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
+                catch (ObjectDisposedException) { }
+            }
         }
-        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+        catch (Exception ex)
         {
-            Dispose();
+            if (ex is UsenetArticleNotFoundException || ex is System.IO.IOException || ex is TimeoutException || ex is UsenetSharp.Exceptions.UsenetException || ex is ObjectDisposedException || ex is OperationCanceledException)
+            {
+                try { _semaphore.Release(); } catch (ObjectDisposedException) { }
+                throw;
+            }
+
+            Log.Error(ex, "An unhandled error occurred in GetSegmentStreamAsync.");
+            try { _semaphore.Release(); } catch (ObjectDisposedException) { }
             throw;
         }
     }
 
-    public async Task<YencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
+    public async Task<UsenetYencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
     {
-        await using var stream = await GetSegmentStreamAsync(new NntpMessageId(segmentId), false, cancellationToken)
-            .ConfigureAwait(false);
-        return stream.Header;
+        // Optimized implementation: Abort connection after reading header to save bandwidth.
+        await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var start = Stopwatch.GetTimestamp();
+            
+            var response = await _client.BodyAsync(new SegmentId(segmentId), null, cancellationToken).ConfigureAwait(false);
+            if (response.ResponseCode != 222 || response.Stream == null) 
+                throw new UsenetArticleNotFoundException(segmentId);
+
+            if (_bandwidthService != null && _providerIndex >= 0)
+            {
+                var elapsedMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+                _bandwidthService.RecordLatency(_providerIndex, (int)elapsedMs);
+            }
+
+            using var stream = response.Stream;
+            using var yencStream = new YencStream(stream);
+            
+            var header = await yencStream.GetYencHeadersAsync(cancellationToken).ConfigureAwait(false);
+            if (header == null) throw new InvalidDataException("Missing yEnc headers");
+
+            // ABORT: Dispose the client to kill the socket and stop downloading the rest of the body.
+            // This poisons the connection pool item, forcing a new connection next time.
+            _client.Dispose();
+            
+            return header;
+        }
+        catch (Exception)
+        {
+            // If anything fails, or we dispose, we must release semaphore.
+            // If we disposed _client, future calls will fail, effectively retiring this instance.
+            throw;
+        }
+        finally
+        {
+            try { _semaphore.Release(); } catch (ObjectDisposedException) { }
+        }
     }
 
     public async Task<long> GetFileSizeAsync(NzbFile file, CancellationToken cancellationToken)
@@ -150,43 +213,71 @@ public class ThreadSafeNntpClient : INntpClient
     public async Task WaitForReady(CancellationToken cancellationToken)
     {
         await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
+        // Also wait for client lock? 
+        // ThreadSafeNntpClient wraps access, so semaphore is enough.
+        // But we should check if client is disposed.
+        
+        // UsenetSharp client doesn't expose IsDisposed directly but calling methods will throw.
+        // We can just release.
         _semaphore.Release();
     }
 
-    public Task<NntpGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
+    public Task<UsenetGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)
     {
-        return Synchronized(() => _client.Group(group), cancellationToken);
+        return Synchronized(() => _client.GroupAsync(group, cancellationToken), cancellationToken, recordLatency: true);
     }
 
     public Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken cancellationToken)
     {
-        return Synchronized(() =>
+        // This method was used to download body and return size.
+        // Not used in critical path?
+        // We can implement it using BodyAsync and counting bytes.
+        return Synchronized(async () =>
         {
-            var response = _client.Body(articleId);
-            if (response.Code != 222) throw new Exception($"Article {articleId} not found: {response.Message}");
+            // UsenetSharp doesn't support article ID as long? 
+            // SegmentId supports string.
+            // NNTP "BODY article-id" can be numeric.
+            // SegmentId constructor takes string.
+            
+            var response = await _client.BodyAsync(new SegmentId(articleId.ToString()), null, cancellationToken).ConfigureAwait(false);
+            if (response.ResponseCode != 222 || response.Stream == null) 
+                throw new Exception($"Article {articleId} not found");
+
+            using var stream = response.Stream;
+            // Drain and count
+            var buffer = new byte[8192];
             long size = 0;
-            foreach (var line in response.Article.Body)
+            int read;
+            while ((read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false)) > 0)
             {
-                size += line.Length + 2; // Approximate CRLF
+                size += read;
             }
             return size;
         }, cancellationToken);
     }
 
-    private Task<T> Synchronized<T>(Func<T> run, CancellationToken cancellationToken)
+    private Task<T> Synchronized<T>(Func<Task<T>> run, CancellationToken cancellationToken, bool recordLatency = false)
     {
-        return Synchronized(() => Task.Run(run, cancellationToken), cancellationToken);
+        return SynchronizedInternal(run, cancellationToken, recordLatency);
     }
 
-    private async Task<T> Synchronized<T>(Func<Task<T>> run, CancellationToken cancellationToken)
+    private async Task<T> SynchronizedInternal<T>(Func<Task<T>> run, CancellationToken cancellationToken, bool recordLatency = false)
     {
         await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            return await run().WaitAsync(cancellationToken).ConfigureAwait(false);
+            var start = Stopwatch.GetTimestamp();
+            var result = await run().ConfigureAwait(false);
+            if (recordLatency && _bandwidthService != null && _providerIndex >= 0)
+            {
+                var elapsedMs = Stopwatch.GetElapsedTime(start).TotalMilliseconds;
+                _bandwidthService.RecordLatency(_providerIndex, (int)elapsedMs);
+            }
+            return result;
         }
-        catch (Exception ex) when (ex is OperationCanceledException or TimeoutException)
+        catch (Exception ex) when (ex is OperationCanceledException || ex is TimeoutException || ex is UsenetSharp.Exceptions.UsenetException)
         {
+            // If network error, dispose
             Dispose();
             throw;
         }
@@ -198,37 +289,14 @@ public class ThreadSafeNntpClient : INntpClient
             }
             catch (ObjectDisposedException)
             {
-                // Ignore if semaphore was disposed
+                // Ignore
             }
         }
     }
 
-    private UsenetArticle GetArticle(string segmentId, bool includeHeaders)
-    {
-        if (includeHeaders)
-        {
-            var articleResponse = _client.Article(new NntpMessageId(segmentId));
-            if (articleResponse?.Article?.Body == null) throw new UsenetArticleNotFoundException(segmentId);
-            return new UsenetArticle()
-            {
-                Headers = new UsenetArticleHeaders(articleResponse.Article.Headers),
-                Body = articleResponse.Article.Body
-            };
-        }
-
-        var bodyResponse = _client.Body(new NntpMessageId(segmentId));
-        if (bodyResponse?.Article?.Body == null) throw new UsenetArticleNotFoundException(segmentId);
-        return new UsenetArticle()
-        {
-            Headers = null,
-            Body = bodyResponse.Article.Body
-        };
-    }
-
     public void Dispose()
     {
+        _client.Dispose();
         _semaphore.Dispose();
-        _connection.Dispose();
-        GC.SuppressFinalize(this);
     }
 }

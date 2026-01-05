@@ -1,11 +1,11 @@
 ﻿using NzbWebDAV.Clients.Usenet.Models;
-using Usenet.Yenc;
+using UsenetSharp.Models;
 
 namespace NzbWebDAV.Streams;
 
-public class YencHeaderStream(YencHeader header, UsenetArticleHeaders? articleHeaders, Stream stream) : Stream
+public class YencHeaderStream(UsenetYencHeader header, UsenetArticleHeaders? articleHeaders, Stream stream) : Stream
 {
-    public YencHeader Header => header;
+    public UsenetYencHeader Header => header;
     public UsenetArticleHeaders? ArticleHeaders => articleHeaders;
     private bool _disposed;
 

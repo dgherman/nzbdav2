@@ -1,6 +1,7 @@
 ﻿using System.Text.RegularExpressions;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
+using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
 using NzbWebDAV.Queue.DeobfuscationSteps._3.GetFileInfos;
@@ -22,30 +23,60 @@ public class RarProcessor(
 {
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
+        Log.Information("[RarProcessor] Starting RAR processing for {FileName}", fileInfo.FileName);
+
         if (fileInfo.MissingFirstSegment)
         {
-            Log.Error($"[RarProcessor] Skipping {fileInfo.FileName} because the first segment is missing.");
+            Log.Error("[RarProcessor] Skipping {FileName} because the first segment is missing.", fileInfo.FileName);
             throw new NzbWebDAV.Exceptions.UsenetArticleNotFoundException(fileInfo.NzbFile.Segments.FirstOrDefault()?.MessageId ?? "unknown");
         }
 
-        Log.Debug($"[RarProcessor] Initializing stream for {fileInfo.FileName}");
+        Log.Debug("[RarProcessor] Initializing stream for {FileName}. FileSize: {FileSize}, Segments: {SegmentCount}",
+            fileInfo.FileName, fileInfo.FileSize, fileInfo.NzbFile.Segments.Count);
         await using var stream = await GetNzbFileStream().ConfigureAwait(false);
+        Log.Debug("[RarProcessor] Stream initialized. Length: {StreamLength}", stream.Length);
 
         // Create a linked token source with a timeout for the header parsing operation
         using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         headerCts.CancelAfter(TimeSpan.FromSeconds(60));
 
-        Log.Debug($"[RarProcessor] Reading RAR headers for {fileInfo.FileName} (timeout 60s)...");
+        Log.Information("[RarProcessor] Reading RAR headers for {FileName} (timeout 60s)...", fileInfo.FileName);
+        var headerStartTime = DateTime.UtcNow;
         List<IRarHeader> headers;
         try
         {
             headers = await RarUtil.GetRarHeadersAsync(stream, password, headerCts.Token).ConfigureAwait(false);
-            Log.Debug($"[RarProcessor] Successfully read {headers.Count} RAR headers for {fileInfo.FileName}");
+            var headerElapsed = DateTime.UtcNow - headerStartTime;
+            Log.Information("[RarProcessor] Successfully read {HeaderCount} RAR headers for {FileName} in {ElapsedSeconds}s",
+                headers.Count, fileInfo.FileName, headerElapsed.TotalSeconds);
         }
         catch (OperationCanceledException) when (headerCts.IsCancellationRequested && !ct.IsCancellationRequested)
         {
-            Log.Error($"[RarProcessor] Timeout reading RAR headers for {fileInfo.FileName}");
+            var headerElapsed = DateTime.UtcNow - headerStartTime;
+            Log.Error("[RarProcessor] Timeout reading RAR headers for {FileName} after {ElapsedSeconds}s",
+                fileInfo.FileName, headerElapsed.TotalSeconds);
             throw new TimeoutException("Timed out while reading RAR headers (limit: 60s). This usually indicates a corrupt or malformed archive.");
+        }
+        catch (IOException ex)
+        {
+            var headerElapsed = DateTime.UtcNow - headerStartTime;
+            Log.Error("[RarProcessor] IOException reading RAR headers for {FileName} after {ElapsedSeconds}s: {Message}",
+                fileInfo.FileName, headerElapsed.TotalSeconds, ex.Message);
+            throw;
+        }
+        catch (SharpCompress.Common.InvalidFormatException ex)
+        {
+            var headerElapsed = DateTime.UtcNow - headerStartTime;
+            Log.Error("[RarProcessor] Invalid RAR format reading headers for {FileName} after {ElapsedSeconds}s: {Message}. Treating as missing/corrupt article.",
+                fileInfo.FileName, headerElapsed.TotalSeconds, ex.Message);
+            throw new UsenetArticleNotFoundException(fileInfo.NzbFile.Segments.FirstOrDefault()?.MessageId ?? "unknown");
+        }
+        catch (Exception ex)
+        {
+            var headerElapsed = DateTime.UtcNow - headerStartTime;
+            Log.Error(ex, "[RarProcessor] Unexpected error reading RAR headers for {FileName} after {ElapsedSeconds}s: {Message}",
+                fileInfo.FileName, headerElapsed.TotalSeconds, ex.Message);
+            throw;
         }
 
         var archiveName = GetArchiveName();
@@ -122,7 +153,9 @@ public class RarProcessor(
         // Use adaptive concurrency for faster header reading (limited to 10 to avoid over-subscription)
         var concurrency = Math.Min(maxConcurrentConnections, 10);
         var usageContext = ct.GetContext<ConnectionUsageContext>();
-        return usenet.GetFileStream(fileInfo.NzbFile.GetSegmentIds(), filesize, concurrency, usageContext);
+        
+        var segmentSizes = fileInfo.NzbFile.Segments.Select(x => x.Size).ToArray();
+        return usenet.GetFileStream(fileInfo.NzbFile.GetSegmentIds(), filesize, concurrency, usageContext, segmentSizes: segmentSizes);
     }
 
     public new class Result : BaseProcessor.Result

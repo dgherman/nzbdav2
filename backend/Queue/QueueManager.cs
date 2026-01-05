@@ -63,33 +63,57 @@ public class QueueManager : IDisposable
         CancellationToken ct = default
     )
     {
-        await LockAsync(async () =>
+        Log.Information("[QueueManager] RemoveQueueItemsAsync called for {Count} items: {ItemIds}",
+            queueItemIds.Count, string.Join(", ", queueItemIds));
+
+        // Check if we need to cancel the in-progress item
+        Task? taskToWaitFor = null;
+        await LockAsync(() =>
         {
             var inProgressId = _inProgressQueueItem?.QueueItem?.Id;
             if (inProgressId is not null && queueItemIds.Contains(inProgressId.Value))
             {
-                await _inProgressQueueItem!.CancellationTokenSource.CancelAsync().ConfigureAwait(false);
-                await _inProgressQueueItem.ProcessingTask.ConfigureAwait(false);
-                _inProgressQueueItem = null;
+                Log.Warning("[QueueManager] Cancelling in-progress queue item: {Id}", inProgressId.Value);
+                // Cancel the task but DON'T wait for it while holding the lock (deadlock!)
+                _inProgressQueueItem!.CancellationTokenSource.Cancel();
+                taskToWaitFor = _inProgressQueueItem.ProcessingTask;
             }
-
-            await dbClient.RemoveQueueItemsAsync(queueItemIds, ct).ConfigureAwait(false);
-            await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         }).ConfigureAwait(false);
+
+        // Wait for the cancelled task to complete OUTSIDE the lock to avoid deadlock
+        if (taskToWaitFor != null)
+        {
+            Log.Debug("[QueueManager] Waiting for cancelled task to complete...");
+            try
+            {
+                await taskToWaitFor.ConfigureAwait(false);
+                Log.Information("[QueueManager] Cancelled task completed successfully");
+            }
+            catch (Exception ex)
+            {
+                Log.Debug("[QueueManager] Cancelled task threw exception (expected): {Message}", ex.Message);
+            }
+        }
+
+        // Now remove items from database
+        Log.Debug("[QueueManager] Removing {Count} items from database", queueItemIds.Count);
+        await dbClient.RemoveQueueItemsAsync(queueItemIds, ct).ConfigureAwait(false);
+        await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+        Log.Information("[QueueManager] Successfully removed {Count} queue items", queueItemIds.Count);
     }
 
     private async Task ProcessQueueAsync(CancellationToken ct)
     {
-        Log.Debug("[QueueManager] Starting ProcessQueueAsync main loop");
+        Log.Information("[QueueManager] ProcessQueueAsync loop started");
         while (!ct.IsCancellationRequested)
         {
             try
             {
                 // get the next queue-item from the database
+                Log.Debug("[QueueManager] Fetching next queue item from database...");
                 QueueItem? queueItem = null;
                 QueueNzbContents? queueNzbContents = null;
 
-                Log.Debug("[QueueManager] Fetching next queue item from database");
                 using (var scope = _scopeFactory.CreateScope())
                 {
                     var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
@@ -98,7 +122,7 @@ public class QueueManager : IDisposable
 
                 if (queueItem is null || queueNzbContents is null)
                 {
-                    Log.Debug("[QueueManager] No queue items found, sleeping for 1 minute");
+                    Log.Debug("[QueueManager] No queue items available, sleeping for 1 minute...");
                     try
                     {
                         // if we're done with the queue, wait a minute before checking again.
@@ -118,7 +142,8 @@ public class QueueManager : IDisposable
                     continue;
                 }
 
-                Log.Information("[QueueManager] Starting to process queue item: {QueueItemId}, Name: {QueueItemJobName}", queueItem.Id, queueItem.JobName);
+                Log.Information("[QueueManager] Starting to process queue item: {QueueItemId}, Name: {QueueItemJobName}, Priority: {Priority}, PauseUntil: {PauseUntil}",
+                    queueItem.Id, queueItem.JobName, queueItem.Priority, queueItem.PauseUntil);
                 // process the queue-item
                 using var queueItemCancellationTokenSource = CancellationTokenSource.CreateLinkedTokenSource(ct);
                 await LockAsync(() =>
@@ -131,25 +156,42 @@ public class QueueManager : IDisposable
 
                 Log.Debug("[QueueManager] Waiting for processing task to complete for queue item: {QueueItemId}", queueItem.Id);
                 var processingTask = _inProgressQueueItem?.ProcessingTask ?? Task.CompletedTask;
+                var startTime = DateTime.UtcNow;
 
                 // Add timeout monitoring
                 var completedTask = await Task.WhenAny(processingTask, Task.Delay(TimeSpan.FromMinutes(5), ct)).ConfigureAwait(false);
                 if (completedTask != processingTask)
                 {
-                    Log.Warning("[QueueManager] Queue item {QueueItemId} has not completed after 5 minutes, still waiting...", queueItem.Id);
+                    Log.Warning("[QueueManager] Queue item {QueueItemId} ({JobName}) has not completed after 5 minutes, still waiting...",
+                        queueItem.Id, queueItem.JobName);
                     await processingTask.ConfigureAwait(false);
                 }
 
-                Log.Information("[QueueManager] Completed processing queue item: {QueueItemId}", queueItem.Id);
+                var elapsed = DateTime.UtcNow - startTime;
+                var taskStatus = processingTask.Status;
+                Log.Information("[QueueManager] Completed processing queue item: {QueueItemId} ({JobName}). Status: {TaskStatus}, Elapsed: {ElapsedSeconds}s",
+                    queueItem.Id, queueItem.JobName, taskStatus, elapsed.TotalSeconds);
+
+                // Check if task faulted
+                if (processingTask.IsFaulted && processingTask.Exception != null)
+                {
+                    Log.Error("[QueueManager] Processing task faulted with exception: {Exception}", processingTask.Exception.GetBaseException().Message);
+                }
+                else if (processingTask.IsCanceled)
+                {
+                    Log.Warning("[QueueManager] Processing task was canceled for queue item: {QueueItemId}", queueItem.Id);
+                }
             }
             catch (Exception e)
             {
-                Log.Error(e, "[QueueManager] An unexpected error occurred while processing the queue: {ErrorMessage}", e.Message);
+                Log.Error(e, "[QueueManager] An unexpected error occurred while processing the queue: {ErrorMessage}, StackTrace: {StackTrace}",
+                    e.Message, e.StackTrace);
             }
             finally
             {
+                Log.Debug("[QueueManager] Clearing in-progress queue item");
                 await LockAsync(() => { _inProgressQueueItem = null; }).ConfigureAwait(false);
-                Log.Debug("[QueueManager] Cleared in-progress queue item");
+                Log.Debug("[QueueManager] Loop iteration complete, checking for next item...");
             }
         }
         Log.Debug("[QueueManager] ProcessQueueAsync main loop exited");
@@ -187,9 +229,20 @@ public class QueueManager : IDisposable
         return inProgressQueueItem;
     }
 
-    private async Task LockAsync(Func<Task> actionAsync)
+    private async Task LockAsync(Func<Task> actionAsync, [System.Runtime.CompilerServices.CallerMemberName] string callerName = "")
     {
+        Log.Debug("[QueueManager] [{Caller}] Waiting for semaphore lock...", callerName);
+        var startWait = DateTime.UtcNow;
         await _semaphore.WaitAsync().ConfigureAwait(false);
+        var waitTime = DateTime.UtcNow - startWait;
+        if (waitTime.TotalSeconds > 1)
+        {
+            Log.Warning("[QueueManager] [{Caller}] Acquired semaphore lock after {WaitSeconds}s", callerName, waitTime.TotalSeconds);
+        }
+        else
+        {
+            Log.Debug("[QueueManager] [{Caller}] Acquired semaphore lock", callerName);
+        }
         try
         {
             await actionAsync().ConfigureAwait(false);
@@ -197,12 +250,24 @@ public class QueueManager : IDisposable
         finally
         {
             _semaphore.Release();
+            Log.Debug("[QueueManager] [{Caller}] Released semaphore lock", callerName);
         }
     }
 
-    private async Task<T> LockAsync<T>(Func<Task<T>> actionAsync)
+    private async Task<T> LockAsync<T>(Func<Task<T>> actionAsync, [System.Runtime.CompilerServices.CallerMemberName] string callerName = "")
     {
+        Log.Debug("[QueueManager] [{Caller}] Waiting for semaphore lock...", callerName);
+        var startWait = DateTime.UtcNow;
         await _semaphore.WaitAsync().ConfigureAwait(false);
+        var waitTime = DateTime.UtcNow - startWait;
+        if (waitTime.TotalSeconds > 1)
+        {
+            Log.Warning("[QueueManager] [{Caller}] Acquired semaphore lock after {WaitSeconds}s", callerName, waitTime.TotalSeconds);
+        }
+        else
+        {
+            Log.Debug("[QueueManager] [{Caller}] Acquired semaphore lock", callerName);
+        }
         try
         {
             return await actionAsync().ConfigureAwait(false);
@@ -210,12 +275,24 @@ public class QueueManager : IDisposable
         finally
         {
             _semaphore.Release();
+            Log.Debug("[QueueManager] [{Caller}] Released semaphore lock", callerName);
         }
     }
 
-    private async Task LockAsync(Action action)
+    private async Task LockAsync(Action action, [System.Runtime.CompilerServices.CallerMemberName] string callerName = "")
     {
+        Log.Debug("[QueueManager] [{Caller}] Waiting for semaphore lock...", callerName);
+        var startWait = DateTime.UtcNow;
         await _semaphore.WaitAsync().ConfigureAwait(false);
+        var waitTime = DateTime.UtcNow - startWait;
+        if (waitTime.TotalSeconds > 1)
+        {
+            Log.Warning("[QueueManager] [{Caller}] Acquired semaphore lock after {WaitSeconds}s", callerName, waitTime.TotalSeconds);
+        }
+        else
+        {
+            Log.Debug("[QueueManager] [{Caller}] Acquired semaphore lock", callerName);
+        }
         try
         {
             action();
@@ -223,6 +300,7 @@ public class QueueManager : IDisposable
         finally
         {
             _semaphore.Release();
+            Log.Debug("[QueueManager] [{Caller}] Released semaphore lock", callerName);
         }
     }
 

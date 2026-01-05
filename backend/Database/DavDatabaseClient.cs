@@ -82,6 +82,8 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
     )
     {
         var nowTime = DateTime.Now;
+        Serilog.Log.Debug("[DavDatabaseClient] GetTopQueueItem called. CurrentTime: {Now}", nowTime);
+
         var queueItem = await Ctx.QueueItems.AsNoTracking()
             .OrderByDescending(q => q.Priority)
             .ThenBy(q => q.CreatedAt)
@@ -89,9 +91,26 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
             .Skip(0)
             .Take(1)
             .FirstOrDefaultAsync(ct).ConfigureAwait(false);
+
+        if (queueItem != null)
+        {
+            Serilog.Log.Information("[DavDatabaseClient] Selected queue item: {Id} ({JobName}), Priority: {Priority}, PauseUntil: {PauseUntil}, CreatedAt: {CreatedAt}",
+                queueItem.Id, queueItem.JobName, queueItem.Priority, queueItem.PauseUntil, queueItem.CreatedAt);
+        }
+        else
+        {
+            Serilog.Log.Debug("[DavDatabaseClient] No queue items available");
+        }
+
         var queueNzbContents = queueItem != null
             ? await Ctx.QueueNzbContents.AsNoTracking().FirstOrDefaultAsync(q => q.Id == queueItem.Id, ct).ConfigureAwait(false)
             : null;
+
+        if (queueItem != null && queueNzbContents == null)
+        {
+            Serilog.Log.Warning("[DavDatabaseClient] Found queue item {Id} but no NZB contents!", queueItem.Id);
+        }
+
         return (queueItem, queueNzbContents);
     }
 
@@ -100,12 +119,18 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
         string? category,
         int start = 0,
         int limit = int.MaxValue,
+        string? search = null,
         CancellationToken ct = default
     )
     {
-        var queueItems = category != null
-            ? Ctx.QueueItems.AsNoTracking().Where(q => q.Category == category)
-            : Ctx.QueueItems.AsNoTracking();
+        var queueItems = Ctx.QueueItems.AsNoTracking();
+
+        if (category != null)
+            queueItems = queueItems.Where(q => q.Category == category);
+
+        if (!string.IsNullOrWhiteSpace(search))
+            queueItems = queueItems.Where(q => q.JobName.Contains(search) || q.FileName.Contains(search));
+
         return queueItems
             .OrderByDescending(q => q.Priority)
             .ThenBy(q => q.CreatedAt)
@@ -114,11 +139,16 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
             .ToArrayAsync(cancellationToken: ct);
     }
 
-    public Task<int> GetQueueItemsCount(string? category, CancellationToken ct = default)
+    public Task<int> GetQueueItemsCount(string? category, string? search = null, CancellationToken ct = default)
     {
-        var queueItems = category != null
-            ? Ctx.QueueItems.Where(q => q.Category == category)
-            : Ctx.QueueItems;
+        var queueItems = Ctx.QueueItems.AsQueryable();
+
+        if (category != null)
+            queueItems = queueItems.Where(q => q.Category == category);
+
+        if (!string.IsNullOrWhiteSpace(search))
+            queueItems = queueItems.Where(q => q.JobName.Contains(search) || q.FileName.Contains(search));
+
         return queueItems.CountAsync(cancellationToken: ct);
     }
 
@@ -147,18 +177,54 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
 
     public async Task RemoveHistoryItemsAsync(List<Guid> ids, bool deleteFiles, CancellationToken ct = default)
     {
-        if (deleteFiles)
+        var historyItems = await Ctx.HistoryItems
+            .Where(x => ids.Contains(x.Id))
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        if (historyItems.Count == 0)
         {
-            await Ctx.Items
-                .Where(d => Ctx.HistoryItems
-                    .Where(h => ids.Contains(h.Id) && h.DownloadDirId != null)
-                    .Select(h => h.DownloadDirId!)
-                    .Contains(d.Id))
-                .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            Serilog.Log.Debug("[DavDatabaseClient] RemoveHistoryItemsAsync: No history items found for ids: {Ids}", string.Join(",", ids));
+            return;
         }
 
+        Serilog.Log.Information("[DavDatabaseClient] Removing {Count} history items: {Names}", 
+            historyItems.Count, string.Join(", ", historyItems.Select(h => h.JobName)));
+
+        if (deleteFiles)
+        {
+            var dirIds = historyItems
+                .Where(h => h.DownloadDirId != null)
+                .Select(h => h.DownloadDirId!)
+                .ToList();
+
+            if (dirIds.Count > 0)
+            {
+                Serilog.Log.Information("[DavDatabaseClient] Deleting associated files for {Count} history items", dirIds.Count);
+                await Ctx.Items
+                    .Where(d => dirIds.Contains(d.Id))
+                    .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+            }
+        }
+
+        // Delete the history items from the database
+        Ctx.HistoryItems.RemoveRange(historyItems);
+    }
+
+    public async Task CleanupOldHiddenHistoryItemsAsync(int daysToKeep = 30, CancellationToken ct = default)
+    {
+        var cutoffDate = DateTime.UtcNow.AddDays(-daysToKeep);
+
+        // Delete files for old hidden items
+        await Ctx.Items
+            .Where(d => Ctx.HistoryItems
+                .Where(h => h.IsHidden && h.HiddenAt != null && h.HiddenAt < cutoffDate && h.DownloadDirId != null)
+                .Select(h => h.DownloadDirId!)
+                .Contains(d.Id))
+            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+
+        // Delete old hidden history items
         await Ctx.HistoryItems
-            .Where(x => ids.Contains(x.Id))
+            .Where(h => h.IsHidden && h.HiddenAt != null && h.HiddenAt < cutoffDate)
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
     }
 

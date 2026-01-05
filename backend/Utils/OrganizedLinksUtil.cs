@@ -333,7 +333,12 @@ public static class OrganizedLinksUtil
 
     public static IEnumerable<DavItemLink> GetLibraryDavItemLinks(ConfigManager configManager)
     {
-        var libraryRoot = configManager.GetLibraryDir()!;
+        var libraryRoot = configManager.GetLibraryDir();
+        if (string.IsNullOrEmpty(libraryRoot))
+        {
+            Log.Warning("[OrganizedLinksUtil] Library directory is not configured. Skipping filesystem sync.");
+            return Enumerable.Empty<DavItemLink>();
+        }
         var allSymlinksAndStrms = SymlinkAndStrmUtil.GetAllSymlinksAndStrms(libraryRoot);
         return GetDavItemLinks(allSymlinksAndStrms, configManager);
     }

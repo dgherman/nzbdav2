@@ -56,8 +56,13 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-30-DB-OPTIMIZATIONS");
-        Log.Warning("  FEATURE: Database PRAGMA Optimizations (5-10x faster migrations)");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-05-CORRUPTION-RECOVERY");
+        Log.Warning("  FEATURE: Smart Corruption Recovery with Graceful Degradation");
+        Log.Warning("  - YENC CRC32 validation on all segments");
+        Log.Warning("  - Automatic retry with exponential backoff (3 attempts)");
+        Log.Warning("  - Graceful degradation: zero-filled segments on failure");
+        Log.Warning("  - Corruption tracking for health check triggering");
+        Log.Warning("  - Stream continues playing with minor glitches vs total failure");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -161,6 +166,7 @@ class Program
             .AddSingleton<ArrMonitoringService>()
             .AddSingleton<HealthCheckService>()
             .AddSingleton<NzbAnalysisService>()
+            .AddHostedService<DatabaseMaintenanceService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()

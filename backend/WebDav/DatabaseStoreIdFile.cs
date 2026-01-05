@@ -6,6 +6,8 @@ using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.WebDav.Base;
 
+using NzbWebDAV.Services;
+
 namespace NzbWebDAV.WebDav;
 
 public class DatabaseStoreIdFile(
@@ -13,7 +15,8 @@ public class DatabaseStoreIdFile(
     HttpContext httpContext,
     DavDatabaseClient dbClient,
     UsenetStreamingClient usenetClient,
-    ConfigManager configManager
+    ConfigManager configManager,
+    NzbAnalysisService nzbAnalysisService
 ) : BaseStoreReadonlyItem
 {
     public override string Name => davItem.Id.ToString();
@@ -31,7 +34,7 @@ public class DatabaseStoreIdFile(
         return davItem.Type switch
         {
             DavItem.ItemType.NzbFile =>
-                new DatabaseStoreNzbFile(davItem, httpContext, dbClient, usenetClient, configManager),
+                new DatabaseStoreNzbFile(davItem, httpContext, dbClient, usenetClient, configManager, nzbAnalysisService),
             DavItem.ItemType.RarFile =>
                 new DatabaseStoreRarFile(davItem, httpContext, dbClient, usenetClient, configManager),
             DavItem.ItemType.MultipartFile =>

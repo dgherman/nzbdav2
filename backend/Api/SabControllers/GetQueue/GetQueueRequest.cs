@@ -8,6 +8,7 @@ public class GetQueueRequest
     public int Start { get; init; } = 0;
     public int Limit { get; init; } = int.MaxValue;
     public string? Category { get; init; }
+    public string? Search { get; init; }
     public CancellationToken CancellationToken { get; init; }
 
 
@@ -16,6 +17,7 @@ public class GetQueueRequest
         var startParam = context.GetQueryParam("start");
         var limitParam = context.GetQueryParam("limit");
         Category = context.GetQueryParam("category");
+        Search = context.GetQueryParam("search");
         CancellationToken = context.RequestAborted;
 
         if (startParam is not null)

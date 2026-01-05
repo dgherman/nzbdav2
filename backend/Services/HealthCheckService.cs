@@ -30,6 +30,8 @@ public class HealthCheckService
 
     private readonly ConcurrentDictionary<string, byte> _missingSegmentIds = new();
     private readonly ConcurrentDictionary<Guid, int> _timeoutCounts = new();
+    private readonly SemaphoreSlim _concurrencyLimiter = new(3);
+    private readonly ConcurrentDictionary<Guid, byte> _processingIds = new();
 
     public HealthCheckService
     (
@@ -60,7 +62,6 @@ public class HealthCheckService
     {
         while (!_cancellationToken.IsCancellationRequested)
         {
-            DavItem? davItem = null;
             try
             {
                 // if the repair-job is disabled, then don't do anything
@@ -70,118 +71,184 @@ public class HealthCheckService
                     continue;
                 }
 
-                // get concurrency (not used anymore - operation limit enforces this)
-                var concurrency = _configManager.GetMaxRepairConnections();
+                // Wait for a concurrency slot
+                await _concurrencyLimiter.WaitAsync(_cancellationToken).ConfigureAwait(false);
 
-                // set connection usage context (no reservation needed - operation limits handle it)
-                using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
-                cts.CancelAfter(TimeSpan.FromMinutes(20)); // Timeout after 20 minutes per file to prevent blocking
-                
-                using var _1 = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check" }));
-
-                // get the davItem to health-check
-                await using var dbContext = new DavDatabaseContext();
-                var dbClient = new DavDatabaseClient(dbContext);
-                var currentDateTime = DateTimeOffset.UtcNow;
-                davItem = await GetHealthCheckQueueItems(dbClient)
-                    .Where(x => x.NextHealthCheck == null || x.NextHealthCheck < currentDateTime)
-                    .FirstOrDefaultAsync(cts.Token).ConfigureAwait(false);
-
-                // if there is no item to health-check, don't do anything
-                if (davItem == null)
+                // Find next candidate
+                DavItem? candidate = null;
+                try
                 {
-                    await Task.Delay(TimeSpan.FromSeconds(5), cts.Token).ConfigureAwait(false);
+                    await using var dbContext = new DavDatabaseContext();
+                    var dbClient = new DavDatabaseClient(dbContext);
+                    var currentDateTime = DateTimeOffset.UtcNow;
+                    
+                    // Fetch a few candidates to skip over ones currently being processed
+                    var candidates = await GetHealthCheckQueueItems(dbClient)
+                        .Where(x => x.NextHealthCheck == null || x.NextHealthCheck < currentDateTime)
+                        .Take(10)
+                        .ToListAsync(_cancellationToken).ConfigureAwait(false);
+
+                    foreach (var item in candidates)
+                    {
+                        if (_processingIds.TryAdd(item.Id, 0))
+                        {
+                            candidate = item;
+                            break;
+                        }
+                    }
+                }
+                catch
+                {
+                    // If DB fetch fails, release slot and wait
+                    _concurrencyLimiter.Release();
+                    throw;
+                }
+
+                if (candidate == null)
+                {
+                    _concurrencyLimiter.Release();
+                    await Task.Delay(TimeSpan.FromSeconds(5), _cancellationToken).ConfigureAwait(false);
                     continue;
                 }
 
-                // Determine if this is an urgent health check (triggered by streaming failure) or a routine one.
-                // Urgent checks (MinValue) use HEAD for accuracy. Routine checks use STAT for speed.
-                var isUrgentCheck = davItem.NextHealthCheck == DateTimeOffset.MinValue;
-                var useHead = isUrgentCheck;
-
-                // perform the health check
-                Log.Information("[HealthCheck] Processing item: {Name} ({Id}). Type: {Type}",
-                    davItem.Name, davItem.Id, isUrgentCheck ? "Urgent (HEAD)" : "Routine (STAT)");
-                await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token, useHead).ConfigureAwait(false);
-                
-                // Success! Remove from timeout tracking
-                _timeoutCounts.TryRemove(davItem.Id, out _);
-                
-                Log.Information("[HealthCheck] Finished item: {Name}", davItem.Name);
+                // Spawn background task
+                _ = ProcessItemInBackground(candidate);
             }
-            catch (OperationCanceledException) when (!_cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException)
             {
-                if (davItem != null)
-                {
-                    var timeouts = _timeoutCounts.AddOrUpdate(davItem.Id, 1, (_, count) => count + 1);
-
-                    if (timeouts >= 2)
-                    {
-                        Log.Error("[HealthCheck] Item {Name} timed out {Timeouts} times. Marking as failed.",
-                            davItem.Name, timeouts);
-                        _timeoutCounts.TryRemove(davItem.Id, out _);
-
-                        try
-                        {
-                            await using var dbContext = new DavDatabaseContext();
-                            dbContext.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
-                            {
-                                Id = Guid.NewGuid(),
-                                DavItemId = davItem.Id,
-                                Path = davItem.Path,
-                                CreatedAt = DateTimeOffset.UtcNow,
-                                Result = HealthCheckResult.HealthResult.Unhealthy,
-                                RepairStatus = HealthCheckResult.RepairAction.ActionNeeded,
-                                Message = "Health check timed out repeatedly (likely due to slow download or hanging)."
-                            }));
-                            await dbContext.SaveChangesAsync().ConfigureAwait(false);
-                        }
-                        catch (Exception ex)
-                        {
-                            Log.Error(ex, "[HealthCheck] Failed to mark timed-out item as failed.");
-                        }
-                    }
-                    else
-                    {
-                        Log.Warning("[HealthCheck] Timed out processing item: {Name}. Rescheduling for later (Attempt {Timeouts}).",
-                            davItem.Name, timeouts);
-                        
-                        // If this was an Urgent check (MinValue), do NOT reschedule to the future.
-                        // We want it to stay Urgent so it retries with HEAD.
-                        if (davItem.NextHealthCheck != DateTimeOffset.MinValue)
-                        {
-                            try
-                            {
-                                using var dbContext = new DavDatabaseContext();
-                                var nextCheck = DateTimeOffset.UtcNow.AddHours(1);
-                                await dbContext.Items
-                                    .Where(x => x.Id == davItem.Id)
-                                    .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, nextCheck))
-                                    .ConfigureAwait(false);
-                            }
-                            catch (Exception ex)
-                            {
-                                Log.Error(ex, "[HealthCheck] Failed to reschedule timed-out item.");
-                            }
-                        }
-                        else
-                        {
-                            Log.Warning($"[HealthCheck] Item `{davItem.Name}` timed out during Urgent check. Keeping priority high for immediate retry.");
-                        }
-                    }
-                }
+                // Graceful shutdown
             }
             catch (Exception e)
             {
-                if (e.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase))
-                {
-                    Log.Error($"Unexpected error performing background health checks: {e.Message}");
-                }
-                else
-                {
-                    Log.Error(e, $"Unexpected error performing background health checks: {e.Message}");
-                }
+                Log.Error(e, "Error in HealthCheck monitoring loop");
                 await Task.Delay(TimeSpan.FromSeconds(5), _cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+
+    private async Task ProcessItemInBackground(DavItem itemInfo)
+    {
+        try
+        {
+            using var scope = _serviceScopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+            var dbClient = new DavDatabaseClient(dbContext);
+
+            // Re-fetch item to attach to current context
+            var davItem = await dbContext.Items
+                .FirstOrDefaultAsync(x => x.Id == itemInfo.Id, _cancellationToken)
+                .ConfigureAwait(false);
+
+            if (davItem == null) return;
+
+            var concurrency = _configManager.GetMaxRepairConnections();
+
+            // set connection usage context
+            using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
+            var timeoutMinutes = 20;
+            cts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes)); // Timeout after 20 minutes per file
+            
+            using var contextScope = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check" }));
+
+            // Determine if this is an urgent health check
+            var isUrgentCheck = davItem.NextHealthCheck == DateTimeOffset.MinValue;
+            var useHead = isUrgentCheck;
+
+            Log.Information("[HealthCheck] Processing item: {Name} ({Id}). Type: {Type}. Timeout: {Timeout}m",
+                davItem.Name, davItem.Id, isUrgentCheck ? "Urgent (HEAD)" : "Routine (STAT)", timeoutMinutes);
+            
+            await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token, useHead).ConfigureAwait(false);
+            
+            // Success! Remove from timeout tracking
+            _timeoutCounts.TryRemove(davItem.Id, out _);
+            
+            Log.Information("[HealthCheck] Finished item: {Name}", davItem.Name);
+        }
+        catch (OperationCanceledException) when (!_cancellationToken.IsCancellationRequested)
+        {
+            // Handle per-item timeout
+            await HandleTimeout(itemInfo.Id, itemInfo.Name, itemInfo.Path, itemInfo.NextHealthCheck == DateTimeOffset.MinValue);
+        }
+        catch (Exception e)
+        {
+            if (e.Message.Contains("timed out", StringComparison.OrdinalIgnoreCase))
+            {
+                Log.Error($"[HealthCheck] Unexpected error processing {itemInfo.Name}: {e.Message}");
+            }
+            else
+            {
+                Log.Error(e, $"[HealthCheck] Unexpected error processing {itemInfo.Name}");
+            }
+        }
+        finally
+        {
+            _processingIds.TryRemove(itemInfo.Id, out _);
+            _concurrencyLimiter.Release();
+        }
+    }
+
+    private async Task HandleTimeout(Guid itemId, string name, string path, bool wasUrgent)
+    {
+        var timeouts = _timeoutCounts.AddOrUpdate(itemId, 1, (_, count) => count + 1);
+
+        if (timeouts >= 2)
+        {
+            Log.Error("[HealthCheck] Item {Name} timed out {Timeouts} times. Marking as failed.", name, timeouts);
+            _timeoutCounts.TryRemove(itemId, out _);
+
+            try
+            {
+                await using var dbContext = new DavDatabaseContext();
+                
+                // Update the item to prevent immediate retry loop
+                var nextCheck = DateTimeOffset.UtcNow.AddDays(1);
+                await dbContext.Items
+                    .Where(x => x.Id == itemId)
+                    .ExecuteUpdateAsync(setters => setters
+                        .SetProperty(p => p.NextHealthCheck, nextCheck)
+                        .SetProperty(p => p.LastHealthCheck, DateTimeOffset.UtcNow))
+                    .ConfigureAwait(false);
+
+                dbContext.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+                {
+                    Id = Guid.NewGuid(),
+                    DavItemId = itemId,
+                    Path = path,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    Result = HealthCheckResult.HealthResult.Unhealthy,
+                    RepairStatus = HealthCheckResult.RepairAction.ActionNeeded,
+                    Message = "Health check timed out repeatedly (likely due to slow download or hanging)."
+                }));
+                await dbContext.SaveChangesAsync().ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[HealthCheck] Failed to mark timed-out item as failed.");
+            }
+        }
+        else
+        {
+            Log.Warning("[HealthCheck] Timed out processing item: {Name}. Rescheduling for later (Attempt {Timeouts}).", name, timeouts);
+            
+            if (!wasUrgent)
+            {
+                try
+                {
+                    await using var dbContext = new DavDatabaseContext();
+                    var nextCheck = DateTimeOffset.UtcNow.AddHours(1);
+                    await dbContext.Items
+                        .Where(x => x.Id == itemId)
+                        .ExecuteUpdateAsync(setters => setters.SetProperty(p => p.NextHealthCheck, nextCheck))
+                        .ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "[HealthCheck] Failed to reschedule timed-out item.");
+                }
+            }
+            else
+            {
+                Log.Warning($"[HealthCheck] Item `{name}` timed out during Urgent check. Keeping priority high for immediate retry.");
             }
         }
     }

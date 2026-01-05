@@ -246,11 +246,27 @@ public class MultiProviderNntpClient : INntpClient
             {
                 stopwatch.Stop();
 
+                // Record timeout/cancellation as failure for provider affinity (only if it's a real timeout, not parent cancellation)
+                if (_affinityService != null && !cancellationToken.IsCancellationRequested)
+                {
+                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
+                    if (!string.IsNullOrEmpty(jobName))
+                    {
+                        _affinityService.RecordFailure(jobName, provider.ProviderIndex);
+                    }
+                }
+
+                // If parent cancellation is requested, stop everything immediately
                 if (cancellationToken.IsCancellationRequested)
                 {
-                    throw new TimeoutException($"Operation timed out on provider {provider.Host} (Segment: {segmentId ?? "N/A"})", ex);
+                    throw;
                 }
-                throw;
+
+                // Otherwise, this was a provider-specific timeout (e.g. from GetDynamicTimeout in MultiConnectionNntpClient)
+                // We treat this as a transient failure and try the next provider.
+                var elapsed = stopwatch.Elapsed.TotalSeconds;
+                Log.Debug("Operation timed out on provider {Host} after {Elapsed:F2}s. Trying another provider.", provider.Host, elapsed);
+                lastException = ExceptionDispatchInfo.Capture(ex);
             }
         }
 

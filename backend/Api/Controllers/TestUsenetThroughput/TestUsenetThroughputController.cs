@@ -29,7 +29,7 @@ public class TestUsenetThroughputController(ConfigManager configManager) : BaseA
         var pool = new ConnectionPool<INntpClient>(
             testConnections,
             semaphore,
-            ct => UsenetStreamingClient.CreateNewConnection(connectionDetails, ct)
+            ct => UsenetStreamingClient.CreateNewConnection(connectionDetails, null, -1, ct)
         );
 
         // No global limiter for this isolated test

@@ -3,7 +3,7 @@ import styles from "./action-button.module.css";
 import type { ReactNode } from "react";
 
 export type ActionButtonProps = {
-    type: "delete" | "explore" | "move-top" | "move-bottom",
+    type: "delete" | "explore" | "move-top" | "move-bottom" | "retry",
     text?: string,
     disabled?: boolean,
     onClick?: () => void,
@@ -12,6 +12,7 @@ export type ActionButtonProps = {
 export function ActionButton({ type, text, disabled, onClick }: ActionButtonProps) {
     const variant = type === "delete" ? "outline-danger" :
                     type === "move-top" || type === "move-bottom" ? "outline-primary" :
+                    type === "retry" ? "outline-success" :
                     "outline-warning";
     return (
         <Button
@@ -22,6 +23,7 @@ export function ActionButton({ type, text, disabled, onClick }: ActionButtonProp
             {type === "explore" && <DirectoryIcon />}
             {type === "move-top" && <ArrowUpIcon />}
             {type === "move-bottom" && <ArrowDownIcon />}
+            {type === "retry" && <RetryIcon />}
             {text && <div className={styles.text}>{text}</div>}
         </Button>
     )
@@ -55,6 +57,15 @@ function ArrowDownIcon() {
     return (
         <svg className={styles["trash-icon"]} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
             <path fillRule="evenodd" d="M8 4a.5.5 0 0 1 .5.5v5.793l2.146-2.147a.5.5 0 0 1 .708.708l-3 3a.5.5 0 0 1-.708 0l-3-3a.5.5 0 1 1 .708-.708L7.5 10.293V4.5A.5.5 0 0 1 8 4z"/>
+        </svg>
+    )
+}
+
+function RetryIcon() {
+    return (
+        <svg className={styles["trash-icon"]} xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="currentColor">
+            <path fillRule="evenodd" d="M8 3a5 5 0 1 0 4.546 2.914.5.5 0 0 1 .908-.417A6 6 0 1 1 8 2v1z"/>
+            <path d="M8 4.466V.534a.25.25 0 0 1 .41-.192l2.36 1.966c.12.1.12.284 0 .384L8.41 4.658A.25.25 0 0 1 8 4.466z"/>
         </svg>
     )
 }

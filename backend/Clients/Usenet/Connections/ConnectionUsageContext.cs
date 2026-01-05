@@ -63,5 +63,6 @@ public enum ConnectionUsageType
     Streaming = 2,
     HealthCheck = 3,
     Repair = 4,
-    BufferedStreaming = 5
+    BufferedStreaming = 5,
+    Analysis = 6
 }

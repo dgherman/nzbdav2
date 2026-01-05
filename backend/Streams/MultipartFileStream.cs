@@ -74,7 +74,8 @@ public class MultipartFileStream : Stream
         );
 
         var filePart = _multipartFile.FileParts[searchResult.FoundIndex];
-        var stream = _client.GetFileStream(filePart.NzbFile.GetSegmentIds(), filePart.PartSize, 1, _usageContext);
+        var segmentSizes = filePart.NzbFile.Segments.Select(x => x.Size).ToArray();
+        var stream = _client.GetFileStream(filePart.NzbFile.GetSegmentIds(), filePart.PartSize, 1, _usageContext, segmentSizes: segmentSizes);
         stream.Seek(_position - searchResult.FoundByteRange.StartInclusive, SeekOrigin.Begin);
         return stream;
     }

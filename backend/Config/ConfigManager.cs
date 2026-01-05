@@ -209,6 +209,13 @@ public class ConfigManager
         return (configValue != null ? bool.Parse(configValue) : defaultValue);
     }
 
+    public int GetHistoryRetentionHours()
+    {
+        var defaultValue = 24;
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("api.history-retention-hours"));
+        return (configValue != null ? int.Parse(configValue) : defaultValue);
+    }
+
     public int GetMaxRepairConnections()
     {
         return int.Parse(
@@ -276,8 +283,30 @@ public class ConfigManager
         return int.Parse(
             StringUtil.EmptyToNull(GetConfigValue("usenet.operation-timeout"))
             ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("USENET_OPERATION_TIMEOUT"))
-            ?? "90"
+            ?? "180" // Increased from 90s to 180s for large NZBs and slower providers
         );
+    }
+
+    public HashSet<string> GetDebugLogComponents()
+    {
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("debug.components"));
+        if (configValue == null) return [];
+
+        try
+        {
+            var components = JsonSerializer.Deserialize<List<string>>(configValue);
+            return components?.ToHashSet() ?? [];
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
+    public bool IsDebugLogEnabled(string component)
+    {
+        var components = GetDebugLogComponents();
+        return components.Contains(component) || components.Contains("all");
     }
 
     public ArrConfig GetArrConfig()

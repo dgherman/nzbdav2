@@ -246,6 +246,9 @@ namespace NzbWebDAV.Database.Migrations
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime>("CompletedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
@@ -261,12 +264,27 @@ namespace NzbWebDAV.Database.Migrations
                     b.Property<string>("FailMessage")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("FailureReason")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("FileName")
                         .IsRequired()
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("HiddenAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsHidden")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsImported")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("JobName")
                         .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("NzbContents")
                         .HasColumnType("TEXT");
 
                     b.Property<long>("TotalSegmentBytes")
@@ -418,6 +436,9 @@ namespace NzbWebDAV.Database.Migrations
                         .HasColumnType("INTEGER");
 
                     b.Property<long>("LastUsed")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("RecentAverageSpeedBps")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("SuccessfulSegments")

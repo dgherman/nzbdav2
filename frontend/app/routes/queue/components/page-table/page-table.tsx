@@ -10,10 +10,11 @@ export type PageTableProps = {
     striped?: boolean,
     children?: ReactNode,
     headerCheckboxState: TriCheckboxState,
-    onHeaderCheckboxChange: (isChecked: boolean) => void
+    onHeaderCheckboxChange: (isChecked: boolean) => void,
+    showFailureReason?: boolean
 }
 
-export function PageTable({ striped, children, headerCheckboxState, onHeaderCheckboxChange: onTitleCheckboxChange }: PageTableProps) {
+export function PageTable({ striped, children, headerCheckboxState, onHeaderCheckboxChange: onTitleCheckboxChange, showFailureReason }: PageTableProps) {
     return (
         <div className={styles.container}>
             <Table className={styles["page-table"]} responsive striped={striped}>
@@ -26,6 +27,7 @@ export function PageTable({ striped, children, headerCheckboxState, onHeaderChec
                         </th>
                         <th className={styles.desktop}>Category</th>
                         <th className={styles.desktop}>Status</th>
+                        {showFailureReason && <th className={styles.desktop}>Failure Reason</th>}
                         <th className={styles.desktop}>Size</th>
                         <th>Actions</th>
                     </tr>
@@ -48,7 +50,8 @@ export type PageRowProps = {
     error?: string,
     fileSizeBytes: number,
     actions: ReactNode,
-    onRowSelectionChanged: (isSelected: boolean) => void
+    onRowSelectionChanged: (isSelected: boolean) => void,
+    showFailureReason?: boolean
 }
 export function PageRow(props: PageRowProps) {
     return (
@@ -58,9 +61,23 @@ export function PageRow(props: PageRowProps) {
                     <Truncate>{props.name}</Truncate>
                     <div className={styles.mobile}>
                         <div className={styles.badges}>
-                            <StatusBadge status={props.status} percentage={props.percentage} error={props.error} />
+                            <StatusBadge status={props.status} percentage={props.percentage} error={props.showFailureReason ? undefined : props.error} />
                             <CategoryBadge category={props.category} />
                         </div>
+                        {props.showFailureReason && props.error && (
+                            <div style={{
+                                fontSize: '0.75rem',
+                                color: '#dc3545',
+                                marginTop: '4px',
+                                marginBottom: '4px',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap',
+                                maxWidth: '200px'
+                            }}>
+                                Error: {props.error.startsWith("Article with message-id") ? "Missing articles" : props.error}
+                            </div>
+                        )}
                         <div>{formatFileSize(props.fileSizeBytes)}</div>
                     </div>
                 </TriCheckbox>
@@ -69,8 +86,22 @@ export function PageRow(props: PageRowProps) {
                 <CategoryBadge category={props.category} />
             </td>
             <td className={styles.desktop}>
-                <StatusBadge status={props.status} percentage={props.percentage} error={props.error} />
+                <StatusBadge status={props.status} percentage={props.percentage} error={props.showFailureReason ? undefined : props.error} />
             </td>
+            {props.showFailureReason && (
+                <td className={styles.desktop}>
+                    <span style={{
+                        fontSize: '0.85rem',
+                        color: props.error ? '#dc3545' : '#6c757d',
+                        display: 'block',
+                        wordWrap: 'break-word',
+                        whiteSpace: 'normal',
+                        maxWidth: '300px'
+                    }}>
+                        {props.error ? (props.error.startsWith("Article with message-id") ? "Missing articles" : props.error) : '—'}
+                    </span>
+                </td>
+            )}
             <td className={styles.desktop}>
                 {formatFileSize(props.fileSizeBytes)}
             </td>

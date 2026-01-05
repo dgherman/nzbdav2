@@ -7,6 +7,8 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.WebDav.Base;
 
+using NzbWebDAV.Services;
+
 namespace NzbWebDAV.WebDav;
 
 public class DatabaseStoreNzbFile(
@@ -14,7 +16,8 @@ public class DatabaseStoreNzbFile(
     HttpContext httpContext,
     DavDatabaseClient dbClient,
     UsenetStreamingClient usenetClient,
-    ConfigManager configManager
+    ConfigManager configManager,
+    NzbAnalysisService nzbAnalysisService
 ) : BaseStoreStreamFile
 {
     public DavItem DavItem => davNzbFile;
@@ -38,13 +41,23 @@ public class DatabaseStoreNzbFile(
         var id = davNzbFile.Id;
         var file = await dbClient.GetNzbFileAsync(id, cancellationToken).ConfigureAwait(false);
         if (file is null) throw new FileNotFoundException($"Could not find nzb file with id: {id}");
+
+        // Trigger background analysis if cache is missing
+        if (file.SegmentSizes == null)
+        {
+            nzbAnalysisService.TriggerAnalysisInBackground(file.Id, file.SegmentIds);
+        }
+
+        Serilog.Log.Debug("[DatabaseStoreNzbFile] Opening stream for {FileName} ({Id})", Name, id);
+
         return usenetClient.GetFileStream(
             file.SegmentIds,
             FileSize,
             configManager.GetConnectionsPerStream(),
             usageContext,
             configManager.UseBufferedStreaming(),
-            configManager.GetStreamBufferSize()
+            configManager.GetStreamBufferSize(),
+            file.GetSegmentSizes()
         );
     }
 }

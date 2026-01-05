@@ -43,6 +43,9 @@ public class ArrHistoryRecord
     [JsonPropertyName("eventType")]
     public string EventType { get; set; } = string.Empty;
 
+    [JsonPropertyName("date")]
+    public DateTime Date { get; set; }
+
     [JsonPropertyName("data")]
     public Dictionary<string, string> Data { get; set; } = new();
 }
