@@ -9,6 +9,7 @@ import { FileDetailsModal } from "./components/file-details-modal/file-details-m
 import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
 import { Alert, Tabs, Tab } from "react-bootstrap";
+import { useToast } from "~/context/ToastContext";
 
 const topicNames = {
     healthItemStatus: 'hs',
@@ -57,6 +58,7 @@ export default function Health({ loaderData }: Route.ComponentProps) {
     const [showDetailsModal, setShowDetailsModal] = useState(false);
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
     const [loadingFileDetails, setLoadingFileDetails] = useState(false);
+    const { addToast } = useToast();
 
     // effects
     useEffect(() => {
@@ -116,7 +118,6 @@ export default function Health({ loaderData }: Route.ComponentProps) {
             var index = queueItems.findIndex(x => x.id === davItemId);
             if (index === -1) return queueItems;
             return queueItems
-                .filter((_, i) => i >= index)
                 .map(item => item.id === davItemId
                     ? { ...item, progress: Number(progress) }
                     : item
@@ -181,38 +182,21 @@ export default function Health({ loaderData }: Route.ComponentProps) {
     }, [onWebsocketMessage]);
 
         const onRunHealthCheck = useCallback(async (id: string) => {
-
-            if (!confirm("Run health check now?")) return;
-
-            
-
             try {
-
                 const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
-
                 if (!response.ok) throw new Error(await response.text());
-
                 
-
                 // Refresh the queue locally to show "ASAP" or similar, although websocket updates should handle it
-
                 setQueueItems(items => items.map(item => 
-
                     item.id === id 
-
                     ? { ...item, nextHealthCheck: new Date().toISOString() } // Temporarily show as now/ASAP
-
                     : item
-
                 ));
-
+                addToast("Health check scheduled successfully", "success", "Success");
             } catch (e) {
-
-                alert(`Failed to start health check: ${e}`);
-
+                addToast(`Failed to start health check: ${e}`, "danger", "Error");
             }
-
-        }, [setQueueItems]);
+        }, [setQueueItems, addToast]);
 
     const onItemClick = useCallback(async (davItemId: string) => {
         setShowDetailsModal(true);
@@ -248,15 +232,45 @@ export default function Health({ loaderData }: Route.ComponentProps) {
             if (response.ok) {
                 // Refresh the file details to show updated (empty) stats
                 setSelectedFileDetails(prev => prev ? { ...prev, providerStats: [] } : null);
-                alert('Provider statistics for this file have been reset successfully.');
+                addToast('Provider statistics for this file have been reset successfully.', "success", "Success");
             } else {
-                alert('Failed to reset provider statistics.');
+                addToast('Failed to reset provider statistics.', "danger", "Error");
             }
         } catch (error) {
             console.error('Error resetting file provider stats:', error);
-            alert('Error resetting provider statistics: ' + error);
+            addToast('Error resetting provider statistics: ' + error, "danger", "Error");
         }
-    }, []);
+    }, [addToast]);
+
+    const onAnalyze = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+        try {
+            const response = await fetch(`/api/maintenance/analyze`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Analysis queued for ${ids.length} item(s). Check 'Active Analyses' tab for progress.`, "success", "Analysis Started");
+        } catch (e) {
+            addToast(`Failed to start analysis: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
+
+    const onRepair = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+        try {
+            const response = await fetch(`/api/stats/repair`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Repair queued successfully for ${ids.length} item(s)`, "success", "Repair Started");
+        } catch (e) {
+            addToast(`Failed to trigger repair: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
 
 
 
@@ -354,6 +368,9 @@ export default function Health({ loaderData }: Route.ComponentProps) {
                     fileDetails={selectedFileDetails}
                     loading={loadingFileDetails}
                     onResetStats={onResetFileStats}
+                    onRunHealthCheck={onRunHealthCheck}
+                    onAnalyze={onAnalyze}
+                    onRepair={onRepair}
                 />
 
             </div>

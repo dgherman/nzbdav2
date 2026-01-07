@@ -56,13 +56,12 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-05-CORRUPTION-RECOVERY");
-        Log.Warning("  FEATURE: Smart Corruption Recovery with Graceful Degradation");
-        Log.Warning("  - YENC CRC32 validation on all segments");
-        Log.Warning("  - Automatic retry with exponential backoff (3 attempts)");
-        Log.Warning("  - Graceful degradation: zero-filled segments on failure");
-        Log.Warning("  - Corruption tracking for health check triggering");
-        Log.Warning("  - Stream continues playing with minor glitches vs total failure");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-06-ARCHIVED-STATE");
+        Log.Warning("  FEATURE: Archived State for History Items (Arr Sync + 24h Safety Net)");
+        Log.Warning("  - Arr deletes move items to 'archived' state (keeps queue in sync)");
+        Log.Warning("  - Archived items deleted after 24h retention period");
+        Log.Warning("  - UI requests can permanently delete immediately");
+        Log.Warning("  - Always returns success to prevent Arr errors");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -166,6 +165,7 @@ class Program
             .AddSingleton<ArrMonitoringService>()
             .AddSingleton<HealthCheckService>()
             .AddSingleton<NzbAnalysisService>()
+            .AddSingleton<MediaAnalysisService>()
             .AddHostedService<DatabaseMaintenanceService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()

@@ -18,6 +18,8 @@ public class HistoryItem
     public string? NzbContents { get; set; }
     public string? FailureReason { get; set; }
     public bool IsImported { get; set; }
+    public bool IsArchived { get; set; }
+    public DateTime? ArchivedAt { get; set; }
 
     public enum DownloadStatusOption
     {

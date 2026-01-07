@@ -3,6 +3,7 @@ namespace NzbWebDAV.Clients.Usenet.Connections;
 public class ConnectionUsageDetails
 {
     public string Text { get; init; } = "";
+    public Guid? DavItemId { get; set; }
     public DateTimeOffset? FileDate { get; set; }
     public bool IsBackup { get; set; }
     public bool IsSecondary { get; set; }

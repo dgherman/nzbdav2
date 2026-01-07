@@ -26,7 +26,8 @@ public class NzbAnalysisService(
     IServiceScopeFactory scopeFactory,
     UsenetStreamingClient usenetClient,
     WebsocketManager websocketManager,
-    ConfigManager configManager
+    ConfigManager configManager,
+    MediaAnalysisService mediaAnalysisService
 )
 {
     private static readonly ConcurrentDictionary<Guid, AnalysisInfo> _activeAnalyses = new();
@@ -34,15 +35,14 @@ public class NzbAnalysisService(
 
     public IEnumerable<AnalysisInfo> GetActiveAnalyses() => _activeAnalyses.Values;
 
-    public void TriggerAnalysisInBackground(Guid fileId, string[] segmentIds, bool force = false)
+    public void TriggerAnalysisInBackground(Guid fileId, string[]? segmentIds, bool force = false)
     {
         if (!force && !configManager.IsAnalysisEnabled()) return;
         if (_activeAnalyses.ContainsKey(fileId)) return;
-        _ = Task.Run(async () => await PerformAnalysis(fileId, segmentIds).ConfigureAwait(false));
+        _ = Task.Run(async () => await PerformAnalysis(fileId, segmentIds, force).ConfigureAwait(false));
     }
-// ...
 
-    private async Task PerformAnalysis(Guid fileId, string[] segmentIds)
+    private async Task PerformAnalysis(Guid fileId, string[]? segmentIds, bool force = false)
     {
         var info = new AnalysisInfo { Id = fileId, Name = "Queued" };
         if (!_activeAnalyses.TryAdd(fileId, info)) return;
@@ -52,29 +52,24 @@ public class NzbAnalysisService(
 
         try
         {
-            Log.Debug("[NzbAnalysisService] Starting background analysis for file {Id}", fileId);
+            Log.Debug("[NzbAnalysisService] Starting background analysis for file {Id} (Force={Force})", fileId, force);
 
             using var scope = scopeFactory.CreateScope();
             var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
 
-            var file = await dbContext.NzbFiles
-                .AsNoTracking()
-                .Include(f => f.DavItem)
-                .FirstOrDefaultAsync(f => f.Id == fileId)
-                .ConfigureAwait(false);
-            
-            if (file == null) return;
+            var davItem = await dbContext.Items.AsNoTracking().FirstOrDefaultAsync(x => x.Id == fileId).ConfigureAwait(false);
+            if (davItem == null) return;
+
+            var nzbFile = await dbContext.NzbFiles.FirstOrDefaultAsync(f => f.Id == fileId).ConfigureAwait(false);
 
             // Update name in tracking info
-            info.Name = file.DavItem?.Name ?? fileId.ToString();
+            info.Name = davItem.Name;
             
             // Try to extract Job Name (Parent Directory Name)
-            if (file.DavItem?.Path != null)
+            if (davItem.Path != null)
             {
                 // Path format: /.../Category/JobName/Filename.ext
-                // OR /.../Category/JobName.ext
-                // We want the parent directory name generally
-                var directoryName = Path.GetFileName(Path.GetDirectoryName(file.DavItem.Path));
+                var directoryName = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
                 if (!string.IsNullOrEmpty(directoryName))
                 {
                     info.JobName = directoryName;
@@ -86,7 +81,10 @@ public class NzbAnalysisService(
             // Broadcast initial state with JobName
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|start|{info.Name}|{info.JobName}");
 
-            if (file.SegmentSizes != null)
+            var segmentAnalysisComplete = nzbFile == null || nzbFile.SegmentSizes != null;
+            var mediaAnalysisComplete = davItem.MediaInfo != null;
+
+            if (!force && segmentAnalysisComplete && mediaAnalysisComplete)
             {
                 Log.Information("[NzbAnalysisService] Analysis already complete for file: {FileName} ({Id})", info.Name, fileId);
                 websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|100");
@@ -94,31 +92,43 @@ public class NzbAnalysisService(
                 return;
             }
 
-            var progressHook = new Progress<int>();
-            var debounce = DebounceUtil.CreateDebounce(TimeSpan.FromMilliseconds(500));
-            progressHook.ProgressChanged += (_, count) =>
-            {
-                var percentage = (int)((double)count / segmentIds.Length * 100);
-                if (percentage > info.Progress)
-                {
-                    info.Progress = percentage;
-                    debounce(() => websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|{percentage}"));
-                }
-            };
-
             // Create cancellation token with usage context so analysis operations show up in stats
             using var cts = new CancellationTokenSource();
             var usageContext = new ConnectionUsageContext(
                 ConnectionUsageType.Analysis,
-                new ConnectionUsageDetails { Text = file.DavItem?.Path ?? info.Name }
+                new ConnectionUsageDetails { Text = davItem.Path }
             );
             using var _ = cts.Token.SetScopedContext(usageContext);
 
-            var sizes = await usenetClient.AnalyzeNzbAsync(segmentIds, 10, progressHook, cts.Token).ConfigureAwait(false);
+            if (nzbFile != null && (force || nzbFile.SegmentSizes == null) && segmentIds != null)
+            {
+                var progressHook = new Progress<int>();
+                var debounce = DebounceUtil.CreateDebounce(TimeSpan.FromMilliseconds(500));
+                progressHook.ProgressChanged += (_, count) =>
+                {
+                    // Scale NZB analysis to 90%
+                    var percentage = (int)((double)count / segmentIds.Length * 90);
+                    if (percentage > info.Progress)
+                    {
+                        info.Progress = percentage;
+                        debounce(() => websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|{percentage}"));
+                    }
+                };
 
-            file.SetSegmentSizes(sizes);
-            dbContext.NzbFiles.Update(file);
-            await dbContext.SaveChangesAsync().ConfigureAwait(false);
+                var sizes = await usenetClient.AnalyzeNzbAsync(segmentIds, 10, progressHook, cts.Token).ConfigureAwait(false);
+
+                nzbFile.SetSegmentSizes(sizes);
+                dbContext.NzbFiles.Update(nzbFile);
+                await dbContext.SaveChangesAsync().ConfigureAwait(false);
+            }
+
+            // Media Analysis (ffprobe)
+            if (force || !mediaAnalysisComplete)
+            {
+                info.Progress = 90;
+                websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|90");
+                await mediaAnalysisService.AnalyzeMediaAsync(fileId, cts.Token).ConfigureAwait(false);
+            }
 
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|100");
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|done");
@@ -126,7 +136,7 @@ public class NzbAnalysisService(
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "[NzbAnalysisService] Failed to analyze NZB {Id}", fileId);
+            Log.Error(ex, "[NzbAnalysisService] Failed to analyze file {Id}", fileId);
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|error");
         }
         finally

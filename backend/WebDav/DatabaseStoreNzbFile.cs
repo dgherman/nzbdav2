@@ -34,7 +34,12 @@ public class DatabaseStoreNzbFile(
         // create streaming usage context
         var usageContext = new ConnectionUsageContext(
             ConnectionUsageType.Streaming,
-            davNzbFile.Path
+            new ConnectionUsageDetails 
+            { 
+                Text = davNzbFile.Path,
+                DavItemId = davNzbFile.Id,
+                FileDate = davNzbFile.ReleaseDate
+            }
         );
 
         // return the stream with usage context and buffering options

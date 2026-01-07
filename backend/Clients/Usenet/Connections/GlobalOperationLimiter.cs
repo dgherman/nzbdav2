@@ -224,8 +224,12 @@ public class GlobalOperationLimiter : IDisposable
 
     private void LogInfoForType(ConnectionUsageType usageType, string message, params object[] args)
     {
-        // HealthCheck operations should log at Debug level to reduce noise
-        if (usageType == ConnectionUsageType.HealthCheck || usageType == ConnectionUsageType.Repair || usageType == ConnectionUsageType.Analysis)
+        // HealthCheck and Streaming operations should log at Debug level to reduce noise
+        if (usageType == ConnectionUsageType.HealthCheck || 
+            usageType == ConnectionUsageType.Repair || 
+            usageType == ConnectionUsageType.Analysis ||
+            usageType == ConnectionUsageType.Streaming ||
+            usageType == ConnectionUsageType.BufferedStreaming)
         {
             LogDebugForType(usageType, message, args);
             return;

@@ -22,11 +22,14 @@ export type FileDetails = {
     createdAt: string | null;
     lastHealthCheck: string | null;
     nextHealthCheck: string | null;
+    isCorrupted: boolean;
+    corruptionReason?: string | null;
     missingArticleCount: number;
     totalSegments: number;
     minSegmentSize: number | null;
     maxSegmentSize: number | null;
     avgSegmentSize: number | null;
+    mediaInfo: string | null;
     providerStats: ProviderStatistic[];
     latestHealthCheckResult: HealthCheckInfoType | null;
 }

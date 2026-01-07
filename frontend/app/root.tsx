@@ -18,6 +18,7 @@ import { LeftNavigation } from "./routes/_index/components/left-navigation/left-
 import { PageLayout } from "./routes/_index/components/page-layout/page-layout";
 import { Loading } from "./routes/_index/components/loading/loading";
 import { backendClient } from "~/clients/backend-client.server";
+import { ToastProvider } from "./context/ToastContext";
 
 export async function loader({ request }: Route.LoaderArgs) {
   // unauthenticated routes
@@ -73,17 +74,23 @@ export default function App({ loaderData }: Route.ComponentProps) {
 
   if (useLayout) {
     return (
-      <PageLayout
-        topNavComponent={TopNavigation}
-        bodyChild={showLoading ? <Loading /> : <Outlet />}
-        leftNavChild={
-          <LeftNavigation
-            version={version}
-            isFrontendAuthDisabled={isFrontendAuthDisabled}
-            statsEnabled={statsEnabled} />
-        } />
+      <ToastProvider>
+        <PageLayout
+          topNavComponent={TopNavigation}
+          bodyChild={showLoading ? <Loading /> : <Outlet />}
+          leftNavChild={
+            <LeftNavigation
+              version={version}
+              isFrontendAuthDisabled={isFrontendAuthDisabled}
+              statsEnabled={statsEnabled} />
+          } />
+      </ToastProvider>
     );
   }
 
-  return <Outlet />;
+  return (
+    <ToastProvider>
+      <Outlet />
+    </ToastProvider>
+  );
 }

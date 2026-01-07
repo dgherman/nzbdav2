@@ -29,6 +29,7 @@ export function PageTable({ striped, children, headerCheckboxState, onHeaderChec
                         <th className={styles.desktop}>Status</th>
                         {showFailureReason && <th className={styles.desktop}>Failure Reason</th>}
                         <th className={styles.desktop}>Size</th>
+                        <th>Completed</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -49,11 +50,20 @@ export type PageRowProps = {
     percentage?: string,
     error?: string,
     fileSizeBytes: number,
+    completedAt?: number,
     actions: ReactNode,
     onRowSelectionChanged: (isSelected: boolean) => void,
     showFailureReason?: boolean
 }
 export function PageRow(props: PageRowProps) {
+    const formattedDate = props.completedAt ? new Intl.DateTimeFormat('en-GB', {
+        day: '2-digit',
+        month: '2-digit',
+        year: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit'
+    }).format(new Date(props.completedAt * 1000)) : (props.completedAt === 0 ? '—' : null);
+
     return (
         <tr className={props.isRemoving ? styles.removing : undefined}>
             <td>
@@ -78,7 +88,10 @@ export function PageRow(props: PageRowProps) {
                                 Error: {props.error.startsWith("Article with message-id") ? "Missing articles" : props.error}
                             </div>
                         )}
-                        <div>{formatFileSize(props.fileSizeBytes)}</div>
+                        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '0.5rem', fontSize: '0.75rem', color: '#6c757d' }}>
+                            <span>{formatFileSize(props.fileSizeBytes)}</span>
+                            {formattedDate && formattedDate !== '—' && <span>• {formattedDate}</span>}
+                        </div>
                     </div>
                 </TriCheckbox>
             </td>
@@ -104,6 +117,9 @@ export function PageRow(props: PageRowProps) {
             )}
             <td className={styles.desktop}>
                 {formatFileSize(props.fileSizeBytes)}
+            </td>
+            <td style={{ fontSize: '0.85rem', color: '#6c757d', whiteSpace: 'nowrap' }}>
+                {formattedDate || '—'}
             </td>
             <td>
                 <div className={styles.actions}>

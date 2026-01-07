@@ -9,9 +9,12 @@ export type FileDetailsModalProps = {
     fileDetails: FileDetails | null;
     loading: boolean;
     onResetStats?: (jobName: string) => void;
+    onRunHealthCheck?: (id: string) => void;
+    onAnalyze?: (id: string) => void;
+    onRepair?: (id: string) => void;
 }
 
-export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetStats }: FileDetailsModalProps) {
+export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetStats, onRunHealthCheck, onAnalyze, onRepair }: FileDetailsModalProps) {
     return (
         <Modal show={show} onHide={onHide} size="lg">
             <Modal.Header closeButton>
@@ -74,6 +77,19 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                                         <td className={styles.labelCell}>File Size</td>
                                         <td className={styles.valueCell}>{formatBytes(fileDetails.fileSize)}</td>
                                     </tr>
+                                    <tr>
+                                        <td className={styles.labelCell}>Is Corrupted</td>
+                                        <td className={styles.valueCell}>
+                                            <Badge bg={fileDetails.isCorrupted ? "danger" : "success"}>
+                                                {fileDetails.isCorrupted ? "Yes" : "No"}
+                                            </Badge>
+                                            {fileDetails.isCorrupted && fileDetails.corruptionReason && (
+                                                <div className="text-danger small mt-1">
+                                                    <strong>Reason:</strong> {fileDetails.corruptionReason}
+                                                </div>
+                                            )}
+                                        </td>
+                                    </tr>
                                     {fileDetails.createdAt && (
                                         <tr>
                                             <td className={styles.labelCell}>Created</td>
@@ -113,9 +129,57 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                             </section>
                         )}
 
+                        {/* Media Analysis */}
+                        <section className={styles.section}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                                <h5 style={{ margin: 0 }}>Media Analysis</h5>
+                                {onAnalyze && (
+                                    <button
+                                        className="btn btn-primary btn-sm"
+                                        onClick={() => onAnalyze(fileDetails.davItemId)}
+                                        title="Trigger NZB and Media analysis (ffprobe)"
+                                    >
+                                        <i className="bi bi-magic me-1"></i>
+                                        Run Analysis
+                                    </button>
+                                )}
+                            </div>
+                            {fileDetails.mediaInfo ? (
+                                <MediaInfoSummary json={fileDetails.mediaInfo} />
+                            ) : (
+                                <div className="text-muted small fst-italic">
+                                    No media analysis data available. Run analysis to verify video/audio streams.
+                                </div>
+                            )}
+                        </section>
+
                         {/* Health Check Info */}
                         <section className={styles.section}>
-                            <h5>Health Status</h5>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                                <h5 style={{ margin: 0 }}>Health Status</h5>
+                                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                    {onRunHealthCheck && (
+                                        <button
+                                            className="btn btn-outline-primary btn-sm"
+                                            onClick={() => onRunHealthCheck(fileDetails.davItemId)}
+                                            title="Trigger an immediate HEAD check for this file"
+                                        >
+                                            <i className="bi bi-activity me-1"></i>
+                                            Run Health Check
+                                        </button>
+                                    )}
+                                    {onRepair && (
+                                        <button
+                                            className="btn btn-outline-danger btn-sm"
+                                            onClick={() => onRepair(fileDetails.davItemId)}
+                                            title="Trigger manual repair (delete & re-search via Sonarr/Radarr)"
+                                        >
+                                            <i className="bi bi-tools me-1"></i>
+                                            Repair
+                                        </button>
+                                    )}
+                                </div>
+                            </div>
                             <Table bordered size="sm">
                                 <tbody>
                                     <tr>
@@ -173,9 +237,7 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                                         <button
                                             className="btn btn-outline-danger btn-sm"
                                             onClick={async () => {
-                                                if (confirm('Reset provider statistics for this file? Performance data will be relearned on next access.')) {
-                                                    onResetStats(fileDetails.path);
-                                                }
+                                                onResetStats(fileDetails.path);
                                             }}
                                         >
                                             Reset Stats
@@ -253,6 +315,109 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                 )}
             </Modal.Body>
         </Modal>
+    );
+}
+
+function MediaInfoSummary({ json }: { json: string }) {
+    let data: any;
+    try {
+        data = JSON.parse(json);
+    } catch {
+        return <div className="text-danger">Invalid Media Info JSON</div>;
+    }
+
+    if (data.error) {
+        return (
+            <div className="alert alert-danger py-2 px-3 mb-0 small">
+                <i className="bi bi-exclamation-triangle-fill me-2"></i>
+                <strong>Analysis Failed:</strong> {data.error}
+            </div>
+        );
+    }
+
+    const format = data.format || {};
+    const streams = (data.streams || []) as any[];
+    const videoStreams = streams.filter((s: any) => s.codec_type === 'video');
+    const audioStreams = streams.filter((s: any) => s.codec_type === 'audio');
+
+    return (
+        <div>
+            {/* Format Info */}
+            <Table bordered size="sm" className="mb-3">
+                <tbody>
+                    <tr>
+                        <td className={styles.labelCell}>Container</td>
+                        <td className={styles.valueCell}>
+                            <Badge bg="dark" className="me-2">{format.format_long_name || format.format_name || 'Unknown'}</Badge>
+                            {format.duration && <span className="me-2">Duration: {new Date(Number(format.duration) * 1000).toISOString().substr(11, 8)}</span>}
+                            {format.bit_rate && <span>Bitrate: {formatSpeed(Number(format.bit_rate)/8)}</span>}
+                        </td>
+                    </tr>
+                </tbody>
+            </Table>
+
+            {/* Video Streams */}
+            {videoStreams.length > 0 && (
+                <div className="mb-2">
+                    <strong className="d-block mb-1">Video ({videoStreams.length})</strong>
+                    <Table bordered size="sm">
+                        <thead>
+                            <tr>
+                                <th>Codec</th>
+                                <th>Resolution</th>
+                                <th>FPS</th>
+                                <th>Bitrate</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {videoStreams.map((s: any, i: number) => (
+                                <tr key={i}>
+                                    <td><Badge bg="primary">{s.codec_name}</Badge></td>
+                                    <td>{s.width}x{s.height}</td>
+                                    <td>{s.r_frame_rate || s.avg_frame_rate}</td>
+                                    <td>{s.bit_rate ? formatSpeed(Number(s.bit_rate)/8) : 'N/A'}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </Table>
+                </div>
+            )}
+
+            {/* Audio Streams */}
+            {audioStreams.length > 0 && (
+                <div className="mb-2">
+                    <strong className="d-block mb-1">Audio ({audioStreams.length})</strong>
+                    <Table bordered size="sm">
+                        <thead>
+                            <tr>
+                                <th>Codec</th>
+                                <th>Channels</th>
+                                <th>Language</th>
+                                <th>Bitrate</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {audioStreams.map((s: any, i: number) => (
+                                <tr key={i}>
+                                    <td><Badge bg="info">{s.codec_name}</Badge></td>
+                                    <td>{s.channels} ({s.channel_layout})</td>
+                                    <td>{s.tags?.language || 'und'}</td>
+                                    <td>{s.bit_rate ? formatSpeed(Number(s.bit_rate)/8) : 'N/A'}</td>
+                                </tr>
+                            ))}
+                        </tbody>
+                    </Table>
+                </div>
+            )}
+
+            {/* Debug Toggle */}
+            <details>
+                <summary className="small text-muted" style={{cursor:'pointer'}}>Show Raw JSON</summary>
+                <div className="bg-light p-2 rounded border mt-1" style={{ maxHeight: '200px', overflow: 'auto', fontSize: '0.75rem' }}>
+                    <pre style={{ margin: 0 }}>{JSON.stringify(data, null, 2)}</pre>
+                </div>
+            </details>
+        </div>
     );
 }
 

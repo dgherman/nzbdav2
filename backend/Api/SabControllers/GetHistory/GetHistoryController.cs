@@ -17,6 +17,12 @@ public class GetHistoryController(
     {
         // get query
         IQueryable<HistoryItem> query = dbClient.Ctx.HistoryItems;
+
+        // Filter archived items by default (unless show_archived or show_hidden is true)
+        // We treat 'Hidden' and 'Archived' as effectively the same visibility toggle for the UI
+        if (!request.ShowArchived && !request.ShowHidden)
+            query = query.Where(q => !q.IsArchived);
+
         if (request.NzoIds.Count > 0)
             query = query.Where(q => request.NzoIds.Contains(q.Id));
         if (request.Category != null)

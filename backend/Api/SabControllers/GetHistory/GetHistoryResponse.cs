@@ -45,6 +45,9 @@ public class GetHistoryResponse : SabBaseResponse
         [JsonPropertyName("download_time")]
         public int DownloadTimeSeconds { get; set; }
 
+        [JsonPropertyName("completed")]
+        public long CompletedTimestamp { get; set; }
+
         [JsonPropertyName("fail_message")]
         public string FailMessage { get; set; }
 
@@ -55,6 +58,9 @@ public class GetHistoryResponse : SabBaseResponse
             ConfigManager configManager
         )
         {
+            var completedDate = historyItem.ArchivedAt ?? historyItem.CompletedAt;
+            if (completedDate == default) completedDate = historyItem.CreatedAt;
+
             return new HistorySlot()
             {
                 NzoId = historyItem.Id.ToString(),
@@ -65,6 +71,7 @@ public class GetHistoryResponse : SabBaseResponse
                 SizeInBytes = historyItem.TotalSegmentBytes,
                 DownloadPath = GetDownloadPath(historyItem, downloadFolder, configManager),
                 DownloadTimeSeconds = historyItem.DownloadTimeSeconds,
+                CompletedTimestamp = new DateTimeOffset(completedDate).ToUnixTimeSeconds(),
                 FailMessage = historyItem.FailMessage ?? "",
             };
         }

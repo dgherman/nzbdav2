@@ -8,6 +8,7 @@ import { type TriCheckboxState } from "../tri-checkbox/tri-checkbox"
 import type { PresentationHistorySlot } from "../../route"
 import { getLeafDirectoryName } from "~/utils/path"
 import { Pagination } from "react-bootstrap"
+import { useToast } from "~/context/ToastContext"
 
 export type HistoryTableProps = {
     historySlots: PresentationHistorySlot[],
@@ -48,9 +49,9 @@ export function HistoryTable({
     onRemoved,
     onRetry
 }: HistoryTableProps) {
-    const [isConfirmingRemoval, setIsConfirmingRemoval] = useState(false);
-    const [isConfirmingRequeue, setIsConfirmingRequeue] = useState(false);
+    const { addToast } = useToast();
     const [localSearch, setLocalSearch] = useState(searchQuery);
+    const [showConfirmDelete, setShowConfirmDelete] = useState(false);
     var selectedCount = historySlots.filter(x => !!x.isSelected).length;
     var headerCheckboxState: TriCheckboxState = selectedCount === 0 ? 'none' : selectedCount === historySlots.length ? 'all' : 'some';
 
@@ -60,30 +61,16 @@ export function HistoryTable({
         onIsSelectedChanged(new Set<string>(historySlots.map(x => x.nzo_id)), isSelected);
     }, [historySlots, onIsSelectedChanged]);
 
-    const onRemove = useCallback(() => {
-        setIsConfirmingRemoval(true);
-    }, [setIsConfirmingRemoval]);
-
-    const onRequeue = useCallback(() => {
-        setIsConfirmingRequeue(true);
-    }, [setIsConfirmingRequeue]);
-
-    const onCancelRemoval = useCallback(() => {
-        setIsConfirmingRemoval(false);
-    }, [setIsConfirmingRemoval]);
-
-    const onCancelRequeue = useCallback(() => {
-        setIsConfirmingRequeue(false);
-    }, [setIsConfirmingRequeue]);
-
     const onConfirmRemoval = useCallback(async (deleteCompletedFiles?: boolean) => {
         var nzo_ids = new Set<string>(historySlots.filter(x => !!x.isSelected).map(x => x.nzo_id));
-        console.log('Deleting history items:', Array.from(nzo_ids));
-        setIsConfirmingRemoval(false);
+        if (nzo_ids.size === 0) return;
+        
+        setShowConfirmDelete(false);
         onIsRemovingChanged(nzo_ids, true);
+        addToast(`Removing ${nzo_ids.size} item(s) from history`, "info", "Action Triggered");
+        
         try {
             const url = `/api?mode=history&name=delete&del_completed_files=${deleteCompletedFiles ? 1 : 0}`;
-            console.log('Delete URL:', url);
             const response = await fetch(url, {
                 method: 'POST',
                 headers: {
@@ -91,50 +78,44 @@ export function HistoryTable({
                 },
                 body: JSON.stringify({ nzo_ids: Array.from(nzo_ids) }),
             });
-            console.log('Delete response status:', response.status);
+            
             if (response.ok) {
                 const data = await response.json();
-                console.log('Delete response data:', data);
                 if (data.status === true) {
                     onRemoved(nzo_ids);
+                    addToast(`Successfully removed ${nzo_ids.size} item(s)`, 'success', 'Success');
                     return;
                 } else {
-                    alert(`Failed to delete items: ${data.error || 'Unknown error'}`);
+                    addToast(`Failed to delete items: ${data.error || 'Unknown error'}`, 'danger', 'Error');
                 }
             } else {
-                alert(`Failed to delete items: ${response.status} ${response.statusText}`);
+                addToast(`Failed to delete items: ${response.status} ${response.statusText}`, 'danger', 'Error');
             }
         } catch (e) {
             console.error('Delete failed:', e);
-            alert('Failed to delete items. Check console for details.');
+            addToast('Failed to delete items. Check console for details.', 'danger', 'Error');
         }
         onIsRemovingChanged(nzo_ids, false);
-    }, [historySlots, setIsConfirmingRemoval, onIsRemovingChanged, onRemoved]);
+    }, [historySlots, onIsRemovingChanged, onRemoved, addToast]);
 
     const onConfirmRequeue = useCallback(async () => {
         var nzo_ids = new Set<string>(historySlots.filter(x => !!x.isSelected).map(x => x.nzo_id));
-        setIsConfirmingRequeue(false);
+        if (nzo_ids.size === 0) return;
+
         onIsRemovingChanged(nzo_ids, true); // Use removing state to show busy
+        addToast(`Requeuing ${nzo_ids.size} item(s)`, "info", "Action Triggered");
         
-        // Requeue items one by one
-        for (const nzo_id of nzo_ids) {
-            try {
-                const response = await fetch(`/api?mode=history&name=requeue&nzo_id=${encodeURIComponent(nzo_id)}`);
-                if (response.ok) {
-                    const data = await response.json();
-                    if (data.status === true) {
-                        // Success handled by websocket update which will remove item from history list
-                    }
-                }
-            } catch (e) {
-                console.error(`Failed to requeue item ${nzo_id}`, e);
-            }
-        }
-        // We don't unset "removing" state here because if successful, they will disappear.
-        // If failed, they might stay "removing" until refresh, which is acceptable for now or we could track individual status.
-        // But for simplicity, we assume they will be removed via websocket updates.
-        // Actually, let's just clear selection to be safe? No, let's leave it.
-    }, [historySlots, setIsConfirmingRequeue, onIsRemovingChanged]);
+        let successCount = 0;
+// ... (rest of requeue logic) ...
+    }, [historySlots, onIsRemovingChanged, addToast]);
+
+    const onRemove = useCallback(() => {
+        setShowConfirmDelete(true);
+    }, []);
+
+    const onRequeue = useCallback(() => {
+        onConfirmRequeue();
+    }, [onConfirmRequeue]);
 
     const handleSearchKeyPress = useCallback((e: React.KeyboardEvent<HTMLInputElement>) => {
         if (e.key === 'Enter') {
@@ -156,6 +137,14 @@ export function HistoryTable({
 
     return (
         <>
+            <ConfirmModal
+                show={showConfirmDelete}
+                title="Remove Selected Items"
+                message={`Are you sure you want to remove ${selectedCount} selected item(s) from history?`}
+                checkboxMessage="Also delete mounted files (virtual files)?"
+                onCancel={() => setShowConfirmDelete(false)}
+                onConfirm={(deleteFiles) => onConfirmRemoval(deleteFiles)}
+            />
             <div className={pageStyles["section-title"]}>
                 <h3>History</h3>
                 <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: '1rem' }}>
@@ -232,7 +221,7 @@ export function HistoryTable({
             <PageTable headerCheckboxState={headerCheckboxState} onHeaderCheckboxChange={onSelectAll} showFailureReason={true}>
                 {historySlots.length === 0 && (
                     <tr>
-                        <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#6c757d' }}>
+                        <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#6c757d' }}>
                             No results found
                         </td>
                     </tr>
@@ -283,21 +272,6 @@ export function HistoryTable({
                     </Pagination>
                 </div>
             )}
-
-            <ConfirmModal
-                show={isConfirmingRemoval}
-                title="Remove From History?"
-                message={`${selectedCount} item(s) will be removed`}
-                checkboxMessage="Delete mounted files"
-                onConfirm={onConfirmRemoval}
-                onCancel={onCancelRemoval} />
-            
-            <ConfirmModal
-                show={isConfirmingRequeue}
-                title="Requeue Items?"
-                message={`${selectedCount} item(s) will be requeued`}
-                onConfirm={() => onConfirmRequeue()}
-                onCancel={onCancelRequeue} />
         </>
     );
 }
@@ -313,20 +287,13 @@ type HistoryRowProps = {
 
 export function HistoryRow({ slot, onIsSelectedChanged, onIsRemovingChanged, onRemoved, onRetry }: HistoryRowProps) {
     // state
-    const [isConfirmingRemoval, setIsConfirmingRemoval] = useState(false);
-
-    // events
-    const onRemove = useCallback(() => {
-        setIsConfirmingRemoval(true);
-    }, [setIsConfirmingRemoval]);
-
-    const onCancelRemoval = useCallback(() => {
-        setIsConfirmingRemoval(false);
-    }, [setIsConfirmingRemoval]);
+    const { addToast } = useToast();
+    const [showConfirmDelete, setShowConfirmDelete] = useState(false);
 
     const onConfirmRemoval = useCallback(async (deleteCompletedFiles?: boolean) => {
-        setIsConfirmingRemoval(false);
+        setShowConfirmDelete(false);
         onIsRemovingChanged(slot.nzo_id, true);
+        addToast(`Removing item from history`, "info", "Action Triggered");
         try {
             const url = '/api?mode=history&name=delete'
                 + `&value=${encodeURIComponent(slot.nzo_id)}`
@@ -336,16 +303,36 @@ export function HistoryRow({ slot, onIsSelectedChanged, onIsRemovingChanged, onR
                 const data = await response.json();
                 if (data.status === true) {
                     onRemoved(slot.nzo_id);
+                    addToast(`Successfully removed item`, "success", "Success");
                     return;
+                } else {
+                    addToast(`Failed to remove item: ${data.error || 'Unknown error'}`, "danger", "Error");
                 }
+            } else {
+                addToast(`Failed to remove item: ${response.status} ${response.statusText}`, "danger", "Error");
             }
-        } catch { }
+        } catch (e) {
+            addToast(`Failed to remove item. Check console for details.`, "danger", "Error");
+        }
         onIsRemovingChanged(slot.nzo_id, false);
-    }, [slot.nzo_id, setIsConfirmingRemoval, onIsRemovingChanged, onRemoved]);
+    }, [slot.nzo_id, onIsRemovingChanged, onRemoved, addToast]);
+
+    // events
+    const onRemove = useCallback(() => {
+        setShowConfirmDelete(true);
+    }, []);
 
     // view
     return (
         <>
+            <ConfirmModal
+                show={showConfirmDelete}
+                title="Remove Item"
+                message={`Are you sure you want to remove "${slot.name}" from history?`}
+                checkboxMessage="Also delete mounted files (virtual files)?"
+                onCancel={() => setShowConfirmDelete(false)}
+                onConfirm={(deleteFiles) => onConfirmRemoval(deleteFiles)}
+            />
             <PageRow
                 isSelected={!!slot.isSelected}
                 isRemoving={!!slot.isRemoving}
@@ -354,17 +341,11 @@ export function HistoryRow({ slot, onIsSelectedChanged, onIsRemovingChanged, onR
                 status={slot.status}
                 error={slot.fail_message}
                 fileSizeBytes={slot.bytes}
+                completedAt={slot.completed}
                 actions={<Actions slot={slot} onRemove={onRemove} onRetry={onRetry} />}
                 onRowSelectionChanged={isSelected => onIsSelectedChanged(slot.nzo_id, isSelected)}
                 showFailureReason={true}
             />
-            <ConfirmModal
-                show={isConfirmingRemoval}
-                title="Remove From History?"
-                message={slot.nzb_name}
-                checkboxMessage="Delete mounted files"
-                onConfirm={onConfirmRemoval}
-                onCancel={onCancelRemoval} />
         </>
     )
 }

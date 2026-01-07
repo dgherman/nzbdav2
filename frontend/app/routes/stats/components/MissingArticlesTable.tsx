@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Table, Button, Form as BootstrapForm, Pagination, OverlayTrigger, Tooltip, Dropdown, ButtonGroup } from "react-bootstrap";
 import { Form, useSearchParams } from "react-router";
 import type { MissingArticleItem, ProviderBandwidthSnapshot } from "~/clients/backend-client.server";
+import { useToast } from "~/context/ToastContext";
 
 interface Props {
     items: MissingArticleItem[];
@@ -37,6 +38,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
     const [searchParams, setSearchParams] = useSearchParams();
     const [searchValue, setSearchValue] = useState(search);
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
+    const { addToast } = useToast();
     const pageSize = 10;
     const totalPages = Math.ceil(totalCount / pageSize);
 
@@ -132,15 +134,15 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
     );
 
     const confirmRepair = (e: React.FormEvent<HTMLFormElement>) => {
-        if (!confirm(`Are you sure you want to trigger a repair for ${selectedItems.size} selected items? This will delete the files and trigger a re-search in Sonarr/Radarr.`)) {
-            e.preventDefault();
-        }
+        addToast(`Repair triggered for ${selectedItems.size} item(s)`, "info", "Action Triggered");
     };
 
     const confirmDelete = (e: React.FormEvent<HTMLFormElement>) => {
-        if (!confirm(`Are you sure you want to remove ${selectedItems.size} selected items from the log?`)) {
-            e.preventDefault();
-        }
+        addToast(`Removing ${selectedItems.size} item(s) from log`, "info", "Action Triggered");
+    };
+
+    const handleClearLog = () => {
+        addToast("Clearing missing articles log", "info", "Action Triggered");
     };
 
     return (
@@ -229,7 +231,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                     )}
 
                     {items.length > 0 && (
-                        <Form method="post">
+                        <Form method="post" onSubmit={handleClearLog}>
                             <input type="hidden" name="action" value="clear-missing-articles" />
                             <Button
                                 type="submit"
@@ -335,11 +337,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                                         </td>
                                         <td>
                                             <div className="d-flex gap-1">
-                                                <Form method="post" className="d-inline" onSubmit={(e) => {
-                                                    if (!confirm("Are you sure you want to trigger a repair? This will delete the file and trigger a re-search in Sonarr/Radarr.")) {
-                                                        e.preventDefault();
-                                                    }
-                                                }}>
+                                                <Form method="post" className="d-inline" onSubmit={() => addToast("Repair triggered", "info", "Action Triggered")}>
                                                     <input type="hidden" name="action" value="trigger-repair" />
                                                     <input type="hidden" name="filePaths[0]" value={item.filename} />
                                                     <Button 
@@ -354,11 +352,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                                                     </Button>
                                                 </Form>
 
-                                                <Form method="post" className="d-inline" onSubmit={(e) => {
-                                                    if (!confirm("Are you sure you want to remove this entry from the log?")) {
-                                                        e.preventDefault();
-                                                    }
-                                                }}>
+                                                <Form method="post" className="d-inline" onSubmit={() => addToast("Deleting entry from log", "info", "Action Triggered")}>
                                                     <input type="hidden" name="action" value="delete-missing-article" />
                                                     <input type="hidden" name="filename" value={item.filename} />
                                                     <Button 

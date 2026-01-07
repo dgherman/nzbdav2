@@ -2,6 +2,7 @@ import styles from "./usenet.module.css"
 import { type Dispatch, type SetStateAction, useState, useCallback, useEffect, useMemo } from "react";
 import { Button } from "react-bootstrap";
 import { receiveMessage } from "~/utils/websocket-util";
+import { useToast } from "~/context/ToastContext";
 
 const usenetConnectionsTopic = {'cxs': 'state'};
 
@@ -61,6 +62,7 @@ function serializeProviderConfig(config: UsenetProviderConfig): string {
 
 export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     // state
+    const { addToast } = useToast();
     const [showModal, setShowModal] = useState(false);
     const [editingIndex, setEditingIndex] = useState<number | null>(null);
     const [connections, setConnections] = useState<{[index: number]: ConnectionCounts}>({});
@@ -258,17 +260,16 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                                 variant="outline-danger"
                                 size="sm"
                                 onClick={async () => {
-                                    if (confirm('Are you sure you want to reset all provider affinity statistics? This will clear performance data for all files.')) {
-                                        try {
-                                            const response = await fetch('/api/reset-provider-stats', { method: 'POST' });
-                                            if (response.ok) {
-                                                alert('All provider statistics have been reset successfully.');
-                                            } else {
-                                                alert('Failed to reset provider statistics.');
-                                            }
-                                        } catch (error) {
-                                            alert('Error resetting provider statistics: ' + error);
+                                    try {
+                                        addToast('Resetting all provider affinity statistics', "info", "Action Triggered");
+                                        const response = await fetch('/api/reset-provider-stats', { method: 'POST' });
+                                        if (response.ok) {
+                                            addToast('All provider statistics have been reset successfully.', "success", "Success");
+                                        } else {
+                                            addToast('Failed to reset provider statistics.', "danger", "Error");
                                         }
+                                    } catch (error) {
+                                        addToast('Error resetting provider statistics: ' + error, "danger", "Error");
                                     }
                                 }}
                             >

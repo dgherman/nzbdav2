@@ -421,7 +421,7 @@ public static class OrganizedLinksUtil
     }
     
     public static async Task<(List<MappedFile> Items, int TotalCount)> GetMappedFilesPagedAsync(
-        DavDatabaseContext dbContext, ConfigManager configManager, int page, int pageSize, string? search = null)
+        DavDatabaseContext dbContext, ConfigManager configManager, int page, int pageSize, string? search = null, bool? hasMediaInfo = null, bool? missingVideo = null)
     {
         // Join LocalLinks with Items table upfront to enable searching on all fields
         var query = from link in dbContext.LocalLinks.AsNoTracking()
@@ -432,8 +432,21 @@ public static class OrganizedLinksUtil
                         link.DavItemId,
                         link.LinkPath,
                         link.CreatedAt,
-                        DavItemPath = item != null ? item.Path : null
+                        DavItemPath = item != null ? item.Path : null,
+                        MediaInfo = item != null ? item.MediaInfo : null,
+                        IsCorrupted = item != null ? item.IsCorrupted : false,
+                        CorruptionReason = item != null ? item.CorruptionReason : null
                     };
+
+        // Filter by MediaInfo presence
+        if (hasMediaInfo == true)
+        {
+            query = query.Where(x => x.MediaInfo != null);
+        }
+        else if (hasMediaInfo == false)
+        {
+            query = query.Where(x => x.MediaInfo == null);
+        }
 
         // Apply search filter across all columns (DavItemId, LinkPath, DavItemPath)
         if (!string.IsNullOrWhiteSpace(search))
@@ -442,8 +455,21 @@ public static class OrganizedLinksUtil
             query = query.Where(x =>
                 x.DavItemId.ToString().ToLower().Contains(search) ||
                 x.LinkPath.ToLower().Contains(search) ||
-                (x.DavItemPath != null && x.DavItemPath.ToLower().Contains(search))
+                (x.DavItemPath != null && x.DavItemPath.ToLower().Contains(search)) ||
+                (x.MediaInfo != null && x.MediaInfo.ToLower().Contains(search))
             );
+        }
+
+        // Execute query first before JSON processing (SQLite limitation)
+        // We can't easily filter JSON properties in SQL with this structure without raw SQL or client eval
+        // For "missingVideo", we might need client-side evaluation if complex, but let's try to optimize.
+        // If missingVideo is requested, we fetch more items and filter in memory? 
+        // Or simple text check: MediaInfo NOT LIKE '%"codec_type": "video"%'?
+        // Note: SQLite JSON functions are not always available or standard in EF Core translation for all versions.
+        // Simple string check is safer:
+        if (missingVideo == true)
+        {
+            query = query.Where(x => x.MediaInfo != null && !x.MediaInfo.Contains("\"codec_type\": \"video\""));
         }
 
         var totalCount = await query.CountAsync();
@@ -463,7 +489,10 @@ public static class OrganizedLinksUtil
                 DavItemId = result.DavItemId,
                 LinkPath = result.LinkPath,
                 CreatedAt = result.CreatedAt,
-                DavItemPath = result.DavItemPath
+                DavItemPath = result.DavItemPath,
+                MediaInfo = result.MediaInfo,
+                IsCorrupted = result.IsCorrupted,
+                CorruptionReason = result.CorruptionReason
             };
 
             // Extract Scene Name from DavItemPath

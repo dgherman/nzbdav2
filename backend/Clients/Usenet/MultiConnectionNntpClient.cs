@@ -293,6 +293,11 @@ public class MultiConnectionNntpClient : INntpClient
                 if (retries > 0)
                 {
                     _logger?.Debug("[RunStreamWithConnection] Retrying operation. Retries left: {Retries}, Provider: {Host}, Exception: {Exception}", retries, _host, ex.GetType().Name);
+                    
+                    // Release permit before retrying to prevent deadlock
+                    globalPermit?.Dispose();
+                    globalPermit = null;
+
                     // Add small delay before retry
                     await Task.Delay(500, cancellationToken).ConfigureAwait(false);
                     return await RunStreamWithConnection(task, cancellationToken, retries - 1, recordLatency).ConfigureAwait(false);
@@ -397,6 +402,11 @@ public class MultiConnectionNntpClient : INntpClient
                 if (retries > 0)
                 {
                     _logger?.Debug("[RunWithConnection] Retrying operation. Retries left: {Retries}, Provider: {Host}, Exception: {Exception}", retries, _host, ex.GetType().Name);
+                    
+                    // Release permit before retrying to prevent deadlock (holding permit while waiting for new one)
+                    globalPermit?.Dispose();
+                    globalPermit = null;
+
                     // Add small delay before retry
                     await Task.Delay(500, cancellationToken).ConfigureAwait(false);
                     return await RunWithConnection<T>(task, cancellationToken, retries - 1, recordLatency).ConfigureAwait(false);

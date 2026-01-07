@@ -26,6 +26,7 @@ public class HealthCheckService
     private readonly WebsocketManager _websocketManager;
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly ProviderErrorService _providerErrorService;
+    private readonly NzbAnalysisService _nzbAnalysisService;
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
     private readonly ConcurrentDictionary<string, byte> _missingSegmentIds = new();
@@ -39,7 +40,8 @@ public class HealthCheckService
         UsenetStreamingClient usenetClient,
         WebsocketManager websocketManager,
         IServiceScopeFactory serviceScopeFactory,
-        ProviderErrorService providerErrorService
+        ProviderErrorService providerErrorService,
+        NzbAnalysisService nzbAnalysisService
     )
     {
         _configManager = configManager;
@@ -47,6 +49,7 @@ public class HealthCheckService
         _websocketManager = websocketManager;
         _serviceScopeFactory = serviceScopeFactory;
         _providerErrorService = providerErrorService;
+        _nzbAnalysisService = nzbAnalysisService;
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -287,6 +290,11 @@ public class HealthCheckService
             Log.Debug($"[HealthCheck] Fetched {segments.Count} segments for {davItem.Name}");
             if (davItem.ReleaseDate == null) await UpdateReleaseDate(davItem, segments, ct).ConfigureAwait(false);
 
+            // Trigger analysis if media info is missing (ffprobe check)
+            if (davItem.MediaInfo == null)
+            {
+                _nzbAnalysisService.TriggerAnalysisInBackground(davItem.Id, segments.ToArray());
+            }
 
             // setup progress tracking
             var progressHook = new Progress<int>();
@@ -349,6 +357,8 @@ public class HealthCheckService
                 interval = minInterval;
 
             davItem.NextHealthCheck = davItem.LastHealthCheck + interval;
+            davItem.IsCorrupted = false;
+            davItem.CorruptionReason = null;
             dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
             {
                 Id = Guid.NewGuid(),
@@ -578,42 +588,56 @@ public class HealthCheckService
                 int? episodeId = null;
                 if (arrClient is SonarrClient sonarrClient)
                 {
-                    var mediaIds = await sonarrClient.GetMediaIds(davItem.Path);
-                    if (mediaIds != null && mediaIds.Value.episodeIds.Any())
+                    try
                     {
-                        episodeId = mediaIds.Value.episodeIds.First(); // Use the first episode ID found
+                        var mediaIds = await sonarrClient.GetMediaIds(davItem.Path);
+                        if (mediaIds != null && mediaIds.Value.episodeIds.Any())
+                        {
+                            episodeId = mediaIds.Value.episodeIds.First(); // Use the first episode ID found
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Debug($"[HealthCheck] Failed to get episode ID from Sonarr '{arrClient.Host}': {ex.Message}");
                     }
                 }
 
-                // Pass episodeId (Sonarr only) and sort parameters
-                if (await arrClient.RemoveAndSearch(symlinkOrStrmPath, episodeId: episodeId, sortKey: "date", sortDirection: "descending").ConfigureAwait(false))
+                try
                 {
-                    var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
-                    Log.Information($"[HealthCheck] {arrActionMessage}");
-
-                    dbClient.Ctx.Items.Remove(davItem);
-                    OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
-                    dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+                    // Pass episodeId (Sonarr only) and sort parameters
+                    if (await arrClient.RemoveAndSearch(symlinkOrStrmPath, episodeId: episodeId, sortKey: "date", sortDirection: "descending").ConfigureAwait(false))
                     {
-                        Id = Guid.NewGuid(),
-                        DavItemId = davItem.Id,
-                        Path = davItem.Path,
-                        CreatedAt = DateTimeOffset.UtcNow,
-                        Result = HealthCheckResult.HealthResult.Unhealthy,
-                        RepairStatus = HealthCheckResult.RepairAction.Repaired,
-                        Message = string.Join(" ", [
-                            failureReason,
-                            $"Corresponding {linkType} found within Library Dir.",
-                            arrActionMessage
-                        ]),
-                        Operation = operation
-                    }));
-                    await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
-                    await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
-                    return;
+                        var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
+                        Log.Information($"[HealthCheck] {arrActionMessage}");
+
+                        dbClient.Ctx.Items.Remove(davItem);
+                        OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
+                        dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+                        {
+                            Id = Guid.NewGuid(),
+                            DavItemId = davItem.Id,
+                            Path = davItem.Path,
+                            CreatedAt = DateTimeOffset.UtcNow,
+                            Result = HealthCheckResult.HealthResult.Unhealthy,
+                            RepairStatus = HealthCheckResult.RepairAction.Repaired,
+                            Message = string.Join(" ", [
+                                failureReason,
+                                $"Corresponding {linkType} found within Library Dir.",
+                                arrActionMessage
+                            ]),
+                            Operation = operation
+                        }));
+                        await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                        await _providerErrorService.ClearErrorsForFile(davItem.Path).ConfigureAwait(false);
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning($"[HealthCheck] Error during RemoveAndSearch on Arr instance '{arrClient.Host}': {ex.Message}");
                 }
 
-                // If RemoveAndSearch returned false, it means this client didn't recognize the file.
+                // If RemoveAndSearch returned false or threw, it means this client didn't recognize or couldn't handle the file.
                 // Log and continue to the next client (e.g. might have checked Radarr for a TV show).
                 Log.Debug($"[HealthCheck] Arr instance '{arrClient.Host}' could not find/remove '{symlinkOrStrmPath}'. Checking next instance...");
                 continue;
@@ -668,6 +692,8 @@ public class HealthCheckService
             var utcNow = DateTimeOffset.UtcNow;
             davItem.LastHealthCheck = utcNow;
             davItem.NextHealthCheck = utcNow.AddDays(1);
+            davItem.IsCorrupted = true;
+            davItem.CorruptionReason = $"Repair failed: {e.Message}";
             dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
             {
                 Id = Guid.NewGuid(),
@@ -688,6 +714,8 @@ public class HealthCheckService
             var utcNow = DateTimeOffset.UtcNow;
             davItem.LastHealthCheck = utcNow;
             davItem.NextHealthCheck = utcNow.AddDays(1);
+            davItem.IsCorrupted = true;
+            davItem.CorruptionReason = $"Repair failed: {e.Message}";
             dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
             {
                 Id = Guid.NewGuid(),

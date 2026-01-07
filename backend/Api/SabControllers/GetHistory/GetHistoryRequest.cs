@@ -12,6 +12,7 @@ public class GetHistoryRequest
     public string? Category { get; init; }
     public List<Guid> NzoIds { get; init; } = [];
     public bool ShowHidden { get; init; } = false;
+    public bool ShowArchived { get; init; } = false;
     public string? Search { get; init; }
     public string? FailureReason { get; init; }
     public HistoryItem.DownloadStatusOption? Status { get; init; }
@@ -25,6 +26,7 @@ public class GetHistoryRequest
         var pageSizeParam = context.GetQueryParam("pageSize");
         var nzoIdsParam = context.GetQueryParam("nzo_ids");
         var showHiddenParam = context.GetQueryParam("show_hidden");
+        var showArchivedParam = context.GetQueryParam("show_archived");
         var statusParam = context.GetQueryParam("status");
         Category = context.GetQueryParam("category");
         Search = context.GetQueryParam("search");
@@ -39,6 +41,11 @@ public class GetHistoryRequest
         if (showHiddenParam is not null)
         {
             ShowHidden = showHiddenParam == "1" || showHiddenParam.ToLower() == "true";
+        }
+
+        if (showArchivedParam is not null)
+        {
+            ShowArchived = showArchivedParam == "1" || showArchivedParam.ToLower() == "true";
         }
 
         if (startParam is not null)

@@ -175,6 +175,27 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
         return await Ctx.HistoryItems.AsNoTracking().FirstOrDefaultAsync(x => x.Id == Guid.Parse(id)).ConfigureAwait(false);
     }
 
+
+
+    public async Task ArchiveHistoryItemsAsync(List<Guid> ids, CancellationToken ct = default)
+    {
+        var historyItems = await Ctx.HistoryItems
+            .Where(x => ids.Contains(x.Id))
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        if (historyItems.Count == 0) return;
+
+        Serilog.Log.Information("[DavDatabaseClient] Archiving {Count} history items: {Names}", 
+            historyItems.Count, string.Join(", ", historyItems.Select(h => h.JobName)));
+
+        foreach (var item in historyItems)
+        {
+            if (item.IsArchived) continue;
+            item.IsArchived = true;
+            item.ArchivedAt = DateTime.UtcNow;
+        }
+    }
+
     public async Task RemoveHistoryItemsAsync(List<Guid> ids, bool deleteFiles, CancellationToken ct = default)
     {
         var historyItems = await Ctx.HistoryItems

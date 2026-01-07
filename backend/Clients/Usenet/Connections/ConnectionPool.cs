@@ -23,6 +23,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     /* -------------------------------- configuration -------------------------------- */
 
     public TimeSpan IdleTimeout { get; }
+    public string PoolName { get; }
     public int LiveConnections => _live;
     public int IdleConnections => _idleConnections.Count;
     public int ActiveConnections => _live - _idleConnections.Count;
@@ -61,6 +62,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         int maxConnections,
         ExtendedSemaphoreSlim pooledSemaphore,
         Func<CancellationToken, ValueTask<T>> connectionFactory,
+        string poolName = "Unknown",
         TimeSpan? idleTimeout = null)
     {
         if (maxConnections <= 0)
@@ -69,6 +71,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         _factory = connectionFactory
                    ?? throw new ArgumentNullException(nameof(connectionFactory));
         IdleTimeout = idleTimeout ?? TimeSpan.FromSeconds(30);
+        PoolName = poolName;
 
         _maxConnections = maxConnections;
         _gate = new CombinedSemaphoreSlim(maxConnections, pooledSemaphore);
@@ -213,7 +216,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                     continue;
                 }
 
-                Serilog.Log.Error(ex, "[GlobalPool] Failed to create fresh connection for {UsageType}. Error: {Message}", usageContext.UsageType, ex.Message);
+                Serilog.Log.Error(ex, "[GlobalPool][{PoolName}] Failed to create fresh connection for {UsageType}. Error: {Message}", PoolName, usageContext.UsageType, ex.Message);
                 _gate.Release(); // free the permit on failure
                 throw;
             }

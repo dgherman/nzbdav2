@@ -269,6 +269,19 @@ volumes:
 
 # Changelog
 
+## v0.1.28 (2026-01-06)
+*   **Feature**: Added a "Run Health Check" button to the File Details modal across the application (Health, Stats, Explore). This allows users to manually trigger an immediate, high-priority `HEAD` health check for any specific file to verify its availability on Usenet.
+*   **Fix**: Resolved a critical deadlock in `GlobalOperationLimiter` where retrying failed operations (like transient Usenet errors) would recursively acquire new permits without releasing the existing ones, eventually exhausting the permit pool and hanging the application.
+*   **Logic**: Smart Analysis is now exclusive to 'Analysis' operations (for seek acceleration). Health Checks (Routine & Urgent) will now consistently perform full segment-by-segment verification to ensure maximum reliability, bypassing Smart Analysis optimization.
+*   **Behavior**: Items imported by Sonarr/Radarr are now moved to the **Archived** state (soft delete) instead of being hard deleted immediately. This allows users to view them in the "Archived" filter if needed. They will be permanently deleted after the configured history retention period. Note: Virtual files for archived items are **retained** in the filesystem until the retention period expires, ensuring availability for seeding or other uses.
+*   **Dependency**: Added `ffmpeg` to the Docker image to support future video verification and advanced analysis features.
+*   **Feature**: Implemented "Media Analysis" (ffprobe) as part of the analysis workflow. When "Analyze" is triggered for a file, it now performs both NZB segment analysis (for instant seeking) and deep media verification using `ffprobe`. The full media metadata (video/audio streams, codecs) is displayed in the File Details modal.
+*   **Feature**: Added a "Repair" button to the File Details modal. This allows users to manually trigger a repair process (which deletes the file from NzbDav and triggers a re-search in Sonarr/Radarr) directly from the file view.
+*   **Stats**: Enhanced the "Mapped Files" table in the System Monitor to display media codec information (Video/Audio) extracted from analysis. Added support for searching/filtering mapped files by codec (e.g., "hevc", "dts").
+*   **Stats**: Added filters to the "Mapped Files" table to show only analyzed files (`Analyzed Only`) or files missing video tracks (`Missing Video`), making it easier to identify problematic files.
+*   **Logic**: Health Checks (Routine & Urgent) now automatically trigger "Media Analysis" (ffprobe) if the file is missing media metadata. This ensures that all files are eventually verified for stream integrity during the background maintenance cycle.
+*   **Fix**: Resolved a critical infinite loop in `MultipartFileStream` that occurred when a part stream returned 0 bytes (EOF) prematurely due to metadata size mismatches (common in some obfuscated or 7z archives). The stream now correctly advances to the next part boundary.
+
 ## v0.1.27 (2026-01-05)
 *   **Performance**: Implemented "Smart Analysis" for media files. The system now intelligently detects uniform segment sizes by checking only the first, second, and last segments of a file. If confirmed uniform, it skips the full segment-by-segment analysis, reducing the number of required network requests from thousands (O(N)) to just three (O(1)) for standard releases. This dramatically speeds up the "Analyzing..." phase for new content.
 

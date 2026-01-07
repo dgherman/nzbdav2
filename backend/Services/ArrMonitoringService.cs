@@ -118,15 +118,15 @@ public class ArrMonitoringService
             {
                 var importDate = importedIdsWithDates[item.Id];
                 var ageSinceImport = DateTime.Now - importDate;
-                Log.Information("[ArrMonitoring] Removing imported item {JobName} ({Id}) - imported {Minutes:F1} minutes ago (at {ImportDate})",
+                Log.Information("[ArrMonitoring] Archiving imported item {JobName} ({Id}) - imported {Minutes:F1} minutes ago (at {ImportDate})",
                     item.JobName, item.Id, ageSinceImport.TotalMinutes, importDate);
             }
 
-            var idsToRemove = itemsToCleanup.Select(x => x.Id).ToList();
-            await dbClient.RemoveHistoryItemsAsync(idsToRemove, true, _cancellationToken).ConfigureAwait(false);
+            var idsToArchive = itemsToCleanup.Select(x => x.Id).ToList();
+            await dbClient.ArchiveHistoryItemsAsync(idsToArchive, _cancellationToken).ConfigureAwait(false);
             await dbClient.SaveChanges(_cancellationToken).ConfigureAwait(false);
 
-            _ = _websocketManager.SendMessage(WebsocketTopic.HistoryItemRemoved, string.Join(",", idsToRemove));
+            _ = _websocketManager.SendMessage(WebsocketTopic.HistoryItemRemoved, string.Join(",", idsToArchive));
         }
         catch (Exception e)
         {
@@ -139,54 +139,73 @@ public class ArrMonitoringService
     {
         try
         {
-            // Remove failed items that are older than X hours
             var retentionHours = _configManager.GetHistoryRetentionHours();
             var cutoffTime = DateTime.Now.AddHours(-retentionHours);
 
             using var scope = _scopeFactory.CreateScope();
             var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
 
-            // Log total history items for debugging
             var totalHistoryItems = await dbClient.Ctx.HistoryItems.CountAsync(_cancellationToken).ConfigureAwait(false);
-            var totalFailedItems = await dbClient.Ctx.HistoryItems
-                .Where(h => h.DownloadStatus == Database.Models.HistoryItem.DownloadStatusOption.Failed)
-                .CountAsync(_cancellationToken).ConfigureAwait(false);
 
-            Log.Debug("[ArrMonitoring] CleanupOldFailedItems: Total history items: {Total}, Total failed: {Failed}",
-                totalHistoryItems, totalFailedItems);
+            // 1. Delete archived items that have been archived for > retention period
+            var archivedItemsToDelete = await dbClient.Ctx.HistoryItems
+                .Where(h => h.IsArchived && h.ArchivedAt.HasValue)
+                .Where(h => h.ArchivedAt.Value < cutoffTime)
+                .Select(h => new { h.Id, h.JobName, h.ArchivedAt })
+                .ToListAsync(_cancellationToken).ConfigureAwait(false);
 
-            // Get failed items with their completion times for logging
-            var failedItemsWithTimes = await dbClient.Ctx.HistoryItems
+            if (archivedItemsToDelete.Count > 0)
+            {
+                Log.Information("[ArrMonitoring] Found {Count} archived items to delete. Archived before: {CutoffTime} (Retention: {RetentionHours}h)",
+                    archivedItemsToDelete.Count, cutoffTime, retentionHours);
+
+                foreach (var item in archivedItemsToDelete)
+                {
+                    var age = DateTime.Now - item.ArchivedAt!.Value;
+                    Log.Information("[ArrMonitoring] Removing archived item {JobName} ({Id}) - archived {Minutes:F1} minutes ago",
+                        item.JobName, item.Id, age.TotalMinutes);
+                }
+
+                var archivedIds = archivedItemsToDelete.Select(x => x.Id).ToList();
+                await dbClient.RemoveHistoryItemsAsync(archivedIds, false, _cancellationToken).ConfigureAwait(false);
+                await dbClient.SaveChanges(_cancellationToken).ConfigureAwait(false);
+                _ = _websocketManager.SendMessage(WebsocketTopic.HistoryItemRemoved, string.Join(",", archivedIds));
+            }
+
+            // 2. Delete old failed items that are not archived (direct failures, not from Arr)
+            var failedItemsToDelete = await dbClient.Ctx.HistoryItems
                 .Where(h => h.DownloadStatus == Database.Models.HistoryItem.DownloadStatusOption.Failed)
+                .Where(h => !h.IsArchived) // Only non-archived failed items
                 .Where(h => h.CompletedAt < cutoffTime)
                 .Select(h => new { h.Id, h.JobName, h.CompletedAt })
                 .ToListAsync(_cancellationToken).ConfigureAwait(false);
 
-            if (failedItemsWithTimes.Count == 0)
+            if (failedItemsToDelete.Count > 0)
             {
-                Log.Debug("[ArrMonitoring] No old failed items to cleanup");
-                return;
+                Log.Information("[ArrMonitoring] Found {Count} old failed items to delete. Completed before: {CutoffTime} (Retention: {RetentionHours}h)",
+                    failedItemsToDelete.Count, cutoffTime, retentionHours);
+
+                foreach (var item in failedItemsToDelete)
+                {
+                    var age = DateTime.Now - item.CompletedAt;
+                    Log.Information("[ArrMonitoring] Removing failed item {JobName} ({Id}) - completed {Minutes:F1} minutes ago",
+                        item.JobName, item.Id, age.TotalMinutes);
+                }
+
+                var failedIds = failedItemsToDelete.Select(x => x.Id).ToList();
+                await dbClient.RemoveHistoryItemsAsync(failedIds, true, _cancellationToken).ConfigureAwait(false);
+                await dbClient.SaveChanges(_cancellationToken).ConfigureAwait(false);
+                _ = _websocketManager.SendMessage(WebsocketTopic.HistoryItemRemoved, string.Join(",", failedIds));
             }
 
-            Log.Information("[ArrMonitoring] Found {Count} old failed items to cleanup. Now: {Now}, CutoffTime: {CutoffTime} (Retention: {RetentionHours}h)",
-                failedItemsWithTimes.Count, DateTime.Now, cutoffTime, retentionHours);
-
-            foreach (var item in failedItemsWithTimes)
+            if (archivedItemsToDelete.Count == 0 && failedItemsToDelete.Count == 0)
             {
-                var age = DateTime.Now - item.CompletedAt;
-                Log.Information("[ArrMonitoring] Removing failed item {JobName} ({Id}) - completed {Minutes:F1} minutes ago (at {CompletedAt})",
-                    item.JobName, item.Id, age.TotalMinutes, item.CompletedAt);
+                Log.Debug("[ArrMonitoring] No old items to cleanup. Total history items: {Total}", totalHistoryItems);
             }
-
-            var oldFailedItems = failedItemsWithTimes.Select(x => x.Id).ToList();
-            await dbClient.RemoveHistoryItemsAsync(oldFailedItems, true, _cancellationToken).ConfigureAwait(false);
-            await dbClient.SaveChanges(_cancellationToken).ConfigureAwait(false);
-
-            _ = _websocketManager.SendMessage(WebsocketTopic.HistoryItemRemoved, string.Join(",", oldFailedItems));
         }
         catch (Exception e)
         {
-            Log.Debug($"Error cleaning up old failed items: {e.Message}");
+            Log.Debug($"Error cleaning up old items: {e.Message}");
         }
     }
 

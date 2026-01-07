@@ -150,6 +150,9 @@ public class GetFileDetailsController(
             CreatedAt = davItem.ReleaseDate,
             LastHealthCheck = davItem.LastHealthCheck,
             NextHealthCheck = davItem.NextHealthCheck,
+            MediaInfo = davItem.MediaInfo,
+            IsCorrupted = davItem.IsCorrupted,
+            CorruptionReason = davItem.CorruptionReason,
             MissingArticleCount = missingArticleCount,
             ProviderStats = providerStats.Select(ps => new GetFileDetailsResponse.ProviderStatistic
             {

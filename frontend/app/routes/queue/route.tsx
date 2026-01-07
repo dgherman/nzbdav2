@@ -9,6 +9,7 @@ import { QueueTable } from "./components/queue-table/queue-table";
 import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
 import { isAuthenticated } from "~/auth/authentication.server";
+import { useToast } from "~/context/ToastContext";
 
 const topicNames = {
     queueItemStatus: 'qs',
@@ -58,6 +59,7 @@ export default function Queue(props: Route.ComponentProps) {
     const [historySearchQuery, setHistorySearchQuery] = useState('');
     const [failureReason, setFailureReason] = useState<string | undefined>(undefined);
     const [statusFilter, setStatusFilter] = useState('all');
+    const { addToast } = useToast();
     const disableLiveView = queueSlots.length == maxItems || historySlots.length == maxItems;
     const error = props.actionData?.error;
 
@@ -172,19 +174,20 @@ export default function Queue(props: Route.ComponentProps) {
                 const data = await response.json();
                 if (data.status === true) {
                     console.log(`Successfully requeued item ${nzo_id}, new queue item: ${data.nzo_id}`);
+                    addToast(`Successfully requeued item`, "success", "Success");
                 } else {
                     console.error('Failed to requeue item:', data.error);
-                    alert(`Failed to requeue: ${data.error || 'Unknown error'}`);
+                    addToast(`Failed to requeue: ${data.error || 'Unknown error'}`, "danger", "Error");
                 }
             } else {
                 console.error('Failed to requeue item:', response.statusText);
-                alert(`Failed to requeue: ${response.statusText}`);
+                addToast(`Failed to requeue: ${response.statusText}`, "danger", "Error");
             }
         } catch (e) {
             console.error('Failed to requeue item', e);
-            alert('Failed to requeue item. Please try again.');
+            addToast('Failed to requeue item. Please try again.', "danger", "Error");
         }
-    }, []);
+    }, [addToast]);
 
     // websocket
     const onWebsocketMessage = useCallback((topic: string, message: string) => {

@@ -18,6 +18,9 @@ public class DavItem
     public DateTimeOffset? ReleaseDate { get; set; }
     public DateTimeOffset? LastHealthCheck { get; set; }
     public DateTimeOffset? NextHealthCheck { get; set; }
+    public string? MediaInfo { get; set; }
+    public bool IsCorrupted { get; set; }
+    public string? CorruptionReason { get; set; }
 
     public static DavItem New
     (

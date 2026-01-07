@@ -33,7 +33,12 @@ public class DatabaseStoreMultipartFile(
         // create streaming usage context
         var usageContext = new ConnectionUsageContext(
             ConnectionUsageType.Streaming,
-            davMultipartFile.Path
+            new ConnectionUsageDetails 
+            { 
+                Text = davMultipartFile.Path,
+                DavItemId = davMultipartFile.Id,
+                FileDate = davMultipartFile.ReleaseDate
+            }
         );
 
         // return the stream

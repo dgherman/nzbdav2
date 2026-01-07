@@ -13,6 +13,7 @@ public class MultipartFileStream : Stream
     private readonly MultipartFile _multipartFile;
     private readonly ConnectionUsageContext _usageContext;
     private Stream? _currentStream;
+    private long _currentPartEnd = 0;
     private long _position = 0;
 
     public override bool CanRead => true;
@@ -43,8 +44,13 @@ public class MultipartFileStream : Stream
         if (count == 0) return 0;
         while (_position < Length && !cancellationToken.IsCancellationRequested)
         {
-            // If we haven't read the first stream, read it.
-            _currentStream ??= GetCurrentStream();
+            // If we don't have a current stream, get it.
+            if (_currentStream == null)
+            {
+                var searchResult = GetCurrentStreamInfo();
+                _currentStream = searchResult.Stream;
+                _currentPartEnd = searchResult.FoundByteRange.EndExclusive;
+            }
 
             // read from our current stream
             var readCount = await _currentStream.ReadAsync
@@ -52,11 +58,19 @@ public class MultipartFileStream : Stream
                 buffer.AsMemory(offset, count),
                 cancellationToken
             ).ConfigureAwait(false);
-            _position += readCount;
-            if (readCount > 0) return readCount;
+            
+            if (readCount > 0)
+            {
+                _position += readCount;
+                return readCount;
+            }
 
             // If we couldn't read anything from our current stream,
             // it's time to advance to the next stream.
+            // We advance position to the end of the current part to avoid infinite loops
+            // if the underlying stream is shorter than advertised in metadata.
+            _position = Math.Max(_position, _currentPartEnd);
+            
             await _currentStream.DisposeAsync().ConfigureAwait(false);
             _currentStream = null;
         }
@@ -64,7 +78,7 @@ public class MultipartFileStream : Stream
         return 0;
     }
 
-    private Stream GetCurrentStream()
+    private (Stream Stream, LongRange FoundByteRange) GetCurrentStreamInfo()
     {
         var searchResult = InterpolationSearch.Find(
             _position,
@@ -77,7 +91,7 @@ public class MultipartFileStream : Stream
         var segmentSizes = filePart.NzbFile.Segments.Select(x => x.Size).ToArray();
         var stream = _client.GetFileStream(filePart.NzbFile.GetSegmentIds(), filePart.PartSize, 1, _usageContext, segmentSizes: segmentSizes);
         stream.Seek(_position - searchResult.FoundByteRange.StartInclusive, SeekOrigin.Begin);
-        return stream;
+        return (stream, searchResult.FoundByteRange);
     }
 
     public override long Seek(long offset, SeekOrigin origin)

@@ -213,6 +213,28 @@ public class BufferedSegmentStream : Stream
                         var jobName = _usageContext?.DetailsObject?.Text ?? _usageContext?.Details ?? "Unknown";
                         Log.Error("[BufferedStream] DATA CORRUPTION: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Worker={WorkerId}: {Message}",
                             jobName, currentSegmentIndex, segmentIds.Length, currentSegmentId, workerId, ex.Message);
+                        
+                        // Report corruption back to database if we have a DavItemId
+                        if (_usageContext?.DetailsObject?.DavItemId != null)
+                        {
+                            var davItemId = _usageContext.Value.DetailsObject.DavItemId.Value;
+                            var message = ex.Message;
+                            _ = Task.Run(async () => {
+                                try {
+                                    using var db = new NzbWebDAV.Database.DavDatabaseContext();
+                                    var item = await db.Items.FindAsync(davItemId);
+                                    if (item != null) {
+                                        item.IsCorrupted = true;
+                                        item.CorruptionReason = $"Data Integrity Error: {message}";
+                                        await db.SaveChangesAsync();
+                                        Log.Information("[BufferedStream] Marked item {ItemId} as corrupted in database.", davItemId);
+                                    }
+                                } catch (Exception dbEx) {
+                                    Log.Error(dbEx, "[BufferedStream] Failed to mark item as corrupted in database.");
+                                }
+                            });
+                        }
+                        
                         throw;
                     }
                     catch (Exception ex)

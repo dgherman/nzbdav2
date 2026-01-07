@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Database;
@@ -41,18 +42,49 @@ public class MaintenanceController(
     [HttpPost("analyze/{id}")]
     public async Task<IActionResult> Analyze(Guid id)
     {
+        return await AnalyzeBulk(new AnalyzeRequest { DavItemIds = new List<Guid> { id } });
+    }
+
+    public class AnalyzeRequest
+    {
+        public List<Guid> DavItemIds { get; set; } = new();
+    }
+
+    [HttpPost("analyze")]
+    public async Task<IActionResult> AnalyzeBulk([FromBody] AnalyzeRequest request)
+    {
         try
         {
             var apiKey = HttpContext.GetRequestApiKey();
             if (apiKey == null || apiKey != EnvironmentUtil.GetVariable("FRONTEND_BACKEND_API_KEY"))
                 return Unauthorized(new { error = "API Key Incorrect" });
 
-            var nzbFile = await dbClient.GetNzbFileAsync(id, HttpContext.RequestAborted).ConfigureAwait(false);
-            if (nzbFile == null) return NotFound(new { error = "NZB file not found" });
+            if (request.DavItemIds == null || request.DavItemIds.Count == 0)
+                return BadRequest(new { error = "DavItemIds is required" });
 
-            nzbAnalysisService.TriggerAnalysisInBackground(nzbFile.Id, nzbFile.SegmentIds, force: true);
+            var processedCount = 0;
+            foreach (var id in request.DavItemIds)
+            {
+                // Fetch generic DavItem first
+                var davItem = await dbClient.Ctx.Items
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(x => x.Id == id)
+                    .ConfigureAwait(false);
 
-            return Accepted(new { message = "Analysis started in background." });
+                if (davItem == null) continue;
+
+                string[]? segmentIds = null;
+                if (davItem.Type == DavItem.ItemType.NzbFile)
+                {
+                    var nzbFile = await dbClient.GetNzbFileAsync(id, HttpContext.RequestAborted).ConfigureAwait(false);
+                    segmentIds = nzbFile?.SegmentIds;
+                }
+
+                nzbAnalysisService.TriggerAnalysisInBackground(id, segmentIds, force: true);
+                processedCount++;
+            }
+
+            return Accepted(new { message = $"Analysis started in background for {processedCount} item(s)." });
         }
         catch (Exception e)
         {

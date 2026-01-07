@@ -41,12 +41,13 @@ public class NzbFileStream : Stream
         long[]? segmentSizes = null
     )
     {
-        Serilog.Log.Debug("[NzbFileStream] CTOR called. StackTrace: {StackTrace}", Environment.StackTrace);
+        _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
+        Serilog.Log.Debug("[NzbFileStream] Initializing stream (Size: {FileSize} bytes, Segments: {SegmentCount}, Context: {UsageContext})", fileSize, fileSegmentIds.Length, _usageContext.UsageType);
+        
         _fileSegmentIds = fileSegmentIds;
         _fileSize = fileSize;
         _client = client;
         _concurrentConnections = concurrentConnections;
-        _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
         _useBufferedStreaming = useBufferedStreaming;
         _bufferSize = bufferSize;
         _streamCts = new CancellationTokenSource();
@@ -84,9 +85,6 @@ public class NzbFileStream : Stream
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
         _totalReadCount++;
-
-        Serilog.Log.Debug("[NzbFileStream] ReadAsync #{ReadNum} called. Position: {Position}, Count: {Count}, InnerStream: {InnerStreamStatus}",
-            _totalReadCount, _position, count, _innerStream == null ? "null" : "active");
 
         if (_innerStream == null)
         {

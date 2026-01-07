@@ -305,11 +305,22 @@ class BackendClient {
         return response.json();
     }
 
-    public async getMappedFiles(page: number = 1, pageSize: number = 10, search: string = ""): Promise<{ items: MappedFile[], totalCount: number }> {
-        const url = process.env.BACKEND_URL + `/api/stats/mapped-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
+    public async getMappedFiles(page: number = 1, pageSize: number = 10, search: string = "", hasMediaInfo?: boolean, missingVideo?: boolean): Promise<{ items: MappedFile[], totalCount: number }> {
+        let url = process.env.BACKEND_URL + `/api/stats/mapped-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
+        if (hasMediaInfo !== undefined) url += `&hasMediaInfo=${hasMediaInfo}`;
+        if (missingVideo !== undefined) url += `&missingVideo=${missingVideo}`;
+        
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get mapped files: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async getDashboardSummary(): Promise<DashboardSummary> {
+        const url = process.env.BACKEND_URL + "/api/stats/dashboard/summary";
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get dashboard summary: ${(await response.json()).error}`);
         return response.json();
     }
 
@@ -479,6 +490,8 @@ class BackendClient {
         storage: string,
 
         download_time: number,
+
+        completed: number,
 
         fail_message: string,
 
@@ -1250,6 +1263,12 @@ class BackendClient {
 
                     createdAt: string;
 
+                    mediaInfo?: string;
+
+                    isCorrupted: boolean;
+
+                    corruptionReason?: string | null;
+
     
 
     
@@ -1277,6 +1296,8 @@ class BackendClient {
         createdAt: string | null;
         lastHealthCheck: string | null;
         nextHealthCheck: string | null;
+        isCorrupted: boolean;
+        corruptionReason?: string | null;
         missingArticleCount: number;
         totalSegments: number;
         minSegmentSize: number | null;
@@ -1302,6 +1323,17 @@ class BackendClient {
         repairStatus: RepairAction;
         message: string | null;
         createdAt: string;
+    }
+
+    export type DashboardSummary = {
+        totalMapped: number;
+        analyzedCount: number;
+        failedAnalysisCount: number;
+        corruptedCount: number;
+        missingVideoCount: number;
+        pendingAnalysisCount: number;
+        healthyCount: number;
+        unhealthyCount: number;
     }
 
 

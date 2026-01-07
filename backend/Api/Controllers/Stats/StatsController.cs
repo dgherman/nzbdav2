@@ -367,12 +367,65 @@ public class StatsController(
     }
 
     [HttpGet("mapped-files")]
-    public Task<IActionResult> GetMappedFiles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null)
+    public Task<IActionResult> GetMappedFiles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null, [FromQuery] bool? hasMediaInfo = null, [FromQuery] bool? missingVideo = null)
     {
         return ExecuteSafely(async () =>
         {
-            var (items, totalCount) = await OrganizedLinksUtil.GetMappedFilesPagedAsync(dbContext, configManager, page, pageSize, search);
+            var (items, totalCount) = await OrganizedLinksUtil.GetMappedFilesPagedAsync(dbContext, configManager, page, pageSize, search, hasMediaInfo, missingVideo);
             return Ok(new { items, totalCount });
+        });
+    }
+
+    [HttpGet("dashboard/summary")]
+    public Task<IActionResult> GetDashboardSummary()
+    {
+        return ExecuteSafely(async () =>
+        {
+            var totalMapped = await dbContext.LocalLinks.CountAsync();
+            
+            // Join with Items to check MediaInfo
+            var mappedItemsQuery = from link in dbContext.LocalLinks.AsNoTracking()
+                                 join item in dbContext.Items.AsNoTracking() on link.DavItemId equals item.Id
+                                 select item;
+
+            var analyzed = await mappedItemsQuery
+                .Where(i => i.MediaInfo != null && !i.MediaInfo.Contains("\"error\":"))
+                .CountAsync();
+
+            var failedAnalysis = await mappedItemsQuery
+                .Where(i => i.MediaInfo != null && i.MediaInfo.Contains("\"error\":"))
+                .CountAsync();
+
+            var corruptedCount = await mappedItemsQuery
+                .Where(i => i.IsCorrupted)
+                .CountAsync();
+
+            var missingVideo = await mappedItemsQuery
+                .Where(i => i.MediaInfo != null && !i.MediaInfo.Contains("\"codec_type\": \"video\""))
+                .CountAsync();
+
+            // Health stats - count distinct items by their latest result
+            // This is a bit complex in EF, so we'll do a simpler count of recent unhealthy results
+            var unhealthyCount = await dbContext.HealthCheckResults
+                .AsNoTracking()
+                .Where(r => r.Result == HealthCheckResult.HealthResult.Unhealthy)
+                .Select(r => r.DavItemId)
+                .Distinct()
+                .CountAsync();
+
+            var healthyCount = totalMapped - unhealthyCount;
+
+            return Ok(new
+            {
+                TotalMapped = totalMapped,
+                AnalyzedCount = analyzed,
+                FailedAnalysisCount = failedAnalysis,
+                CorruptedCount = corruptedCount,
+                MissingVideoCount = missingVideo,
+                PendingAnalysisCount = Math.Max(0, totalMapped - analyzed - failedAnalysis),
+                HealthyCount = Math.Max(0, healthyCount),
+                UnhealthyCount = unhealthyCount
+            });
         });
     }
 }

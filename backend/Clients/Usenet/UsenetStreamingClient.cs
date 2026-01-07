@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text.Json;
 using Microsoft.Extensions.Caching.Memory;
 using NzbWebDAV.Clients.Usenet.Connections;
@@ -8,6 +9,7 @@ using NzbWebDAV.Extensions;
 using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Websocket;
+using Serilog;
 using UsenetSharp.Models;
 using Usenet.Nzb;
 
@@ -22,6 +24,11 @@ public class UsenetStreamingClient
     private readonly ProviderErrorService _providerErrorService;
     private readonly NzbProviderAffinityService _affinityService;
     private ConnectionPoolStats? _connectionPoolStats;
+
+    // Track recent GetFileSizeAsync operation times for dynamic timeout calculation
+    private readonly Queue<double> _recentFileSizeOperationTimes = new();
+    private readonly object _fileSizeTimingLock = new();
+    private const int MaxTrackedOperations = 20;
 
     public UsenetStreamingClient(
         ConfigManager configManager,
@@ -59,7 +66,7 @@ public class UsenetStreamingClient
         };
     }
 
-    public async Task<long[]> AnalyzeNzbAsync(string[] segmentIds, int concurrency, IProgress<int>? progress, CancellationToken ct)
+    public async Task<long[]> AnalyzeNzbAsync(string[] segmentIds, int concurrency, IProgress<int>? progress, CancellationToken ct, bool useSmartAnalysis = true)
     {
         // Copy context from parent token
         using var childCt = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -70,7 +77,7 @@ public class UsenetStreamingClient
         var timeoutSeconds = _configManager.GetUsenetOperationTimeout();
 
         // Optimization: Smart Analysis for uniform segment sizes
-        if (segmentIds.Length > 2)
+        if (useSmartAnalysis && segmentIds.Length > 2)
         {
             try
             {
@@ -153,7 +160,8 @@ public class UsenetStreamingClient
     {
         if (useHead)
         {
-            return await AnalyzeNzbAsync(segmentIds.ToArray(), concurrency, progress, cancellationToken).ConfigureAwait(false);
+            // Health checks should always perform full HEAD scan, never Smart Analysis
+            return await AnalyzeNzbAsync(segmentIds.ToArray(), concurrency, progress, cancellationToken, useSmartAnalysis: false).ConfigureAwait(false);
         }
 
         // No need to copy ReservedPooledConnectionsContext - operation limits handle this now
@@ -239,6 +247,47 @@ public class UsenetStreamingClient
         return _client.GetFileSizeAsync(file, cancellationToken);
     }
 
+    private int GetDynamicFileSizeTimeout(int providerCount, int defaultTimeoutPerProvider)
+    {
+        lock (_fileSizeTimingLock)
+        {
+            // If we don't have enough history, use conservative default
+            if (_recentFileSizeOperationTimes.Count < 3)
+            {
+                // Default: allow each provider full timeout + buffer
+                return (providerCount * defaultTimeoutPerProvider) + 60;
+            }
+
+            // Calculate average time from recent operations
+            var avgSeconds = _recentFileSizeOperationTimes.Average();
+
+            // Apply 4x safety factor
+            var dynamicTimeout = (int)(avgSeconds * 4);
+
+            // Clamp between reasonable bounds:
+            // Min: 60s (even fast operations need some buffer)
+            // Max: (providers * timeout) + 60s (allow trying all providers)
+            var maxTimeout = (providerCount * defaultTimeoutPerProvider) + 60;
+            var clampedTimeout = Math.Clamp(dynamicTimeout, 60, maxTimeout);
+
+            return clampedTimeout;
+        }
+    }
+
+    private void RecordFileSizeOperationTime(double elapsedSeconds)
+    {
+        lock (_fileSizeTimingLock)
+        {
+            _recentFileSizeOperationTimes.Enqueue(elapsedSeconds);
+
+            // Keep only last N operations
+            while (_recentFileSizeOperationTimes.Count > MaxTrackedOperations)
+            {
+                _recentFileSizeOperationTimes.Dequeue();
+            }
+        }
+    }
+
     public async Task<Dictionary<NzbFile, long>> GetFileSizesBatchAsync(
         IEnumerable<NzbFile> files,
         int concurrentConnections,
@@ -252,20 +301,36 @@ public class UsenetStreamingClient
 
         var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
 
+        // Calculate dynamic timeout based on historical performance
+        var providerConfig = _configManager.GetUsenetProviderConfig();
+        var providerCount = providerConfig.Providers.Count;
+        var timeoutPerProvider = _configManager.GetUsenetOperationTimeout();
+        var adaptiveTimeoutSeconds = GetDynamicFileSizeTimeout(providerCount, timeoutPerProvider);
+
+        var operationStartTime = Stopwatch.StartNew();
+
         var tasks = filesToFetch
             .Select(async file =>
             {
-                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
-                using var _ = timeoutCts.Token.SetScopedContext(usageContext);
+                // CRITICAL: Pass original cancellationToken (NOT a timeout-wrapped token)
+                // This allows RunFromPoolWithBackup to try all providers when one times out
+                // Each provider has its own timeout via GetDynamicTimeout in MultiConnectionNntpClient
+                using var _ = cancellationToken.SetScopedContext(usageContext);
+
+                // Create absolute timeout that will fail the operation if exceeded
+                // This timeout is adaptive: avg * 4x, allowing all providers to be tried
+                using var absoluteCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                absoluteCts.CancelAfter(TimeSpan.FromSeconds(adaptiveTimeoutSeconds));
+
                 try
                 {
-                    var size = await _client.GetFileSizeAsync(file, timeoutCts.Token).ConfigureAwait(false);
+                    var size = await _client.GetFileSizeAsync(file, absoluteCts.Token).ConfigureAwait(false);
                     return (file, size);
                 }
-                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && absoluteCts.IsCancellationRequested)
                 {
-                    throw new TimeoutException($"GetFileSizeAsync timed out for file {file.FileName}");
+                    // Adaptive timeout exceeded after trying providers
+                    throw new TimeoutException($"GetFileSizeAsync timed out for file {file.FileName} after {adaptiveTimeoutSeconds}s (adaptive timeout: avg * 4x)");
                 }
             })
             .WithConcurrencyAsync(concurrentConnections);
@@ -273,6 +338,16 @@ public class UsenetStreamingClient
         await foreach (var (file, size) in tasks.ConfigureAwait(false))
         {
             results[file] = size;
+        }
+
+        operationStartTime.Stop();
+
+        // Record successful operation time for future dynamic timeout calculations
+        if (filesToFetch.Count > 0)
+        {
+            // Normalize by number of files to get per-file average
+            var perFileTime = operationStartTime.Elapsed.TotalSeconds / filesToFetch.Count;
+            RecordFileSizeOperationTime(perFileTime);
         }
 
         return results;
@@ -290,11 +365,12 @@ public class UsenetStreamingClient
         Func<CancellationToken, ValueTask<INntpClient>> connectionFactory,
         EventHandler<ConnectionPoolStats.ConnectionPoolChangedEventArgs> onConnectionPoolChanged,
         ConnectionPoolStats connectionPoolStats,
-        int providerIndex
+        int providerIndex,
+        string host
     )
     {
         // Create connection pool (uses global semaphore for all providers)
-        var pool = new ConnectionPool<INntpClient>(maxConnections, pooledSemaphore, connectionFactory);
+        var pool = new ConnectionPool<INntpClient>(maxConnections, pooledSemaphore, connectionFactory, poolName: host);
         pool.OnConnectionPoolChanged += onConnectionPoolChanged;
         connectionPoolStats.RegisterConnectionPool(providerIndex, pool);
         var args = new ConnectionPoolStats.ConnectionPoolChangedEventArgs(0, 0, maxConnections);
@@ -353,7 +429,8 @@ public class UsenetStreamingClient
             connectionFactory: ct => CreateNewConnection(connectionDetails, _bandwidthService, providerIndex, ct),
             onConnectionPoolChanged: connectionPoolStats.GetOnConnectionPoolChanged(providerIndex),
             connectionPoolStats: connectionPoolStats,
-            providerIndex: providerIndex
+            providerIndex: providerIndex,
+            host: connectionDetails.Host
         );
         return new MultiConnectionNntpClient(
             connectionPool,

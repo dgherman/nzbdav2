@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useLoaderData, useSearchParams, useRevalidator } from "react-router";
 import { Button, ButtonGroup, Container, Tabs, Tab, Dropdown } from "react-bootstrap";
 import type { Route } from "./+types/route";
@@ -10,6 +10,9 @@ import { MissingArticlesTable } from "./components/MissingArticlesTable";
 import { MappedFilesTable } from "./components/MappedFilesTable";
 import { LogsConsole } from "./components/LogsConsole";
 import { isAuthenticated } from "~/auth/authentication.server";
+import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
+import type { FileDetails } from "~/types/file-details";
+import { useToast } from "~/context/ToastContext";
 
 export async function loader({ request }: Route.LoaderArgs) {
     if (!await isAuthenticated(request)) throw new Response("Unauthorized", { status: 401 });
@@ -25,6 +28,10 @@ export async function loader({ request }: Route.LoaderArgs) {
     const orphaned = orphanedParam === "true" ? true : orphanedParam === "false" ? false : undefined;
     const isImportedParam = url.searchParams.get("isImported");
     const isImported = isImportedParam === "true" ? true : isImportedParam === "false" ? false : undefined;
+    const hasMediaInfoParam = url.searchParams.get("hasMediaInfo");
+    const hasMediaInfo = hasMediaInfoParam === "true" ? true : hasMediaInfoParam === "false" ? false : undefined;
+    const missingVideoParam = url.searchParams.get("missingVideo");
+    const missingVideo = missingVideoParam === "true" ? true : missingVideoParam === "false" ? false : undefined;
 
     let connections, bandwidthHistory, currentBandwidth;
     let deletedFiles: { items: HealthCheckResult[], totalCount: number } = { items: [], totalCount: 0 };
@@ -47,7 +54,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         missingArticles = maData;
         currentBandwidth = cbData;
     } else if (tab === "mapped") {
-        mappedFiles = await backendClient.getMappedFiles(page, 10, search);
+        mappedFiles = await backendClient.getMappedFiles(page, 10, search, hasMediaInfo, missingVideo);
     }
 
     return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking, orphaned, isImported };
@@ -92,6 +99,11 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
     const [searchParams, setSearchParams] = useSearchParams();
     const revalidator = useRevalidator();
 
+    const [showDetailsModal, setShowDetailsModal] = useState(false);
+    const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
+    const [loadingFileDetails, setLoadingFileDetails] = useState(false);
+    const { addToast } = useToast();
+
     const activeTab = searchParams.get("tab") || "stats";
 
     // Auto-refresh current stats every 2 seconds
@@ -122,6 +134,91 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
             return prev;
         });
     };
+
+    const onFileClick = useCallback(async (davItemId: string) => {
+        setShowDetailsModal(true);
+        setLoadingFileDetails(true);
+        setSelectedFileDetails(null);
+
+        try {
+            const response = await fetch(`/api/file-details/${davItemId}`);
+            if (response.ok) {
+                const fileDetails = await response.json();
+                setSelectedFileDetails(fileDetails);
+            } else {
+                console.error('Failed to fetch file details:', await response.text());
+            }
+        } catch (error) {
+            console.error('Error fetching file details:', error);
+        } finally {
+            setLoadingFileDetails(false);
+        }
+    }, []);
+
+    const onHideDetailsModal = useCallback(() => {
+        setShowDetailsModal(false);
+        setSelectedFileDetails(null);
+    }, []);
+
+    const onResetFileStats = useCallback(async (jobName: string) => {
+        try {
+            const response = await fetch(`/api/reset-provider-stats?jobName=${encodeURIComponent(jobName)}`, {
+                method: 'POST'
+            });
+
+            if (response.ok) {
+                // Refresh the file details to show updated (empty) stats
+                setSelectedFileDetails(prev => prev ? { ...prev, providerStats: [] } : null);
+                addToast('Provider statistics for this file have been reset successfully.', "success", "Success");
+            } else {
+                addToast('Failed to reset provider statistics.', "danger", "Error");
+            }
+        } catch (error) {
+            console.error('Error resetting file provider stats:', error);
+            addToast('Error resetting provider statistics: ' + error, "danger", "Error");
+        }
+    }, [addToast]);
+
+    const onRunHealthCheck = useCallback(async (id: string) => {
+        if (!confirm("Run health check now?")) return;
+        try {
+            const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
+            if (!response.ok) throw new Error(await response.text());
+            addToast("Health check scheduled successfully", "success", "Success");
+        } catch (e) {
+            addToast(`Failed to start health check: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
+
+    const onAnalyze = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+        try {
+            const response = await fetch(`/api/maintenance/analyze`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Analysis queued for ${ids.length} item(s). Check 'Active Analyses' tab for progress.`, "success", "Analysis Started");
+        } catch (e) {
+            addToast(`Failed to start analysis: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
+
+    const onRepair = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+        try {
+            const response = await fetch(`/api/stats/repair`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Repair queued successfully for ${ids.length} item(s)`, "success", "Repair Started");
+        } catch (e) {
+            addToast(`Failed to trigger repair: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
 
     return (
         <Container fluid className="p-4 h-100 d-flex flex-column">
@@ -190,6 +287,9 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                             totalCount={mappedFiles.totalCount}
                             page={page}
                             search={search}
+                            onFileClick={onFileClick}
+                            onAnalyze={onAnalyze}
+                            onRepair={onRepair}
                         />
                     )}
                 </Tab>
@@ -197,6 +297,17 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                     {activeTab === 'logs' && <LogsConsole />}
                 </Tab>
             </Tabs>
+            
+            <FileDetailsModal
+                show={showDetailsModal}
+                onHide={onHideDetailsModal}
+                fileDetails={selectedFileDetails}
+                loading={loadingFileDetails}
+                onResetStats={onResetFileStats}
+                onRunHealthCheck={onRunHealthCheck}
+                onAnalyze={onAnalyze}
+                onRepair={onRepair}
+            />
         </Container>
     );
 }

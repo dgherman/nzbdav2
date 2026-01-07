@@ -10,6 +10,7 @@ import { Loading } from "../_index/components/loading/loading";
 import { formatFileSize } from "~/utils/file-size";
 import type { FileDetails } from "~/types/file-details";
 import { FileDetailsModal } from "../health/components/file-details-modal/file-details-modal";
+import { useToast } from "~/context/ToastContext";
 
 type SearchResultWithKey = SearchResult & { downloadKey: string | null };
 
@@ -75,6 +76,7 @@ function Body(props: ExplorePageData) {
     const [showDetailsModal, setShowDetailsModal] = useState(false);
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
     const [loadingFileDetails, setLoadingFileDetails] = useState(false);
+    const { addToast } = useToast();
 
     const items = props.items;
     const parentDirectories = isNavigating
@@ -150,18 +152,59 @@ function Body(props: ExplorePageData) {
             const response = await fetch(url, { method: 'POST' });
             if (response.ok) {
                 setSelectedFileDetails(prev => prev ? { ...prev, providerStats: [] } : null);
-                alert('Provider statistics for this file have been reset successfully.');
+                addToast('Provider statistics for this file have been reset successfully.', "success", "Success");
             } else {
-                alert('Failed to reset provider statistics.');
+                addToast('Failed to reset provider statistics.', "danger", "Error");
             }
         } catch (error) {
             console.error('Error resetting provider stats:', error);
-            alert('An error occurred while resetting provider statistics.');
+            addToast('An error occurred while resetting provider statistics.', "danger", "Error");
         }
-    }, []);
+    }, [addToast]);
 
-    return (
-        <div className={styles.container}>
+    const onRunHealthCheck = useCallback(async (id: string) => {
+        if (!confirm("Run health check now?")) return;
+        try {
+            const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
+            if (!response.ok) throw new Error(await response.text());
+            addToast("Health check scheduled successfully", "success", "Success");
+        } catch (e) {
+            addToast(`Failed to start health check: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
+
+        const onAnalyze = useCallback(async (id: string | string[]) => {
+            const ids = Array.isArray(id) ? id : [id];
+            if (!confirm(`Run detailed analysis (segment check + ffprobe verification) for ${ids.length} item(s)?`)) return;
+            try {
+                const response = await fetch(`/api/maintenance/analyze`, { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ davItemIds: ids })
+                });
+                if (!response.ok) throw new Error(await response.text());
+                addToast(`Analysis queued for ${ids.length} item(s). Check 'Active Analyses' tab for progress.`, "success", "Analysis Started");
+            } catch (e) {
+                addToast(`Failed to start analysis: ${e}`, "danger", "Error");
+            }
+        }, [addToast]);
+    
+        const onRepair = useCallback(async (id: string | string[]) => {
+            const ids = Array.isArray(id) ? id : [id];
+            if (!confirm(`This will delete ${ids.length} file(s) from NzbDav and trigger a re-search in Sonarr/Radarr. Are you sure?`)) return;
+            try {
+                const response = await fetch(`/api/stats/repair`, { 
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ davItemIds: ids })
+                });
+                if (!response.ok) throw new Error(await response.text());
+                addToast(`Repair queued successfully for ${ids.length} item(s)`, "success", "Repair Started");
+            } catch (e) {
+                addToast(`Failed to trigger repair: ${e}`, "danger", "Error");
+            }
+        }, [addToast]);
+    return (        <div className={styles.container}>
             <Breadcrumbs parentDirectories={parentDirectories} />
             <form onSubmit={handleSearch} className={styles["search-form"]}>
                 <input
@@ -253,6 +296,9 @@ function Body(props: ExplorePageData) {
                 fileDetails={selectedFileDetails}
                 loading={loadingFileDetails}
                 onResetStats={onResetFileStats}
+                onRunHealthCheck={onRunHealthCheck}
+                onAnalyze={onAnalyze}
+                onRepair={onRepair}
             />
         </div >
     );

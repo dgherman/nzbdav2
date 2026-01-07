@@ -3,6 +3,7 @@ import { useState, useCallback } from "react";
 import type { ProviderBandwidthSnapshot, ConnectionUsageContext } from "~/clients/backend-client.server";
 import type { FileDetails } from "~/types/file-details";
 import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
+import { useToast } from "~/context/ToastContext";
 
 interface Props {
     bandwidth: ProviderBandwidthSnapshot[];
@@ -39,6 +40,7 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
     const [showDetailsModal, setShowDetailsModal] = useState(false);
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
     const [loadingFileDetails, setLoadingFileDetails] = useState(false);
+    const { addToast } = useToast();
 
     // Get all provider indices
     const providerIndices = new Set([
@@ -77,15 +79,55 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
             const response = await fetch(url, { method: 'POST' });
             if (response.ok) {
                 setSelectedFileDetails(prev => prev ? { ...prev, providerStats: [] } : null);
-                alert('Provider statistics for this file have been reset successfully.');
+                addToast('Provider statistics for this file have been reset successfully.', 'success', 'Success');
             } else {
-                alert('Failed to reset provider statistics.');
+                addToast('Failed to reset provider statistics.', 'danger', 'Error');
             }
         } catch (error) {
             console.error('Error resetting provider stats:', error);
-            alert('An error occurred while resetting provider statistics.');
+            addToast('An error occurred while resetting provider statistics.', 'danger', 'Error');
         }
-    }, []);
+    }, [addToast]);
+
+    const onRunHealthCheck = useCallback(async (id: string) => {
+        try {
+            const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
+            if (!response.ok) throw new Error(await response.text());
+            addToast("Health check scheduled successfully", 'success', 'Success');
+        } catch (e) {
+            addToast(`Failed to start health check: ${e}`, 'danger', 'Error');
+        }
+    }, [addToast]);
+
+    const onAnalyze = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+        try {
+            const response = await fetch(`/api/maintenance/analyze`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Analysis queued for ${ids.length} item(s). Check 'Active Analyses' tab for progress.`, 'success', 'Analysis Started');
+        } catch (e) {
+            addToast(`Failed to start analysis: ${e}`, 'danger', 'Error');
+        }
+    }, [addToast]);
+
+    const onRepair = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+        try {
+            const response = await fetch(`/api/stats/repair`, { 
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Repair queued successfully for ${ids.length} item(s)`, 'success', 'Repair Started');
+        } catch (e) {
+            addToast(`Failed to trigger repair: ${e}`, 'danger', 'Error');
+        }
+    }, [addToast]);
 
     const formatSpeed = (bytesPerSec: number) => {
         if (bytesPerSec === 0) return "0 B/s";
@@ -208,6 +250,9 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                 fileDetails={selectedFileDetails}
                 loading={loadingFileDetails}
                 onResetStats={onResetFileStats}
+                onRunHealthCheck={onRunHealthCheck}
+                onAnalyze={onAnalyze}
+                onRepair={onRepair}
             />
         </div>
     );

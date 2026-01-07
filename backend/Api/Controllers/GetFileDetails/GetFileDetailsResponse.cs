@@ -19,6 +19,9 @@ public class GetFileDetailsResponse
     public long? MinSegmentSize { get; set; }
     public long? MaxSegmentSize { get; set; }
     public long? AvgSegmentSize { get; set; }
+    public string? MediaInfo { get; set; }
+    public bool IsCorrupted { get; set; }
+    public string? CorruptionReason { get; set; }
     public List<ProviderStatistic> ProviderStats { get; set; } = new();
     public HealthCheckInfo? LatestHealthCheckResult { get; set; }
 

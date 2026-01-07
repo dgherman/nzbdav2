@@ -33,7 +33,12 @@ public class DatabaseStoreRarFile(
         // create streaming usage context
         var usageContext = new ConnectionUsageContext(
             ConnectionUsageType.Streaming,
-            davRarFile.Path
+            new ConnectionUsageDetails 
+            { 
+                Text = davRarFile.Path,
+                DavItemId = davRarFile.Id,
+                FileDate = davRarFile.ReleaseDate
+            }
         );
 
         // return the stream
