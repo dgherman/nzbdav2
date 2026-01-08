@@ -312,7 +312,7 @@ public class BufferedSegmentStream : Stream
             var timeoutTask = Task.Delay(TimeSpan.FromMinutes(5), ct);
             var completedTask = await Task.WhenAny(workerCompletionTask, timeoutTask).ConfigureAwait(false);
 
-            if (completedTask == timeoutTask)
+            if (completedTask == timeoutTask && !ct.IsCancellationRequested)
             {
                 Log.Warning("[BufferedStream] Workers have not completed after 5 minutes. Still waiting...");
                 await workerCompletionTask.ConfigureAwait(false);
