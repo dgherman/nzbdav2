@@ -1,0 +1,33 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+    <PropertyGroup>
+        <TargetFramework>net9.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+
+        <!-- Package Information -->
+        <PackageId>UsenetSharp</PackageId>
+        <Version>1.0.6</Version>
+        <Authors>UsenetSharp Contributors</Authors>
+        <Description>A high-performance .NET library for Usenet NNTP protocol with yEnc support</Description>
+        <PackageTags>usenet;nntp;yenc</PackageTags>
+        <PackageProjectUrl>https://github.com/nzbdav-dev/UsenetSharp</PackageProjectUrl>
+        <PackageLicenseFile>LICENSE</PackageLicenseFile>
+        <RepositoryUrl>https://github.com/nzbdav-dev/UsenetSharp</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <!-- Include README in NuGet package -->
+        <None Include="../README.md" Pack="true" PackagePath="\" />
+        <!-- Include LICENSE in NuGet package -->
+        <None Include="../LICENSE" Pack="true" PackagePath="\" />
+    </ItemGroup>
+
+    <ItemGroup>
+      <PackageReference Include="RapidYencSharp" Version="1.0.0" />
+      <PackageReference Include="System.IO.Hashing" Version="9.0.0" />
+    </ItemGroup>
+
+</Project>

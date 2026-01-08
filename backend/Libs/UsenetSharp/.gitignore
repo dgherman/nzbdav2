@@ -1,0 +1,18 @@
+#####################
+# non-project files #
+#####################
+
+bin/
+obj/
+/packages/
+riderModule.iml
+/_ReSharper.Caches/
+*.DotSettings.user
+nuget
+
+##############
+# IDE config #
+##############
+
+.idea/
+.vscode/
