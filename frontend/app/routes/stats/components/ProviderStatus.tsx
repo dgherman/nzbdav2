@@ -145,7 +145,7 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
     };
 
     return (
-        <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
+        <div className="p-4 rounded-lg bg-black bg-opacity-20 mb-4">
             <h4 className="mb-3">Real-time Provider Status</h4>
             <Row xs={1} md={2} lg={3} className="g-4">
                 {Array.from(providerIndices).sort((a, b) => a - b).map(index => {
@@ -153,7 +153,7 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                     const conns = connections[index] || [];
                     
                     // Group connections by type and jobName
-                    const groupedConns: { usageType: number; details: string | null; jobName?: string | null; davItemId?: string | null; isBackup?: boolean; isSecondary?: boolean; bufferedCount?: number | null; count: number }[] = [];
+                    const groupedConns: { usageType: number; details: string | null; jobName?: string | null; davItemId?: string | null; isBackup?: boolean; isSecondary?: boolean; bufferedCount?: number | null; count: number; bufferWindowStart?: number | null; bufferWindowEnd?: number | null; totalSegments?: number | null }[] = [];
                     const connMap = new Map<string, number>();
 
                     for (const c of conns) {
@@ -164,6 +164,15 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                             // Use the maximum buffered count for the group
                             if (c.bufferedCount !== undefined && c.bufferedCount !== null) {
                                 entry.bufferedCount = Math.max(entry.bufferedCount || 0, c.bufferedCount);
+                            }
+                            if (c.bufferWindowStart !== undefined && c.bufferWindowStart !== null) {
+                                entry.bufferWindowStart = Math.min(entry.bufferWindowStart ?? 999999, c.bufferWindowStart);
+                            }
+                            if (c.bufferWindowEnd !== undefined && c.bufferWindowEnd !== null) {
+                                entry.bufferWindowEnd = Math.max(entry.bufferWindowEnd || 0, c.bufferWindowEnd);
+                            }
+                            if (c.totalSegments !== undefined && c.totalSegments !== null) {
+                                entry.totalSegments = c.totalSegments;
                             }
                         } else {
                             connMap.set(key, groupedConns.length);
@@ -206,42 +215,83 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                         {groupedConns.length === 0 ? (
                                             <div className="text-muted fst-italic">Idle</div>
                                         ) : (
-                                            <div className="font-mono small mt-1" style={{ maxHeight: "150px", overflowY: "auto" }}>
+                                            <div className="font-mono small mt-1" style={{ maxHeight: "250px", overflowY: "auto" }}>
                                                 {groupedConns.slice(0, 10).map((c, i) => (
-                                                    <div key={i} className="d-flex align-items-start gap-2 mb-1" title={c.details || ""}>
-                                                        {c.count > 1 && (
-                                                            <span className="text-warning fw-bold flex-shrink-0" style={{fontSize: '0.7rem', marginTop: '2px'}}>({c.count})</span>
-                                                        )}
-                                                        <Badge bg={getTypeColor(c.usageType)} className="flex-shrink-0" style={{fontSize: '0.6rem', minWidth: '50px', marginTop: '2px'}}>
-                                                            {getTypeLabel(c.usageType)}
-                                                        </Badge>
-                                                        {c.bufferedCount !== undefined && c.bufferedCount !== null && (
-                                                            <Badge bg="dark" border="secondary" className="flex-shrink-0 border" style={{fontSize: '0.6rem', marginTop: '2px'}} title="Segments currently in memory buffer">
-                                                                Buf: {c.bufferedCount}
+                                                    <div key={i} className="mb-3 p-2 rounded bg-black bg-opacity-25 border border-secondary border-opacity-25" title={c.details || ""}>
+                                                        <div className="d-flex align-items-start gap-2 mb-1">
+                                                            {c.count > 1 && (
+                                                                <span className="text-warning fw-bold flex-shrink-0" style={{fontSize: '0.7rem', marginTop: '2px'}}>({c.count})</span>
+                                                            )}
+                                                            <Badge bg={getTypeColor(c.usageType)} className="flex-shrink-0" style={{fontSize: '0.6rem', minWidth: '50px', marginTop: '2px'}}>
+                                                                {getTypeLabel(c.usageType)}
                                                             </Badge>
-                                                        )}
-                                                        {(c.isBackup || c.isSecondary) && (
-                                                            <Badge bg="warning" text="dark" className="flex-shrink-0" style={{fontSize: '0.6rem', marginTop: '2px'}}>
-                                                                Retry
-                                                            </Badge>
-                                                        )}
-                                                        {c.davItemId ? (
-                                                            <span
-                                                                onClick={() => onFileClick(c.davItemId!)}
-                                                                style={{
-                                                                    fontSize: '0.8rem',
-                                                                    wordBreak: 'break-word',
-                                                                    cursor: 'pointer',
-                                                                    textDecoration: 'underline',
-                                                                    color: '#6ea8fe'
-                                                                }}
-                                                            >
-                                                                {c.jobName || c.details || "No details"}
-                                                            </span>
-                                                        ) : (
-                                                            <span style={{fontSize: '0.8rem', wordBreak: 'break-word'}}>
-                                                                {c.jobName || c.details || "No details"}
-                                                            </span>
+                                                            {c.bufferedCount !== undefined && c.bufferedCount !== null && (
+                                                                <Badge bg="dark" border="secondary" className="flex-shrink-0 border" style={{fontSize: '0.6rem', marginTop: '2px'}} title="Segments currently in memory buffer">
+                                                                    Buf: {c.bufferedCount}
+                                                                </Badge>
+                                                            )}
+                                                            {(c.isBackup || c.isSecondary) && (
+                                                                <Badge bg="warning" text="dark" className="flex-shrink-0" style={{fontSize: '0.6rem', marginTop: '2px'}}>
+                                                                    Retry
+                                                                </Badge>
+                                                            )}
+                                                            {c.davItemId ? (
+                                                                <span
+                                                                    onClick={() => onFileClick(c.davItemId!)}
+                                                                    style={{
+                                                                        fontSize: '0.8rem',
+                                                                        wordBreak: 'break-word',
+                                                                        cursor: 'pointer',
+                                                                        textDecoration: 'underline',
+                                                                        color: '#6ea8fe'
+                                                                    }}
+                                                                >
+                                                                    {c.jobName || c.details || "No details"}
+                                                                </span>
+                                                            ) : (
+                                                                <span style={{fontSize: '0.8rem', wordBreak: 'break-word'}}>
+                                                                    {c.jobName || c.details || "No details"}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        
+                                                        {/* Sliding Window Bar */}
+                                                        {c.totalSegments && c.bufferWindowStart !== undefined && c.bufferWindowEnd !== undefined && (
+                                                            <div className="mt-2" style={{ height: '14px', background: 'rgba(0,0,0,0.3)', borderRadius: '7px', position: 'relative', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
+                                                                {/* Full Range Progress (Already Read) */}
+                                                                <div style={{ 
+                                                                    position: 'absolute', 
+                                                                    left: 0, 
+                                                                    top: 0, 
+                                                                    bottom: 0, 
+                                                                    width: `${(c.bufferWindowStart! / c.totalSegments) * 100}%`, 
+                                                                    background: 'rgba(255,255,255,0.1)' 
+                                                                }} title={`Consumed: ${c.bufferWindowStart} / ${c.totalSegments}`} />
+                                                                
+                                                                {/* Buffered Range (Sliding Window) */}
+                                                                <div style={{ 
+                                                                    position: 'absolute', 
+                                                                    left: `${(c.bufferWindowStart! / c.totalSegments) * 100}%`, 
+                                                                    top: 0, 
+                                                                    bottom: 0, 
+                                                                    width: `${((c.bufferWindowEnd! - c.bufferWindowStart!) / c.totalSegments) * 100}%`, 
+                                                                    background: 'linear-gradient(90deg, #0d6efd, #6ea8fe)',
+                                                                    boxShadow: '0 0 8px rgba(13, 110, 253, 0.5)',
+                                                                    borderRadius: '2px',
+                                                                    minWidth: '2px'
+                                                                }} title={`Buffered Window: ${c.bufferWindowStart} - ${c.bufferWindowEnd} (Total: ${c.totalSegments} segments)`} />
+                                                                
+                                                                {/* Read Head Marker */}
+                                                                <div style={{
+                                                                    position: 'absolute',
+                                                                    left: `${(c.bufferWindowStart! / c.totalSegments) * 100}%`,
+                                                                    top: 0,
+                                                                    bottom: 0,
+                                                                    width: '2px',
+                                                                    background: '#fff',
+                                                                    zIndex: 2
+                                                                }} />
+                                                            </div>
                                                         )}
                                                     </div>
                                                 ))}

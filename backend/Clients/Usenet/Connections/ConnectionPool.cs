@@ -322,6 +322,11 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         return parts.Length > 0 ? string.Join(",", parts) : "none";
     }
 
+    public void TriggerStatsUpdate()
+    {
+        TriggerConnectionPoolChangedEvent();
+    }
+
     private void TriggerConnectionPoolChangedEvent()
     {
         OnConnectionPoolChanged?.Invoke(this, new ConnectionPoolStats.ConnectionPoolChangedEventArgs(

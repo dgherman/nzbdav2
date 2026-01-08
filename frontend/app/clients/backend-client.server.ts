@@ -317,8 +317,8 @@ class BackendClient {
         return response.json();
     }
 
-    public async getMappedFiles(page: number = 1, pageSize: number = 10, search: string = "", hasMediaInfo?: boolean, missingVideo?: boolean): Promise<{ items: MappedFile[], totalCount: number }> {
-        let url = process.env.BACKEND_URL + `/api/stats/mapped-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
+    public async getMappedFiles(page: number = 1, pageSize: number = 10, search: string = "", hasMediaInfo?: boolean, missingVideo?: boolean, sortBy: string = "linkPath", sortDirection: string = "asc"): Promise<{ items: MappedFile[], totalCount: number }> {
+        let url = process.env.BACKEND_URL + `/api/stats/mapped-files?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}&sortBy=${sortBy}&sortDirection=${sortDirection}`;
         if (hasMediaInfo !== undefined) url += `&hasMediaInfo=${hasMediaInfo}`;
         if (missingVideo !== undefined) url += `&missingVideo=${missingVideo}`;
         

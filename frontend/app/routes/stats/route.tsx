@@ -32,21 +32,20 @@ export async function loader({ request }: Route.LoaderArgs) {
     const tab = url.searchParams.get("tab") || "stats";
     const page = parseInt(url.searchParams.get("page") || "1");
     const search = url.searchParams.get("search") || "";
-    const blockingParam = url.searchParams.get("blocking");
-    const blocking = blockingParam === "true" ? true : blockingParam === "false" ? false : undefined;
-    const orphanedParam = url.searchParams.get("orphaned");
-    const orphaned = orphanedParam === "true" ? true : orphanedParam === "false" ? false : undefined;
-    const isImportedParam = url.searchParams.get("isImported");
-    const isImported = isImportedParam === "true" ? true : isImportedParam === "false" ? false : undefined;
-    const hasMediaInfoParam = url.searchParams.get("hasMediaInfo");
-    const hasMediaInfo = hasMediaInfoParam === "true" ? true : hasMediaInfoParam === "false" ? false : undefined;
-    const missingVideoParam = url.searchParams.get("missingVideo");
-    const missingVideo = missingVideoParam === "true" ? true : missingVideoParam === "false" ? false : undefined;
+    const blocking = url.searchParams.get("blocking") === "true" ? true : url.searchParams.get("blocking") === "false" ? false : undefined;
+    const orphaned = url.searchParams.get("orphaned") === "true" ? true : url.searchParams.get("orphaned") === "false" ? false : undefined;
+    const isImported = url.searchParams.get("isImported") === "true" ? true : url.searchParams.get("isImported") === "false" ? false : undefined;
+    const hasMediaInfo = url.searchParams.get("hasMediaInfo") === "true" ? true : url.searchParams.get("hasMediaInfo") === "false" ? false : undefined;
+    const missingVideo = url.searchParams.get("missingVideo") === "true" ? true : url.searchParams.get("missingVideo") === "false" ? false : undefined;
+    const sortBy = url.searchParams.get("sortBy") || "linkPath";
+    const sortDirection = url.searchParams.get("sortDirection") || "asc";
 
-    let connections, bandwidthHistory, currentBandwidth;
-    let deletedFiles: { items: HealthCheckResult[], totalCount: number } = { items: [], totalCount: 0 };
-    let missingArticles: { items: MissingArticleItem[], totalCount: number } = { items: [], totalCount: 0 };
-    let mappedFiles: { items: MappedFile[], totalCount: number } = { items: [], totalCount: 0 };
+    let connections: Record<number, ConnectionUsageContext[]> | null = null;
+    let bandwidthHistory: BandwidthSample[] | null = null;
+    let currentBandwidth: ProviderBandwidthSnapshot | null = null;
+    let deletedFiles: { items: any[], totalCount: number } | null = null;
+    let missingArticles: { items: MissingArticleItem[], totalCount: number } | null = null;
+    let mappedFiles: { items: MappedFile[], totalCount: number } | null = null;
 
     if (tab === "stats") {
         [connections, bandwidthHistory, currentBandwidth] = await Promise.all([
@@ -64,10 +63,10 @@ export async function loader({ request }: Route.LoaderArgs) {
         missingArticles = maData;
         currentBandwidth = cbData;
     } else if (tab === "mapped") {
-        mappedFiles = await backendClient.getMappedFiles(page, 10, search, hasMediaInfo, missingVideo);
+        mappedFiles = await backendClient.getMappedFiles(page, 10, search, hasMediaInfo, missingVideo, sortBy, sortDirection);
     }
 
-    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking, orphaned, isImported };
+    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking, orphaned, isImported, sortBy, sortDirection };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -130,7 +129,10 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                         jobName: c.d, 
                         isBackup: c.b,
                         isSecondary: c.s,
-                        bufferedCount: c.bc
+                        bufferedCount: c.bc,
+                        bufferWindowStart: c.ws,
+                        bufferWindowEnd: c.we,
+                        totalSegments: c.ts
                     } as ConnectionUsageContext));
 
                     setConnections(prev => ({

@@ -118,7 +118,14 @@ class Program
 
             // Clear stale migration locks from previous failed attempts
             Log.Warning("  → Clearing any stale migration locks...");
-            await databaseContext.Database.ExecuteSqlRawAsync("DELETE FROM __EFMigrationsLock WHERE 1=1;").ConfigureAwait(false);
+            try
+            {
+                await databaseContext.Database.ExecuteSqlRawAsync("DELETE FROM __EFMigrationsLock WHERE 1=1;").ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Table might not exist yet, ignore
+            }
 
             Log.Warning("  → Running migrations...");
             var argIndex = args.ToList().IndexOf("--db-migration");

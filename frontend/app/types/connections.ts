@@ -16,4 +16,7 @@ export type ConnectionUsageContext = {
     isBackup?: boolean;
     isSecondary?: boolean;
     bufferedCount?: number | null;
+    bufferWindowStart?: number | null;
+    bufferWindowEnd?: number | null;
+    totalSegments?: number | null;
 }

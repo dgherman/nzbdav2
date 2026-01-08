@@ -14,7 +14,7 @@ export function BandwidthGraph({ data, range }: Props) {
     }));
 
     return (
-        <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4" style={{ height: "400px" }}>
+        <div className="p-4 rounded-lg bg-black bg-opacity-20 mb-4" style={{ height: "400px" }}>
             <h4 className="mb-3">Bandwidth Usage ({range})</h4>
             <div style={{ width: "100%", height: "340px" }}>
                 <ResponsiveContainer width="100%" height="100%" minHeight={300}>

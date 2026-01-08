@@ -18,7 +18,7 @@ export function ConnectionsTable({ connections }: Props) {
     const sortedKeys = Object.keys(grouped).map(Number).sort((a, b) => a - b);
 
     return (
-        <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
+        <div className="p-4 rounded-lg bg-black bg-opacity-20 mb-4">
             <h4 className="mb-3">Active Connections ({connections.length})</h4>
             <div className="table-responsive">
                 <Table variant="dark" hover className="mb-0">

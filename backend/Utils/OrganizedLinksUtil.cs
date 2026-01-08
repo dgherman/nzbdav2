@@ -421,7 +421,7 @@ public static class OrganizedLinksUtil
     }
     
     public static async Task<(List<MappedFile> Items, int TotalCount)> GetMappedFilesPagedAsync(
-        DavDatabaseContext dbContext, ConfigManager configManager, int page, int pageSize, string? search = null, bool? hasMediaInfo = null, bool? missingVideo = null)
+        DavDatabaseContext dbContext, ConfigManager configManager, int page, int pageSize, string? search = null, bool? hasMediaInfo = null, bool? missingVideo = null, string? sortBy = "linkPath", string? sortDirection = "asc")
     {
         // Join LocalLinks with Items table upfront to enable searching on all fields
         var query = from link in dbContext.LocalLinks.AsNoTracking()
@@ -435,7 +435,8 @@ public static class OrganizedLinksUtil
                         DavItemPath = item != null ? item.Path : null,
                         MediaInfo = item != null ? item.MediaInfo : null,
                         IsCorrupted = item != null ? item.IsCorrupted : false,
-                        CorruptionReason = item != null ? item.CorruptionReason : null
+                        CorruptionReason = item != null ? item.CorruptionReason : null,
+                        FileSize = item != null ? item.FileSize : null
                     };
 
         // Filter by MediaInfo presence
@@ -474,8 +475,29 @@ public static class OrganizedLinksUtil
 
         var totalCount = await query.CountAsync();
 
+        // Apply sorting
+        bool isDescending = sortDirection?.ToLower() == "desc";
+        switch (sortBy?.ToLower())
+        {
+            case "filesize":
+            case "size":
+                query = isDescending ? query.OrderByDescending(x => x.FileSize) : query.OrderBy(x => x.FileSize);
+                break;
+            case "createdat":
+            case "date":
+                query = isDescending ? query.OrderByDescending(x => x.CreatedAt) : query.OrderBy(x => x.CreatedAt);
+                break;
+            case "davitempath":
+            case "path":
+                query = isDescending ? query.OrderByDescending(x => x.DavItemPath) : query.OrderBy(x => x.DavItemPath);
+                break;
+            case "linkpath":
+            default:
+                query = isDescending ? query.OrderByDescending(x => x.LinkPath) : query.OrderBy(x => x.LinkPath);
+                break;
+        }
+
         var results = await query
-            .OrderBy(x => x.LinkPath)
             .Skip((page - 1) * pageSize)
             .Take(pageSize)
             .ToListAsync();
@@ -492,7 +514,8 @@ public static class OrganizedLinksUtil
                 DavItemPath = result.DavItemPath,
                 MediaInfo = result.MediaInfo,
                 IsCorrupted = result.IsCorrupted,
-                CorruptionReason = result.CorruptionReason
+                CorruptionReason = result.CorruptionReason,
+                FileSize = result.FileSize
             };
 
             // Extract Scene Name from DavItemPath

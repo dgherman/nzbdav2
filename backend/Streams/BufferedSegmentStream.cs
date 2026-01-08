@@ -24,12 +24,20 @@ public class BufferedSegmentStream : Stream
     private readonly CancellationTokenSource _linkedCts;
     private readonly IDisposable[] _contextScopes;
     private readonly ConnectionUsageContext? _usageContext;
+    private readonly INntpClient _client;
 
     private PooledSegmentData? _currentSegment;
     private int _currentSegmentPosition;
     private long _position;
     private bool _disposed;
-    private int _bufferedCount;
+    
+    private int _totalFetchedCount;
+    private int _totalReadCount;
+    private int _bufferedCount; // Number of segments currently in memory buffer
+    
+    private int _nextIndexToRead = 0;
+    private int _maxFetchedIndex = -1;
+    private readonly int _totalSegments;
 
     public int BufferedCount => _bufferedCount;
 
@@ -49,6 +57,7 @@ public class BufferedSegmentStream : Stream
     {
         _usageContext = usageContext;
         _segmentSizes = segmentSizes;
+        _client = client;
         // Ensure buffer is large enough to prevent thrashing with high concurrency
         bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 5);
 
@@ -80,7 +89,43 @@ public class BufferedSegmentStream : Stream
                 .ConfigureAwait(false);
         }, contextToken);
 
+        // Start background reporter
+        if (_usageContext != null)
+        {
+            _ = Task.Run(async () => {
+                try {
+                    while (!contextToken.IsCancellationRequested) {
+                        await Task.Delay(1000, contextToken).ConfigureAwait(false);
+                        UpdateUsageContext();
+                    }
+                } catch {}
+            }, contextToken);
+        }
+
         Length = fileSize;
+        _totalSegments = segmentIds.Length;
+    }
+
+    private void UpdateUsageContext()
+    {
+        if (_usageContext?.DetailsObject == null) return;
+        
+        // Update the shared details object
+        var details = _usageContext.Value.DetailsObject;
+        details.BufferedCount = _bufferedCount;
+        details.BufferWindowStart = _nextIndexToRead;
+        details.BufferWindowEnd = Math.Max(_nextIndexToRead, _maxFetchedIndex);
+        details.TotalSegments = _totalSegments;
+
+        // Occasionally trigger a UI update via ConnectionPool if possible
+        var multiClient = GetMultiProviderClient(_client);
+        if (multiClient != null)
+        {
+            foreach (var provider in multiClient.Providers)
+            {
+                provider.ConnectionPool.TriggerStatsUpdate();
+            }
+        }
     }
 
     private async Task FetchSegmentsAsync(
@@ -147,6 +192,15 @@ public class BufferedSegmentStream : Stream
 
                             // Store in dictionary temporarily
                             fetchedSegments[index] = segmentData;
+                            
+                            // Update max fetched index for sliding window visualization
+                            lock (this) {
+                                if (index > _maxFetchedIndex) _maxFetchedIndex = index;
+                            }
+                            
+                            // Increment total segments fetched into memory
+                            Interlocked.Increment(ref _bufferedCount);
+                            Interlocked.Increment(ref _totalFetchedCount);
 
                             // Try to write any consecutive segments to the buffer channel in order
                         await writeLock.WaitAsync(ct).ConfigureAwait(false);
@@ -156,11 +210,6 @@ public class BufferedSegmentStream : Stream
                             {
                                 await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
                                 nextIndexToWrite++;
-                                Interlocked.Increment(ref _bufferedCount);
-                                if (_usageContext?.DetailsObject != null)
-                                {
-                                    _usageContext.Value.DetailsObject.BufferedCount = _bufferedCount;
-                                }
                             }
                         }
                         finally
@@ -528,6 +577,9 @@ public class BufferedSegmentStream : Stream
             {
                 if (!_bufferChannel.Reader.TryRead(out _currentSegment))
                 {
+                    // Update usage context while waiting to ensure UI shows we are waiting for next segment
+                    UpdateUsageContext();
+
                     if (!await _bufferChannel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
                     {
                         break; // No more segments
@@ -564,10 +616,8 @@ public class BufferedSegmentStream : Stream
                 _currentSegment.Dispose();
                 _currentSegment = null;
                 Interlocked.Decrement(ref _bufferedCount);
-                if (_usageContext?.DetailsObject != null)
-                {
-                    _usageContext.Value.DetailsObject.BufferedCount = _bufferedCount;
-                }
+                Interlocked.Increment(ref _totalReadCount);
+                Interlocked.Increment(ref _nextIndexToRead);
             }
         }
         return totalRead;

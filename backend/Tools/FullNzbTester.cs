@@ -172,7 +172,7 @@ public class FullNzbTester
                         var psi = new ProcessStartInfo
                         {
                             FileName = "ffprobe",
-                            Arguments = "-v error -",
+                            Arguments = "-hide_banner -show_streams -",
                             RedirectStandardInput = true,
                             RedirectStandardOutput = true,
                             RedirectStandardError = true,
@@ -182,6 +182,7 @@ public class FullNzbTester
                         using var process = Process.Start(psi);
                         if (process == null) throw new Exception("Failed to start ffprobe");
                         
+                        var stdoutTask = process.StandardOutput.ReadToEndAsync();
                         var errorTask = process.StandardError.ReadToEndAsync();
                         
                         try
@@ -199,17 +200,49 @@ public class FullNzbTester
                         }
                         
                         await process.WaitForExitAsync().ConfigureAwait(false);
+                        var stdout = await stdoutTask.ConfigureAwait(false);
                         var stderr = await errorTask.ConfigureAwait(false);
                         
                         if (process.ExitCode == 0)
                         {
                             Console.WriteLine("FFprobe Success! File stream is valid.");
+                            Console.WriteLine("Stream Details:");
+                            Console.WriteLine(stdout);
                         }
                         else
                         {
                             Console.WriteLine($"FFprobe Failed (Exit Code {process.ExitCode}):");
                             Console.WriteLine(stderr);
                         }
+
+                        Console.WriteLine();
+                        Console.WriteLine("--- STEP 6: SCRUBBING/SEEKING SIMULATION ---");
+                        var percentages = new[] { 0.1, 0.5, 0.9, 0.2 };
+                        var buffer = new byte[1024];
+                        var totalScrubWatch = Stopwatch.StartNew();
+
+                        foreach (var pct in percentages)
+                        {
+                            var targetPos = (long)(stream.Length * pct);
+                            Console.WriteLine($"Seeking to {pct:P0} ({targetPos} bytes)...");
+                            
+                            var seekWatch = Stopwatch.StartNew();
+                            stream.Seek(targetPos, SeekOrigin.Begin);
+                            seekWatch.Stop();
+                            
+                            var readWatch = Stopwatch.StartNew();
+                            var read = await stream.ReadAsync(buffer, 0, buffer.Length);
+                            readWatch.Stop();
+                            
+                            Console.WriteLine($"  - Seek Time: {seekWatch.ElapsedMilliseconds}ms");
+                            Console.WriteLine($"  - Read Time: {readWatch.ElapsedMilliseconds}ms");
+                            Console.WriteLine($"  - Read Bytes: {read}");
+                            
+                            if (read == 0) Console.WriteLine("  WARNING: Read 0 bytes!");
+                        }
+                        
+                        totalScrubWatch.Stop();
+                        Console.WriteLine($"Total Scrubbing Time: {totalScrubWatch.Elapsed.TotalSeconds:F2}s");
                     }
                     catch (Exception ex)
                     {

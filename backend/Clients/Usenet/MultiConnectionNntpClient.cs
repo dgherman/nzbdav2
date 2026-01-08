@@ -24,6 +24,7 @@ public class MultiConnectionNntpClient : INntpClient
     public int ActiveConnections => _connectionPool.ActiveConnections;
     public int AvailableConnections => _connectionPool.AvailableConnections;
     public int RemainingSemaphoreSlots => _connectionPool.RemainingSemaphoreSlots;
+    public ConnectionPool<INntpClient> ConnectionPool => _connectionPool;
 
     private ConnectionPool<INntpClient> _connectionPool;
     private readonly GlobalOperationLimiter? _globalLimiter;

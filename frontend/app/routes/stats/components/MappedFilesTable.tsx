@@ -2,6 +2,7 @@ import { useState, useEffect } from "react";
 import { Table, Button, Form as BootstrapForm, Pagination, OverlayTrigger, Tooltip } from "react-bootstrap";
 import { Form, useSearchParams } from "react-router";
 import type { MappedFile } from "~/types/stats";
+import { formatFileSize } from "~/utils/file-size";
 
 interface Props {
     items: MappedFile[];
@@ -19,23 +20,14 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const hasMediaInfo = searchParams.get("hasMediaInfo") === "true";
     const missingVideo = searchParams.get("missingVideo") === "true";
+    const sortBy = searchParams.get("sortBy") || "linkPath";
+    const sortDirection = searchParams.get("sortDirection") || "asc";
     const pageSize = 10;
     const totalPages = Math.ceil(totalCount / pageSize);
 
     useEffect(() => {
         setSearchValue(search);
     }, [search]);
-
-    // Update selection when items change: only remove IDs that are no longer present in the NEW items list
-    // if the selection was restricted to the current page. 
-    // Actually, if it's a global selection, we shouldn't clear it.
-    // Given the user experience, clearing on page change/search is common, but 
-    // revalidation (auto-refresh) should NOT clear it.
-    // We'll use a ref to track the "search/page" identity to distinguish between 
-    // revalidation (same page/search) and intentional navigation.
-    
-    // For now, let's just remove the effect entirely to see if it fixes the auto-deselection.
-    // Users can manually clear if needed, or we can add a more sophisticated check.
 
     const updateFilter = (key: string, value: boolean) => {
         setSearchParams(prev => {
@@ -44,6 +36,25 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
             prev.set("page", "1");
             return prev;
         });
+    };
+
+    const toggleSort = (column: string) => {
+        setSearchParams(prev => {
+            if (sortBy === column) {
+                prev.set("sortDirection", sortDirection === "asc" ? "desc" : "asc");
+            } else {
+                prev.set("sortBy", column);
+                prev.set("sortDirection", "asc");
+            }
+            return prev;
+        });
+    };
+
+    const SortIcon = ({ column }: { column: string }) => {
+        if (sortBy !== column) return <i className="bi bi-arrow-down-up ms-1 small text-muted opacity-50"></i>;
+        return sortDirection === "asc" 
+            ? <i className="bi bi-sort-up ms-1 text-primary"></i> 
+            : <i className="bi bi-sort-down ms-1 text-primary"></i>;
     };
 
     useEffect(() => {
@@ -93,7 +104,7 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
     };
 
     return (
-        <div className="p-4 rounded-lg bg-opacity-10 bg-white mb-4">
+        <div className="p-4 rounded-lg bg-black bg-opacity-20 mb-4">
             <div className="d-flex justify-content-between align-items-center mb-3">
                 <div className="d-flex align-items-center gap-3">
                     <h4 className="m-0">Mapped Files</h4>
@@ -148,8 +159,18 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
                                 />
                             </th>
                             <th>DavItem ID</th>
-                            <th>Scene Name</th>
-                            <th>Link Path</th>
+                            <th onClick={() => toggleSort("davItemPath")} style={{ cursor: 'pointer' }}>
+                                Scene Name <SortIcon column="davItemPath" />
+                            </th>
+                            <th onClick={() => toggleSort("filesize")} style={{ cursor: 'pointer' }}>
+                                Size <SortIcon column="filesize" />
+                            </th>
+                            <th onClick={() => toggleSort("createdat")} style={{ cursor: 'pointer' }}>
+                                Added At <SortIcon column="createdat" />
+                            </th>
+                            <th onClick={() => toggleSort("linkPath")} style={{ cursor: 'pointer' }}>
+                                Link Path <SortIcon column="linkPath" />
+                            </th>
                             <th>Target Path/URL</th>
                             <th>Codecs</th>
                             <th style={{ width: "140px" }}>Actions</th>
@@ -158,7 +179,7 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
                     <tbody>
                         {items.length === 0 ? (
                             <tr>
-                                <td colSpan={7} className="text-center py-4 text-muted">
+                                <td colSpan={8} className="text-center py-4 text-muted">
                                     No mapped files found. Cache might be initializing.
                                 </td>
                             </tr>
@@ -185,6 +206,12 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
                                             </OverlayTrigger>
                                         )}
                                         {item.davItemName}
+                                    </td>
+                                    <td className="font-mono small text-light">
+                                        {formatFileSize(item.fileSize)}
+                                    </td>
+                                    <td className="font-mono small text-muted">
+                                        {new Date(item.createdAt).toLocaleString()}
                                     </td>
                                     <td className="font-mono small text-light" style={{ whiteSpace: 'normal', wordBreak: 'break-all' }} title={item.linkPath}>
                                         {item.linkPath}

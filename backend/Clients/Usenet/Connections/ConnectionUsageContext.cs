@@ -9,6 +9,9 @@ public class ConnectionUsageDetails
     public bool IsSecondary { get; set; }
     public bool IsImported { get; set; }
     public int? BufferedCount { get; set; }
+    public int? BufferWindowStart { get; set; }
+    public int? BufferWindowEnd { get; set; }
+    public int? TotalSegments { get; set; }
 
     public override string ToString()
     {

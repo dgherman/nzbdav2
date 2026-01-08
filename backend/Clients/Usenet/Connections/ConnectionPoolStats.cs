@@ -87,7 +87,10 @@ public class ConnectionPoolStats
                 d = c.Details,
                 b = c.IsBackup,
                 s = c.IsSecondary,
-                bc = c.DetailsObject?.BufferedCount
+                bc = c.DetailsObject?.BufferedCount,
+                ws = c.DetailsObject?.BufferWindowStart,
+                we = c.DetailsObject?.BufferWindowEnd,
+                ts = c.DetailsObject?.TotalSegments
             }));
 
             var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}|{usageBreakdown}|{providerBreakdown}|{connsJson}";

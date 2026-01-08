@@ -31,6 +31,7 @@ export type MappedFile = {
     targetPath: string;
     targetUrl: string;
     davItemPath: string;
+    fileSize?: number | null;
     createdAt: string;
     mediaInfo?: string;
     isCorrupted: boolean;

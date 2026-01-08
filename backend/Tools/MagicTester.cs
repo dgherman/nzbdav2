@@ -1,4 +1,3 @@
-
 using System;
 using System.Linq;
 using System.Threading;
@@ -9,6 +8,7 @@ using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Services;
 using NzbWebDAV.Websocket;
+using NzbWebDAV.Streams;
 using Serilog;
 
 namespace NzbWebDAV.Tools;
@@ -25,7 +25,7 @@ public class MagicTester
         }
         
         string segmentId = args[argIndex + 1];
-        Console.WriteLine($"Fetching segment: {segmentId}");
+        Console.WriteLine($"Testing segment: {segmentId}");
         
         var services = new ServiceCollection();
         var configManager = new ConfigManager();
@@ -43,40 +43,50 @@ public class MagicTester
         var client = sp.GetRequiredService<UsenetStreamingClient>();
         
         try {
-            var stream = await client.GetSegmentStreamAsync(segmentId, false, CancellationToken.None).ConfigureAwait(false);
-            byte[] buffer = new byte[16384];
-            int read = 0;
-            int totalRead = 0;
-            while (totalRead < buffer.Length && (read = await stream.ReadAsync(buffer, totalRead, buffer.Length - totalRead).ConfigureAwait(false)) > 0)
-            {
-                totalRead += read;
-            }
-            
-            Console.WriteLine($"Read {totalRead} bytes.");
-            
-            byte[] rar4 = { 0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00 };
-            byte[] rar5 = { 0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00 };
-            byte[] matroska = { 0x1a, 0x45, 0xdf, 0xa3 };
-            
-            int offset4 = FindMagic(buffer, totalRead, rar4);
-            int offset5 = FindMagic(buffer, totalRead, rar5);
-            int offsetMkv = FindMagic(buffer, totalRead, matroska);
-            
-            Console.WriteLine($"RAR4 Offset: {offset4}");
-            Console.WriteLine($"RAR5 Offset: {offset5}");
-            Console.WriteLine($"MKV Offset: {offsetMkv}");
-            
-            if (totalRead > 128) {
-                Console.WriteLine("First 128 bytes hex:");
-                for (int i = 0; i < 8; i++)
+            // Test 1: Raw Stream
+            Console.WriteLine("\n--- TEST 1: RAW STREAM ---");
+            var rawStream = await client.GetSegmentStreamAsync(segmentId, false, CancellationToken.None).ConfigureAwait(false);
+            byte[] rawBuffer = new byte[1024];
+            int rawRead = await rawStream.ReadAsync(rawBuffer, 0, rawBuffer.Length).ConfigureAwait(false);
+            Console.WriteLine($"Read {rawRead} raw bytes.");
+            PrintHex(rawBuffer, 64);
+
+            // Test 2: yEnc Decoded Stream (App Logic)
+            Console.WriteLine("\n--- TEST 2: YENC DECODED STREAM (App Logic) ---");
+            try {
+                var yencStream = await client.GetSegmentStreamAsync(segmentId, true, CancellationToken.None).ConfigureAwait(false);
+                byte[] yencBuffer = new byte[16384];
+                int totalRead = 0;
+                int read;
+                while (totalRead < yencBuffer.Length && (read = await yencStream.ReadAsync(yencBuffer, totalRead, yencBuffer.Length - totalRead).ConfigureAwait(false)) > 0)
                 {
-                    var line = buffer.Skip(i * 16).Take(16).ToArray();
-                    Console.WriteLine($"{i * 16:X4}: " + BitConverter.ToString(line).Replace("-", " "));
+                    totalRead += read;
                 }
+                Console.WriteLine($"Read {totalRead} decoded bytes.");
+                PrintHex(yencBuffer, 128);
+                
+                byte[] rar4 = { 0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00 };
+                byte[] rar5 = { 0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00 };
+                
+                Console.WriteLine($"RAR4 Magic found: {FindMagic(yencBuffer, totalRead, rar4) != -1}");
+                Console.WriteLine($"RAR5 Magic found: {FindMagic(yencBuffer, totalRead, rar5) != -1}");
+            } catch (Exception ex) {
+                Console.WriteLine($"yEnc Decoding Failed: {ex.Message}");
             }
+
         } catch (Exception ex) {
             Console.WriteLine($"Error: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
+        }
+    }
+
+    private static void PrintHex(byte[] buffer, int length)
+    {
+        int toPrint = Math.Min(length, buffer.Length);
+        for (int i = 0; i < (toPrint + 15) / 16; i++)
+        {
+            var line = buffer.Skip(i * 16).Take(Math.Min(16, toPrint - i * 16)).ToArray();
+            Console.WriteLine($"{i * 16:X4}: " + BitConverter.ToString(line).Replace("-", " "));
         }
     }
     

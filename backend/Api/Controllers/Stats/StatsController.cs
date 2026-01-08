@@ -368,11 +368,11 @@ public class StatsController(
     }
 
     [HttpGet("mapped-files")]
-    public Task<IActionResult> GetMappedFiles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null, [FromQuery] bool? hasMediaInfo = null, [FromQuery] bool? missingVideo = null)
+    public Task<IActionResult> GetMappedFiles([FromQuery] int page = 1, [FromQuery] int pageSize = 10, [FromQuery] string? search = null, [FromQuery] bool? hasMediaInfo = null, [FromQuery] bool? missingVideo = null, [FromQuery] string? sortBy = "linkPath", [FromQuery] string? sortDirection = "asc")
     {
         return ExecuteSafely(async () =>
         {
-            var (items, totalCount) = await OrganizedLinksUtil.GetMappedFilesPagedAsync(dbContext, configManager, page, pageSize, search, hasMediaInfo, missingVideo);
+            var (items, totalCount) = await OrganizedLinksUtil.GetMappedFilesPagedAsync(dbContext, configManager, page, pageSize, search, hasMediaInfo, missingVideo, sortBy, sortDirection);
             return Ok(new { items, totalCount });
         });
     }
