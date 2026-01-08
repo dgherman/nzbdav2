@@ -2,6 +2,21 @@
 
 Based on performance analysis of `FullNzbTester` running on a 2.4GB MKV file (Babylon 5), the following optimizations are recommended to improve the user experience, particularly during seeking/scrubbing.
 
+## Baseline Performance Stats (Babylon 5 - 2.4GB MKV)
+These stats represent the performance **before** the recommended optimizations below are implemented.
+
+| Phase | Time | Notes |
+|-------|------|-------|
+| **Initial NZB Probe** | 17.6s | Probing 69 files for headers/magic. |
+| **PAR2 Metadata** | 12.9s | Parsing file descriptors from PAR2. |
+| **RAR Parallel Init** | ~100s | Multi-part header verification. |
+| **FFprobe Analysis** | < 1s | Header identification after stream is ready. |
+| **Seek to 10%** | **20.3s** | High latency due to worker cancellation. |
+| **Seek to 50%** | **14.8s** | Latency during buffer re-alignment. |
+| **Seek to 90%** | 4.3s | Significantly faster (possibly tail-end caching). |
+| **Seek to 20%** | 7.8s | Mixed performance during reverse seek. |
+| **Total Scrubbing** | 47.7s | Total time for 4 jumps. |
+
 ## 1. Optimize `BufferedStream` Worker Cancellations (Critical)
 **Observation:** Seeking currently triggers multiple worker cancellations that take ~300ms-600ms each, accumulating to 10s-20s of "Read Time" latency when jumping to new positions.
 - **Action:** Improve the `CancellationToken` propagation in `BufferedStream.cs`. Ensure that workers check for cancellation more frequently and exit immediately without waiting for outstanding NNTP requests if possible.
