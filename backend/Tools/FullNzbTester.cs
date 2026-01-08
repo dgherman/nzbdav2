@@ -224,26 +224,35 @@ public class FullNzbTester
 
                         foreach (var pct in percentages)
                         {
-                            var targetPos = (long)(stream.Length * pct);
-                            Console.WriteLine($"Seeking to {pct:P0} ({targetPos} bytes)...");
-                            
-                            var seekWatch = Stopwatch.StartNew();
-                            stream.Seek(targetPos, SeekOrigin.Begin);
-                            seekWatch.Stop();
-                            
-                            var readWatch = Stopwatch.StartNew();
-                            var read = await stream.ReadAsync(buffer, 0, buffer.Length);
-                            readWatch.Stop();
-                            
-                            // We count "Seek Time" as the full latency users perceive (Seek + first Read)
-                            var totalLatency = seekWatch.ElapsedMilliseconds + readWatch.ElapsedMilliseconds;
-                            seekTimes.Add((pct, totalLatency));
-                            
-                            Console.WriteLine($"  - Seek Time: {seekWatch.ElapsedMilliseconds}ms");
-                            Console.WriteLine($"  - Read Time: {readWatch.ElapsedMilliseconds}ms");
-                            Console.WriteLine($"  - Read Bytes: {read}");
-                            
-                            if (read == 0) Console.WriteLine("  WARNING: Read 0 bytes!");
+                            try 
+                            {
+                                var targetPos = (long)(stream.Length * pct);
+                                Console.WriteLine($"Seeking to {pct:P0} ({targetPos} bytes)...");
+                                
+                                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                                var seekWatch = Stopwatch.StartNew();
+                                stream.Seek(targetPos, SeekOrigin.Begin);
+                                seekWatch.Stop();
+                                
+                                var readWatch = Stopwatch.StartNew();
+                                var read = await stream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
+                                readWatch.Stop();
+                                
+                                // We count "Seek Time" as the full latency users perceive (Seek + first Read)
+                                var totalLatency = seekWatch.ElapsedMilliseconds + readWatch.ElapsedMilliseconds;
+                                seekTimes.Add((pct, totalLatency));
+                                
+                                Console.WriteLine($"  - Seek Time: {seekWatch.ElapsedMilliseconds}ms");
+                                Console.WriteLine($"  - Read Time: {readWatch.ElapsedMilliseconds}ms");
+                                Console.WriteLine($"  - Read Bytes: {read}");
+                                
+                                if (read == 0) Console.WriteLine("  WARNING: Read 0 bytes!");
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                Console.WriteLine("  TIMEOUT: Operation took longer than 30s");
+                                seekTimes.Add((pct, -1)); // -1 indicates timeout
+                            }
                         }
                         
                         totalScrubWatch.Stop();
@@ -271,10 +280,11 @@ public class FullNzbTester
                             
                             Console.WriteLine($"Benchmarking sequential read of {targetBytes / 1024 / 1024} MB...");
                             var benchWatch = Stopwatch.StartNew();
+                            using var benchCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
                             
                             while (totalBenchRead < targetBytes)
                             {
-                                int read = await benchStream.ReadAsync(benchBuffer, 0, benchBuffer.Length).ConfigureAwait(false);
+                                int read = await benchStream.ReadAsync(benchBuffer, 0, benchBuffer.Length, benchCts.Token).ConfigureAwait(false);
                                 if (read == 0) break;
                                 totalBenchRead += read;
                             }

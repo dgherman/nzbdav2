@@ -250,10 +250,11 @@ public class MultiConnectionNntpClient : INntpClient
                     {
                         try
                         {
-                            // We assume connection is not "disposed" (replaced) because if it was, we would have caught exception below
                             // Wait for connection to be ready before returning to pool
+                            // Use a short timeout (500ms) to allow quick draining of small/nearly-complete segments.
+                            // If it takes longer, we kill the connection to ensure UI responsiveness during seeking.
                             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
-                            timeoutCts.CancelAfter(TimeSpan.FromSeconds(5));
+                            timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(500));
                             await connectionLock.Connection.WaitForReady(timeoutCts.Token).ConfigureAwait(false);
                         }
                         catch (OperationCanceledException)
