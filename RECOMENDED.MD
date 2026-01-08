@@ -3,22 +3,23 @@
 Based on performance analysis of `FullNzbTester` running on a 2.4GB MKV file (Babylon 5), the following optimizations are recommended to improve the user experience, particularly during seeking/scrubbing.
 
 ## Baseline Performance Stats (Babylon 5 - 2.4GB MKV)
-These stats represent the performance **before** the recommended optimizations below are implemented.
+These stats represent the performance **after** optimizing worker cancellations (Iteration 1).
 
-| Phase | Time | Notes |
-|-------|------|-------|
-| **Initial NZB Probe** | 15.0s | Probing 69 files for headers/magic. |
-| **PAR2 Metadata** | 8.9s | Parsing file descriptors from PAR2. |
-| **RAR Parallel Init** | ~100s | Multi-part header verification (estimated). |
-| **FFprobe Analysis** | < 1s | Header identification after stream is ready. |
-| **Seek to 10%** | **8.5s** | High latency due to worker cancellation. |
-| **Seek to 50%** | **4.9s** | Latency during buffer re-alignment. |
-| **Seek to 90%** | 2.7s | Significantly faster (possibly tail-end caching). |
-| **Seek to 20%** | 7.4s | Mixed performance during reverse seek. |
-| **Total Scrubbing** | 23.5s | Total time for 4 jumps. |
-| **Seq. Throughput** | **8.84 MB/s** | vs. ~25 MB/s reference in NZBGet. |
+| Phase | Previous (Baseline) | Current (Optimized) | Improvement |
+|-------|-------------------|-------------------|-------------|
+| **Seek to 10%** | 8.5s | **7.1s** | 16% Faster |
+| **Seek to 50%** | 4.9s | **4.9s** | - |
+| **Seek to 90%** | 2.7s | **2.4s** | 11% Faster |
+| **Seek to 20%** | 7.4s | **6.4s** | 13.5% Faster |
+| **Total Scrubbing** | 23.5s | **20.8s** | 12% Faster |
+| **Seq. Throughput** | 8.84 MB/s | **10.17 MB/s** | 15% Faster |
 
-## 1. Optimize `BufferedStream` Worker Cancellations (Critical)
+## 1. Optimize `BufferedStream` Worker Cancellations (In Progress)
+**Status:** Initial optimization applied (Log level reduced, aggressive cancellation checks added).
+**Observation:** Seek latency improved by ~12-16%, but "Workers have not completed" warning persists, indicating tasks are still blocking during cleanup.
+- **Next Action:** Investigate why `Task.WhenAll` hangs even after cancellation. The `INntpClient` might be blocking on socket `Dispose` or `Read` operations that don't respect the token immediately.
+
+## 2. Maximize Sequential Throughput (High)
 **Observation:** Seeking currently triggers multiple worker cancellations that take ~300ms-600ms each, accumulating to 10s-20s of "Read Time" latency when jumping to new positions.
 - **Action:** Improve the `CancellationToken` propagation in `BufferedStream.cs`. Ensure that workers check for cancellation more frequently and exit immediately without waiting for outstanding NNTP requests if possible.
 - **Action:** Reduce the logging verbosity of "Worker canceled" warnings to `Debug` or `Trace` to avoid console I/O overhead during rapid seeking.

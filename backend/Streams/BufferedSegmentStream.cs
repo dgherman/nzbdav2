@@ -223,7 +223,7 @@ public class BufferedSegmentStream : Stream
                         stopwatch.Stop();
                         if (ct.IsCancellationRequested)
                         {
-                            Log.Warning("[BufferedStream] Worker {WorkerId} canceled after processing {SegmentCount} segments. Segment: {SegmentIndex} ({SegmentId}). Elapsed: {Elapsed:F2}s. Msg: {Message}",
+                            Log.Debug("[BufferedStream] Worker {WorkerId} canceled after processing {SegmentCount} segments. Segment: {SegmentIndex} ({SegmentId}). Elapsed: {Elapsed:F2}s. Msg: {Message}",
                                 workerId, segmentCount, currentSegmentIndex, currentSegmentId, stopwatch.Elapsed.TotalSeconds, ex.Message);
                         }
                         else
@@ -488,6 +488,8 @@ public class BufferedSegmentStream : Stream
             }
             catch (InvalidDataException ex)
             {
+                if (ct.IsCancellationRequested) throw new OperationCanceledException(ex.Message, ex, ct);
+                
                 lastException = ex;
                 Log.Warning("[BufferedStream] CORRUPTION DETECTED: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Attempt={Attempt}/{MaxRetries}: {Message}",
                     jobName, index, segmentIds.Length, segmentId, attempt + 1, maxRetries, ex.Message);
@@ -505,6 +507,8 @@ public class BufferedSegmentStream : Stream
             }
             catch (Exception ex)
             {
+                if (ct.IsCancellationRequested) throw new OperationCanceledException(ex.Message, ex, ct);
+
                 lastException = ex;
                 Log.Warning("[BufferedStream] ERROR FETCHING SEGMENT: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Attempt={Attempt}/{MaxRetries}: {Message}",
                     jobName, index, segmentIds.Length, segmentId, attempt + 1, maxRetries, ex.Message);
