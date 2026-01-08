@@ -347,72 +347,81 @@ public class QueueItemProcessor(
     {
         Log.Debug("[GetFileProcessors] Processing {FileInfoCount} file infos", fileInfos.Count);
         var maxConnections = configManager.GetMaxQueueConnections();
-        var groups = fileInfos
+        
+        // Smart Grouping: Group by base name first to keep multi-part files together
+        var baseGroups = fileInfos
             .DistinctBy(x => x.FileName)
-            .GroupBy(GetGroup);
+            .GroupBy(x => FilenameUtil.GetMultipartBaseName(x.FileName))
+            .ToList();
 
-        var groupList = groups.ToList();
-        Log.Information("[GetFileProcessors] Grouped files into {GroupCount} groups: {GroupSummary}",
-            groupList.Count,
-            string.Join(", ", groupList.Select(g => $"{g.Key}={g.Count()}")));
+        Log.Information("[GetFileProcessors] Identified {GroupCount} base file groups", baseGroups.Count);
+
+        // Determine group type for each base group
+        var finalGroups = new List<(string Type, List<GetFileInfosStep.FileInfo> Files)>();
+        foreach (var baseGroup in baseGroups)
+        {
+            var files = baseGroup.ToList();
+            var groupType = "other";
+
+            if (files.Any(x => x.IsRar || FilenameUtil.IsRarFile(x.FileName)))
+            {
+                groupType = "rar";
+            }
+            else if (files.Any(x => x.IsSevenZip || FilenameUtil.Is7zFile(x.FileName)))
+            {
+                groupType = "7z";
+            }
+            else if (files.Any(x => FilenameUtil.IsMultipartMkv(x.FileName)))
+            {
+                groupType = "multipart-mkv";
+            }
+
+            finalGroups.Add((groupType, files));
+        }
+
+        Log.Information("[GetFileProcessors] Classified groups: {GroupSummary}",
+            string.Join(", ", finalGroups.GroupBy(g => g.Type).Select(g => $"{g.Key}={g.Count()}")));
 
         // Calculate adaptive concurrency per RAR to avoid connection pool exhaustion
-        // WithConcurrencyAsync will run multiple RARs in parallel, so we need to limit per-RAR connections
-        var rarCount = groupList.Count(g => g.Key == "rar");
-        var connectionsPerRar = rarCount > 0
-            ? Math.Max(1, Math.Min(5, maxConnections / Math.Max(1, rarCount / 3)))
+        var rarGroupCount = finalGroups.Count(g => g.Type == "rar");
+        var connectionsPerRar = rarGroupCount > 0
+            ? Math.Max(1, Math.Min(5, maxConnections / Math.Max(1, rarGroupCount / 3)))
             : 1;
-        Log.Debug("[GetFileProcessors] Adaptive RAR concurrency: {ConnectionsPerRar} connections per RAR ({RarCount} RAR files, {MaxConnections} total connections)", connectionsPerRar, rarCount, maxConnections);
 
-        foreach (var group in groupList)
+        foreach (var group in finalGroups)
         {
-            Log.Debug("[GetFileProcessors] Processing group '{GroupKey}' with {FileCount} files. First file: {FirstFileName}",
-                group.Key, group.Count(), group.First().FileName);
+            Log.Debug("[GetFileProcessors] Processing group type '{GroupType}' with {FileCount} files. Base name: {BaseName}",
+                group.Type, group.Files.Count, FilenameUtil.GetMultipartBaseName(group.Files.First().FileName));
 
-            if (group.Key == "7z")
+            if (group.Type == "7z")
             {
-                Log.Debug("[GetFileProcessors] Creating SevenZipProcessor for {FileCount} files", group.Count());
-                yield return new SevenZipProcessor(group.ToList(), usenetClient, archivePassword, ct);
+                Log.Debug("[GetFileProcessors] Creating SevenZipProcessor for {FileCount} files", group.Files.Count);
+                yield return new SevenZipProcessor(group.Files, usenetClient, archivePassword, ct);
             }
 
-            else if (group.Key == "rar")
+            else if (group.Type == "rar")
             {
-                var rarFiles = group.ToList();
-                Log.Debug("[GetFileProcessors] Creating {ProcessorCount} RarProcessors", rarFiles.Count);
-                foreach (var fileInfo in rarFiles)
+                var rarFiles = group.Files;
+                Log.Debug("[GetFileProcessors] Creating RarProcessor for group: {BaseName} ({Count} parts)", 
+                    FilenameUtil.GetMultipartBaseName(rarFiles.First().FileName), rarFiles.Count);
+                yield return new RarProcessor(rarFiles, usenetClient, archivePassword, ct, connectionsPerRar);
+            }
+
+            else if (group.Type == "multipart-mkv")
+            {
+                Log.Debug("[GetFileProcessors] Creating MultipartMkvProcessor for {FileCount} files", group.Files.Count);
+                yield return new MultipartMkvProcessor(group.Files, usenetClient, ct);
+            }
+
+            else
+            {
+                Log.Debug("[GetFileProcessors] Creating {ProcessorCount} FileProcessors", group.Files.Count);
+                foreach (var fileInfo in group.Files)
                 {
-                    Log.Debug("[GetFileProcessors] Creating RarProcessor for: {FileName} (Size: {FileSize})",
-                        fileInfo.FileName, fileInfo.FileSize);
-                    yield return new RarProcessor(fileInfo, usenetClient, archivePassword, ct, connectionsPerRar);
-                }
-            }
-
-            else if (group.Key == "multipart-mkv")
-            {
-                Log.Debug("[GetFileProcessors] Creating MultipartMkvProcessor for {FileCount} files", group.Count());
-                yield return new MultipartMkvProcessor(group.ToList(), usenetClient, ct);
-            }
-
-            else if (group.Key == "other")
-            {
-                var otherFiles = group.ToList();
-                Log.Debug("[GetFileProcessors] Creating {ProcessorCount} FileProcessors", otherFiles.Count);
-                foreach (var fileInfo in otherFiles)
-                {
-                    Log.Debug("[GetFileProcessors] Creating FileProcessor for: {FileName} (Size: {FileSize})",
-                        fileInfo.FileName, fileInfo.FileSize);
                     yield return new FileProcessor(fileInfo, usenetClient, ct);
                 }
             }
         }
-
-        yield break;
-
-        string GetGroup(GetFileInfosStep.FileInfo x) => false ? "impossible"
-            : x.IsSevenZip || FilenameUtil.Is7zFile(x.FileName) ? "7z"
-            : x.IsRar || FilenameUtil.IsRarFile(x.FileName) ? "rar"
-            : FilenameUtil.IsMultipartMkv(x.FileName) ? "multipart-mkv"
-            : "other";
     }
 
     private async Task<DavItem?> GetMountFolder(DavDatabaseClient dbClient)

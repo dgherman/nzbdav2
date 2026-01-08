@@ -38,9 +38,54 @@ public class FilenameUtil
         return Regex.IsMatch(filename, @"\.7z(\.(\d+))?$", RegexOptions.IgnoreCase);
     }
 
-    public static bool IsMultipartMkv(string? filename)
-    {
-        if (string.IsNullOrEmpty(filename)) return false;
-        return Regex.IsMatch(filename, @"\.mkv\.(\d+)?$", RegexOptions.IgnoreCase);
+        public static bool IsMultipartMkv(string? filename)
+
+        {
+
+            if (string.IsNullOrEmpty(filename)) return false;
+
+            return Regex.IsMatch(filename, @"\.mkv\.(\d+)?$", RegexOptions.IgnoreCase);
+
+        }
+
+    
+
+        public static string GetMultipartBaseName(string filename)
+
+        {
+
+            if (string.IsNullOrEmpty(filename)) return filename;
+
+    
+
+            // handle `.partXXX.rar`
+
+            var rarPartMatch = Regex.Match(filename, @"^(.*)\.part\d+\.rar$", RegexOptions.IgnoreCase);
+
+            if (rarPartMatch.Success) return rarPartMatch.Groups[1].Value;
+
+    
+
+            // handle `.rXXX`
+
+            var rMatch = Regex.Match(filename, @"^(.*)\.r\d+$", RegexOptions.IgnoreCase);
+
+            if (rMatch.Success) return rMatch.Groups[1].Value;
+
+    
+
+            // handle `.mkv.XXX` or any other `.XXX`
+
+            var numericMatch = Regex.Match(filename, @"^(.*)\.\d+$", RegexOptions.IgnoreCase);
+
+            if (numericMatch.Success) return numericMatch.Groups[1].Value;
+
+    
+
+            return filename;
+
+        }
+
     }
-}
+
+    

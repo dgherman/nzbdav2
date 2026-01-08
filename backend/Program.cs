@@ -78,6 +78,13 @@ class Program
             return;
         }
 
+        // Run magic test if requested
+        if (args.Contains("--magic-test"))
+        {
+            await MagicTester.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
         // initialize database
         await using var databaseContext = new DavDatabaseContext();
 
