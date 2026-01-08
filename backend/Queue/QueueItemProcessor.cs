@@ -363,6 +363,7 @@ public class QueueItemProcessor(
             var files = baseGroup.ToList();
             var groupType = "other";
 
+            // If ANY file in the group has RAR magic or extension, the whole group is RAR
             if (files.Any(x => x.IsRar || FilenameUtil.IsRarFile(x.FileName)))
             {
                 groupType = "rar";

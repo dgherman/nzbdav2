@@ -85,6 +85,13 @@ class Program
             return;
         }
 
+        // Run full nzb test if requested
+        if (args.Contains("--test-full-nzb"))
+        {
+            await FullNzbTester.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
         // initialize database
         await using var databaseContext = new DavDatabaseContext();
 

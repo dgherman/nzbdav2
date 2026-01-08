@@ -24,142 +24,85 @@ public class RarProcessor(
     int maxConcurrentConnections = 1
 ) : BaseProcessor
 {
-    private readonly GetFileInfosStep.FileInfo _primaryFile = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).First();
-
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
-        Log.Information("[RarProcessor] Starting RAR processing for {FileName} ({Count} parts)", _primaryFile.FileName, fileInfos.Count);
+        Log.Information("[RarProcessor] Starting RAR processing for {Count} parts", fileInfos.Count);
 
-        if (_primaryFile.MissingFirstSegment)
+        var allSegments = new List<StoredFileSegment>();
+
+        foreach (var fileInfo in fileInfos.OrderBy(f => GetPartNumber(f.FileName)))
         {
-            Log.Error("[RarProcessor] Skipping {FileName} because the first segment is missing.", _primaryFile.FileName);
-            throw new NzbWebDAV.Exceptions.UsenetArticleNotFoundException(_primaryFile.NzbFile.Segments.FirstOrDefault()?.MessageId ?? "unknown");
+            if (fileInfo.MissingFirstSegment)
+            {
+                Log.Warning("[RarProcessor] Skipping part {FileName} because the first segment is missing.", fileInfo.FileName);
+                continue;
+            }
+
+            Log.Debug("[RarProcessor] Reading headers for part {FileName}", fileInfo.FileName);
+            
+            try 
+            {
+                var segments = await ProcessPartAsync(fileInfo);
+                allSegments.AddRange(segments);
+            }
+            catch (Exception ex)
+            {
+                Log.Warning(ex, "[RarProcessor] Failed to process part {FileName}: {Message}", fileInfo.FileName, ex.Message);
+                // Continue to next part, maybe we can still get some files
+            }
         }
 
-        Log.Debug("[RarProcessor] Initializing joined stream for {FileName}. Total parts: {Count}",
-            _primaryFile.FileName, fileInfos.Count);
-        await using var stream = await GetJoinedStream().ConfigureAwait(false);
-        Log.Debug("[RarProcessor] Stream initialized. Length: {StreamLength}", stream.Length);
-
-        if (_primaryFile.MagicOffset > 0)
+        if (allSegments.Count == 0)
         {
-            Log.Information("[RarProcessor] Seeking to RAR magic at offset {Offset} for {FileName}", _primaryFile.MagicOffset, _primaryFile.FileName);
-            stream.Seek(_primaryFile.MagicOffset, SeekOrigin.Begin);
-        }
-
-        // Create a linked token source with a timeout for the header parsing operation
-        using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        headerCts.CancelAfter(TimeSpan.FromSeconds(120)); // Increased timeout for joined streams
-
-        Log.Information("[RarProcessor] Reading RAR headers for {FileName} (timeout 120s)...", _primaryFile.FileName);
-        var headerStartTime = DateTime.UtcNow;
-        List<IRarHeader> headers;
-        try
-        {
-            headers = await RarUtil.GetRarHeadersAsync(stream, password, headerCts.Token).ConfigureAwait(false);
-            var headerElapsed = DateTime.UtcNow - headerStartTime;
-            Log.Information("[RarProcessor] Successfully read {HeaderCount} RAR headers for {FileName} in {ElapsedSeconds}s",
-                headers.Count, _primaryFile.FileName, headerElapsed.TotalSeconds);
-        }
-        catch (OperationCanceledException) when (headerCts.IsCancellationRequested && !ct.IsCancellationRequested)
-        {
-            var headerElapsed = DateTime.UtcNow - headerStartTime;
-            Log.Error("[RarProcessor] Timeout reading RAR headers for {FileName} after {ElapsedSeconds}s",
-                _primaryFile.FileName, headerElapsed.TotalSeconds);
-            throw new TimeoutException("Timed out while reading RAR headers (limit: 120s). This usually indicates a corrupt or malformed archive.");
-        }
-        catch (IOException ex)
-        {
-            var headerElapsed = DateTime.UtcNow - headerStartTime;
-            Log.Error("[RarProcessor] IOException reading RAR headers for {FileName} after {ElapsedSeconds}s: {Message}",
-                _primaryFile.FileName, headerElapsed.TotalSeconds, ex.Message);
-            throw;
-        }
-        catch (SharpCompress.Common.InvalidFormatException ex)
-        {
-            var headerElapsed = DateTime.UtcNow - headerStartTime;
-            Log.Error("[RarProcessor] Invalid RAR format reading headers for {FileName} after {ElapsedSeconds}s: {Message}. Treating as missing/corrupt article.",
-                _primaryFile.FileName, headerElapsed.TotalSeconds, ex.Message);
-            throw new UsenetArticleNotFoundException(_primaryFile.NzbFile.Segments.FirstOrDefault()?.MessageId ?? "unknown");
-        }
-        catch (Exception ex)
-        {
-            var headerElapsed = DateTime.UtcNow - headerStartTime;
-            Log.Error(ex, "[RarProcessor] Unexpected error reading RAR headers for {FileName} after {ElapsedSeconds}s: {Message}",
-                _primaryFile.FileName, headerElapsed.TotalSeconds, ex.Message);
-            throw;
-        }
-
-        var archiveName = GetArchiveName();
-        var offset = Math.Max(0, _primaryFile.MagicOffset);
-
-        // Map the joined stream results back to individual parts
-        var sortedFileInfos = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).ToList();
-        var partOffsets = new List<long>();
-        long currentOffset = 0;
-        foreach (var fi in sortedFileInfos)
-        {
-            partOffsets.Add(currentOffset);
-            currentOffset += fi.FileSize ?? 0;
+            Log.Error("[RarProcessor] No files found in any of the {Count} RAR parts", fileInfos.Count);
+            return null;
         }
 
         return new Result()
         {
-            StoredFileSegments = headers
-                .Where(x => x.HeaderType == HeaderType.File)
-                .Select(x =>
-                {
-                    var fileStartInJoinedStream = x.GetDataStartPosition() + offset;
-                    var fileSize = x.GetAdditionalDataSize();
-                    
-                    // Split the file data across volumes
-                    var segments = new List<StoredFileSegment>();
-                    long bytesMapped = 0;
-                    
-                    while (bytesMapped < fileSize)
-                    {
-                        var absolutePos = fileStartInJoinedStream + bytesMapped;
-                        // Find which volume contains this position
-                        var partIndex = -1;
-                        for (int i = partOffsets.Count - 1; i >= 0; i--)
-                        {
-                            if (absolutePos >= partOffsets[i]) { partIndex = i; break; }
-                        }
-                        
-                        if (partIndex < 0) break; // Should not happen
-
-                        var fi = sortedFileInfos[partIndex];
-                        var posInPart = absolutePos - partOffsets[partIndex];
-                        var bytesRemainingInPart = (fi.FileSize ?? 0) - posInPart;
-                        var bytesToMap = Math.Min(fileSize - bytesMapped, bytesRemainingInPart);
-                        
-                        if (bytesToMap <= 0) break;
-
-                        segments.Add(new StoredFileSegment()
-                        {
-                            NzbFile = fi.NzbFile,
-                            PartSize = fi.FileSize ?? 0,
-                            ArchiveName = archiveName,
-                            PartNumber = GetPartNumber(fi.FileName),
-                            PathWithinArchive = x.GetFileName(),
-                            ByteRangeWithinPart = LongRange.FromStartAndSize(posInPart, bytesToMap),
-                            AesParams = x.GetAesParams(password),
-                            ReleaseDate = fi.ReleaseDate,
-                        });
-                        
-                        bytesMapped += bytesToMap;
-                    }
-
-                    return segments;
-                })
-                .SelectMany(x => x)
-                .ToArray(),
+            StoredFileSegments = allSegments.ToArray(),
         };
     }
 
-    private string GetArchiveName()
+    private async Task<List<StoredFileSegment>> ProcessPartAsync(GetFileInfosStep.FileInfo fileInfo)
     {
-        return FilenameUtil.GetMultipartBaseName(_primaryFile.FileName);
+        await using var stream = await GetNzbFileStream(fileInfo).ConfigureAwait(false);
+        
+        if (fileInfo.MagicOffset > 0)
+        {
+            stream.Seek(fileInfo.MagicOffset, SeekOrigin.Begin);
+        }
+
+        using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        headerCts.CancelAfter(TimeSpan.FromSeconds(60));
+
+        var headers = await RarUtil.GetRarHeadersAsync(stream, password, headerCts.Token).ConfigureAwait(false);
+        
+        var archiveName = GetArchiveName(fileInfo);
+        var partNumber = GetPartNumber(fileInfo.FileName);
+        var offset = Math.Max(0, fileInfo.MagicOffset);
+
+        return headers
+            .Where(x => x.HeaderType == HeaderType.File)
+            .Select(x => new StoredFileSegment()
+            {
+                NzbFile = fileInfo.NzbFile,
+                PartSize = stream.Length,
+                ArchiveName = archiveName,
+                PartNumber = partNumber,
+                PathWithinArchive = x.GetFileName(),
+                ByteRangeWithinPart = LongRange.FromStartAndSize(
+                    x.GetDataStartPosition() + offset,
+                    x.GetAdditionalDataSize()
+                ),
+                AesParams = x.GetAesParams(password),
+                ReleaseDate = fileInfo.ReleaseDate,
+            }).ToList();
+    }
+
+    private string GetArchiveName(GetFileInfosStep.FileInfo fileInfo)
+    {
+        return FilenameUtil.GetMultipartBaseName(fileInfo.FileName);
     }
 
     private static int GetPartNumber(string filename)
@@ -182,25 +125,14 @@ public class RarProcessor(
         return 0;
     }
 
-    private async Task<Stream> GetJoinedStream()
+    private async Task<NzbFileStream> GetNzbFileStream(GetFileInfosStep.FileInfo fileInfo)
     {
-        var sortedFileInfos = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).ToList();
-        var parts = new List<DavMultipartFile.FilePart>();
-        
-        foreach (var fi in sortedFileInfos)
-        {
-            var partSize = fi.FileSize ?? await usenet.GetFileSizeAsync(fi.NzbFile, ct).ConfigureAwait(false);
-            fi.FileSize = partSize; // Store for offset calculation
-            parts.Add(new DavMultipartFile.FilePart
-            {
-                SegmentIds = fi.NzbFile.GetSegmentIds(),
-                SegmentIdByteRange = LongRange.FromStartAndSize(0, partSize),
-                FilePartByteRange = LongRange.FromStartAndSize(0, partSize)
-            });
-        }
-
+        var filesize = fileInfo.FileSize ?? await usenet.GetFileSizeAsync(fileInfo.NzbFile, ct).ConfigureAwait(false);
+        var concurrency = Math.Min(maxConcurrentConnections, 10);
         var usageContext = ct.GetContext<ConnectionUsageContext>();
-        return new DavMultipartFileStream(parts.ToArray(), usenet, 1, usageContext);
+        
+        var segmentSizes = fileInfo.NzbFile.Segments.Select(x => x.Size).ToArray();
+        return usenet.GetFileStream(fileInfo.NzbFile.GetSegmentIds(), filesize, concurrency, usageContext, segmentSizes: segmentSizes);
     }
 
     public new class Result : BaseProcessor.Result
