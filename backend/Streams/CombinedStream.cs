@@ -16,6 +16,7 @@ public class CombinedStream : Stream
     private Stream? _currentStream;
     private long _position;
     private bool _isDisposed;
+    private bool _partRequiresLoading;
 
     // Cache recently used streams to avoid re-creating them on seeks
     private readonly Dictionary<int, CachedStream> _streamCache = new();
@@ -91,7 +92,14 @@ public class CombinedStream : Stream
             // Ensure we have a current stream loaded
             if (_currentStream == null)
             {
-                if (_currentPartIndex < 0)
+                if (_partRequiresLoading)
+                {
+                    // Seek occurred, load the target part
+                    await LoadPartAsync(_currentPartIndex, cancellationToken).ConfigureAwait(false);
+                    _partRequiresLoading = false;
+                    if (_currentStream == null) return 0;
+                }
+                else if (_currentPartIndex < 0)
                 {
                     // First read - load first part
                     await LoadPartAsync(0, cancellationToken).ConfigureAwait(false);
@@ -112,10 +120,14 @@ public class CombinedStream : Stream
                 cancellationToken
             ).ConfigureAwait(false);
 
+            // Serilog.Log.Debug("[CombinedStream] ReadAsync: Pos={Position}, Part={PartIndex}, Requested={Count}, Read={ReadCount}", 
+            //    _position, _currentPartIndex, count, readCount);
+
             _position += readCount;
             if (readCount > 0) return readCount;
 
             // Current stream is exhausted - dispose and try next part
+            Serilog.Log.Debug("[CombinedStream] Part {PartIndex} exhausted. Moving to next.", _currentPartIndex);
             await _currentStream.DisposeAsync().ConfigureAwait(false);
             _currentStream = null;
         }
@@ -137,6 +149,9 @@ public class CombinedStream : Stream
             _ => throw new ArgumentException("Invalid seek origin", nameof(origin))
         };
 
+        Serilog.Log.Debug("[CombinedStream] Seek: Offset={Offset}, Origin={Origin}, Target={TargetPosition}, TotalLen={TotalLength}", 
+            offset, origin, targetPosition, _totalLength);
+
         // Validate target position
         if (targetPosition < 0)
             targetPosition = 0;
@@ -150,6 +165,9 @@ public class CombinedStream : Stream
         // Find which part contains the target position
         int targetPartIndex = FindPartIndex(targetPosition);
         long offsetInPart = targetPosition - _cumulativeOffsets[targetPartIndex];
+
+        Serilog.Log.Debug("[CombinedStream] Seek resolved: PartIndex={PartIndex}, OffsetInPart={OffsetInPart}", 
+            targetPartIndex, offsetInPart);
 
         // If seeking within current part, try to seek in current stream
         if (targetPartIndex == _currentPartIndex && _currentStream != null && _currentStream.CanSeek)
@@ -169,6 +187,7 @@ public class CombinedStream : Stream
         // Load the target part and seek within it
         _currentPartIndex = targetPartIndex;
         _position = targetPosition;
+        _partRequiresLoading = true; // Signal ReadAsync to load this part
 
         // Don't actually load the stream until next Read() - lazy loading
         // Just record that we need to seek to offsetInPart when we load it
