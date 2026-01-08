@@ -1,6 +1,7 @@
 ﻿using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Queue.FileProcessors;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Queue.FileAggregators;
 
@@ -32,7 +33,7 @@ public class MultipartMkvAggregator
             var name = multipartMkvFile.Filename;
 
             var davItem = DavItem.New(
-                id: Guid.NewGuid(),
+                id: GuidUtil.CreateDeterministic(parentDirectory.Id, name),
                 parent: parentDirectory,
                 name: name,
                 fileSize: fileParts.Sum(x => x.FilePartByteRange.Count),

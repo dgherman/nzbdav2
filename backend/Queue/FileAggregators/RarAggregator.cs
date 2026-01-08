@@ -49,7 +49,7 @@ public class RarAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, b
                 name = mountDirectory.Name + Path.GetExtension(name);
 
             var davItem = DavItem.New(
-                id: Guid.NewGuid(),
+                id: GuidUtil.CreateDeterministic(parentDirectory.Id, name),
                 parent: parentDirectory,
                 name: name,
                 fileSize: fileSize,

@@ -299,8 +299,42 @@ public class CombinedStream : Stream
         else
         {
             // Fallback for non-seekable streams
-            await DiscardBytesInternalAsync(count, CancellationToken.None).ConfigureAwait(false);
-            _position += count;
+            // We MUST load the part and discard from the current stream
+            long totalDiscarded = 0;
+            while (totalDiscarded < count)
+            {
+                if (_currentStream == null)
+                {
+                    await LoadPartAsync(Math.Max(0, _currentPartIndex), CancellationToken.None).ConfigureAwait(false);
+                    if (_currentStream == null) break;
+                }
+
+                var toDiscard = count - totalDiscarded;
+                var throwaway = ArrayPool<byte>.Shared.Rent(65536);
+                try
+                {
+                    var read = await _currentStream.ReadAsync(
+                        throwaway.AsMemory(0, (int)Math.Min(toDiscard, throwaway.Length)),
+                        CancellationToken.None
+                    ).ConfigureAwait(false);
+
+                    if (read == 0)
+                    {
+                        // Current stream exhausted, move to next
+                        await _currentStream.DisposeAsync().ConfigureAwait(false);
+                        _currentStream = null;
+                        _currentPartIndex++;
+                        continue;
+                    }
+
+                    totalDiscarded += read;
+                    _position += read;
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(throwaway);
+                }
+            }
         }
     }
 

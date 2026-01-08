@@ -221,7 +221,18 @@ public class NzbFileStream : Stream
         var stream = GetCombinedStream(foundSegment.FoundIndex, cancellationToken);
         try
         {
-            await stream.DiscardBytesAsync(rangeStart - foundSegment.FoundByteRange.StartInclusive).ConfigureAwait(false);
+            var bytesToDiscard = rangeStart - foundSegment.FoundByteRange.StartInclusive;
+            if (bytesToDiscard > 0)
+            {
+                if (stream.CanSeek)
+                {
+                    stream.Seek(bytesToDiscard, SeekOrigin.Current);
+                }
+                else
+                {
+                    await stream.DiscardBytesAsync(bytesToDiscard).ConfigureAwait(false);
+                }
+            }
             return stream;
         }
         catch
@@ -261,6 +272,20 @@ public class NzbFileStream : Stream
                 ? _fileSize - _segmentOffsets[firstSegmentIndex]
                 : _fileSize - firstSegmentIndex * (_fileSize / _fileSegmentIds.Length);
 
+            long[]? remainingSegmentSizes = null;
+            if (_segmentOffsets != null)
+            {
+                remainingSegmentSizes = new long[remainingSegments.Length];
+                for (int i = 0; i < remainingSegments.Length; i++)
+                {
+                    int originalIndex = firstSegmentIndex + i;
+                    if (originalIndex + 1 < _segmentOffsets.Length)
+                    {
+                        remainingSegmentSizes[i] = _segmentOffsets[originalIndex + 1] - _segmentOffsets[originalIndex];
+                    }
+                }
+            }
+
             Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}",
                 remainingSegments.Length, remainingSize, _concurrentConnections, _bufferSize);
             _contextScope = _streamCts.Token.SetScopedContext(bufferedContext);
@@ -272,7 +297,8 @@ public class NzbFileStream : Stream
                 _concurrentConnections,
                 _bufferSize,
                 bufferedContextCt,
-                bufferedContext
+                bufferedContext,
+                remainingSegmentSizes
             );
 
             // Link cancellation from parent to child manually (one-way, doesn't copy contexts)

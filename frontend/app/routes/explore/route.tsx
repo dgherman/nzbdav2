@@ -212,6 +212,25 @@ function Body(props: ExplorePageData) {
                 addToast(`Failed to trigger repair: ${e}`, "danger", "Error");
             }
         }, [addToast]);
+
+    const onTestDownload = useCallback(async (id: string) => {
+        try {
+            const response = await fetch(`/api/test-download/${id}`, { method: 'POST' });
+            const result = await response.json();
+            if (response.ok) {
+                if (result.matches) {
+                    addToast(result.message, "success", "Byte-Perfect Test Passed");
+                } else {
+                    addToast(`${result.message} Hash 1: ${result.hash1}, Hash 2: ${result.hash2}`, "danger", "Byte-Perfect Test Failed");
+                }
+            } else {
+                throw new Error(result.error || "Unknown error");
+            }
+        } catch (e) {
+            addToast(`Test failed: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
+
     return (        <div className={styles.container}>
             <Breadcrumbs parentDirectories={parentDirectories} />
             <form onSubmit={handleSearch} className={styles["search-form"]}>
@@ -307,6 +326,7 @@ function Body(props: ExplorePageData) {
                 onRunHealthCheck={onRunHealthCheck}
                 onAnalyze={onAnalyze}
                 onRepair={onRepair}
+                onTestDownload={onTestDownload}
             />
         </div >
     );

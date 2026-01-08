@@ -2,6 +2,7 @@
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Queue.FileProcessors;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Queue.FileAggregators;
 
@@ -18,7 +19,7 @@ public class FileAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, 
             if (result.FileName == "") continue; // skip files whose name we can't determine
 
             var davItem = DavItem.New(
-                id: Guid.NewGuid(),
+                id: GuidUtil.CreateDeterministic(mountDirectory.Id, result.FileName),
                 parent: mountDirectory,
                 name: result.FileName,
                 fileSize: result.FileSize,

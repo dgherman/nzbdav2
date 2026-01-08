@@ -12,6 +12,8 @@ public class GetFileDetailsResponse
     public string DownloadUrl { get; set; } = null!;
     public string? NzbDownloadUrl { get; set; }
     public long FileSize { get; set; }
+    public DavItem.ItemType ItemType { get; set; }
+    public string ItemTypeString { get; set; } = null!;
     public DateTimeOffset? CreatedAt { get; set; }
     public DateTimeOffset? LastHealthCheck { get; set; }
     public DateTimeOffset? NextHealthCheck { get; set; }

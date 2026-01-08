@@ -24,7 +24,7 @@ public class MultipartFileStream : Stream
     public override long Position
     {
         get => _position;
-        set => throw new NotSupportedException();
+        set => Seek(value, SeekOrigin.Begin);
     }
 
     public MultipartFileStream(MultipartFile multipartFile, UsenetStreamingClient client, ConnectionUsageContext? usageContext = null)

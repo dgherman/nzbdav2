@@ -162,6 +162,8 @@ public class GetFileDetailsController(
             DownloadUrl = downloadUrl,
             NzbDownloadUrl = nzbDownloadUrl,
             FileSize = davItem.FileSize ?? 0,
+            ItemType = davItem.Type,
+            ItemTypeString = davItem.Type.ToString(),
             CreatedAt = davItem.ReleaseDate,
             LastHealthCheck = davItem.LastHealthCheck,
             NextHealthCheck = davItem.NextHealthCheck,

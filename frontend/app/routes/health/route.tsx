@@ -279,6 +279,24 @@ export default function Health({ loaderData }: Route.ComponentProps) {
         }
     }, [addToast]);
 
+    const onTestDownload = useCallback(async (id: string) => {
+        try {
+            const response = await fetch(`/api/test-download/${id}`, { method: 'POST' });
+            const result = await response.json();
+            if (response.ok) {
+                if (result.matches) {
+                    addToast(result.message, "success", "Byte-Perfect Test Passed");
+                } else {
+                    addToast(`${result.message} Hash 1: ${result.hash1}, Hash 2: ${result.hash2}`, "danger", "Byte-Perfect Test Failed");
+                }
+            } else {
+                throw new Error(result.error || "Unknown error");
+            }
+        } catch (e) {
+            addToast(`Test failed: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
+
 
 
         return (
@@ -378,6 +396,7 @@ export default function Health({ loaderData }: Route.ComponentProps) {
                     onRunHealthCheck={onRunHealthCheck}
                     onAnalyze={onAnalyze}
                     onRepair={onRepair}
+                    onTestDownload={onTestDownload}
                 />
 
             </div>

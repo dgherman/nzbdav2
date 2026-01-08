@@ -213,6 +213,7 @@ public static class FetchFirstSegmentsStep
     {
         private static readonly byte[] Rar4Magic = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x00];
         private static readonly byte[] Rar5Magic = [0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00];
+        private static readonly byte[] SevenZipMagic = [0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C];
 
         public required NzbFile NzbFile { get; init; }
         public required UsenetYencHeader? Header { get; init; }
@@ -220,13 +221,47 @@ public static class FetchFirstSegmentsStep
         public required bool MissingFirstSegment { get; init; }
         public required DateTimeOffset ReleaseDate { get; init; }
 
-        public bool HasRar4Magic() => HasMagic(Rar4Magic);
-        public bool HasRar5Magic() => HasMagic(Rar5Magic);
+        public int MagicOffset { get; private set; } = -1;
+
+        public bool HasRar4Magic() 
+        {
+            var offset = FindMagic(Rar4Magic);
+            if (offset >= 0) MagicOffset = offset;
+            return offset >= 0;
+        }
+
+        public bool HasRar5Magic()
+        {
+            var offset = FindMagic(Rar5Magic);
+            if (offset >= 0) MagicOffset = offset;
+            return offset >= 0;
+        }
+
+        public bool HasSevenZipMagic()
+        {
+            var offset = FindMagic(SevenZipMagic);
+            if (offset >= 0) MagicOffset = offset;
+            return offset >= 0;
+        }
+
+        private int FindMagic(byte[] sequence)
+        {
+            if (First16KB == null || First16KB.Length < sequence.Length) return -1;
+            
+            // Search for magic bytes in the first 16KB (most obfuscation prefixes are small)
+            for (var i = 0; i <= First16KB.Length - sequence.Length; i++)
+            {
+                if (First16KB.AsSpan(i, sequence.Length).SequenceEqual(sequence))
+                {
+                    return i;
+                }
+            }
+            return -1;
+        }
 
         private bool HasMagic(byte[] sequence)
         {
-            return First16KB?.Length >= sequence.Length &&
-                   First16KB.AsSpan(0, sequence.Length).SequenceEqual(sequence);
+            return FindMagic(sequence) == 0;
         }
     }
 }

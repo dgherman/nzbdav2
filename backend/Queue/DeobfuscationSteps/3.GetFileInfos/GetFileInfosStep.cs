@@ -61,6 +61,8 @@ public static class GetFileInfosStep
             ReleaseDate = file.ReleaseDate,
             FileSize = (long?)fileDesc?.FileLength,
             IsRar = file.HasRar4Magic() || file.HasRar5Magic(),
+            IsSevenZip = file.HasSevenZipMagic(),
+            MagicOffset = file.MagicOffset,
             MissingFirstSegment = file.MissingFirstSegment
         };
     }
@@ -103,6 +105,8 @@ public static class GetFileInfosStep
         public required DateTimeOffset ReleaseDate { get; init; }
         public long? FileSize { get; set; }
         public bool IsRar { get; init; }
+        public bool IsSevenZip { get; init; }
+        public int MagicOffset { get; init; } = -1;
         public required bool MissingFirstSegment { get; init; }
     }
 }

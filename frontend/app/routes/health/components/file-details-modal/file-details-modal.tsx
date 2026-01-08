@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Modal, Table, Badge, Spinner, OverlayTrigger, Tooltip } from "react-bootstrap";
 import type { FileDetails } from "~/types/backend";
 import styles from "./file-details-modal.module.css";
@@ -11,9 +12,49 @@ export type FileDetailsModalProps = {
     onRunHealthCheck?: (id: string) => void;
     onAnalyze?: (id: string) => void;
     onRepair?: (id: string) => void;
+    onTestDownload?: (id: string) => Promise<any>;
 }
 
-export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetStats, onRunHealthCheck, onAnalyze, onRepair }: FileDetailsModalProps) {
+export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetStats, onRunHealthCheck, onAnalyze, onRepair, onTestDownload }: FileDetailsModalProps) {
+    const [testingDownload, setTestingDownload] = useState(false);
+    const [repairingClassification, setRepairingClassification] = useState(false);
+
+    const handleTestDownload = async () => {
+        if (!fileDetails || !onTestDownload) return;
+        setTestingDownload(true);
+        try {
+            await onTestDownload(fileDetails.davItemId);
+        } finally {
+            setTestingDownload(false);
+        }
+    };
+
+    const handleRepairClassification = async () => {
+        if (!fileDetails) return;
+        if (!confirm(`This will delete the current item from your library and re-add the original NZB to the queue to re-run deobfuscation logic. \n\nAre you sure you want to repair classification for "${fileDetails.name}"?`)) {
+            return;
+        }
+
+        setRepairingClassification(true);
+        try {
+            const response = await fetch(`/api/maintenance/repair-classification/${fileDetails.davItemId}`, {
+                method: 'POST'
+            });
+            const data = await response.json();
+            if (response.ok) {
+                alert(data.message || "Item re-queued successfully.");
+                onHide();
+            } else {
+                alert(`Error: ${data.error || "Failed to repair classification"}`);
+            }
+        } catch (err) {
+            console.error("Failed to repair classification:", err);
+            alert("An unexpected error occurred.");
+        } finally {
+            setRepairingClassification(false);
+        }
+    };
+
     return (
         <Modal show={show} onHide={onHide} size="lg">
             <Modal.Header closeButton>
@@ -79,12 +120,56 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                                                         Download NZB
                                                     </a>
                                                 )}
+                                                {onTestDownload && (
+                                                    <button
+                                                        className="btn btn-sm btn-outline-info"
+                                                        onClick={handleTestDownload}
+                                                        disabled={testingDownload}
+                                                        title="Downloads the first 10MB twice and compares hashes to verify stability"
+                                                    >
+                                                        {testingDownload ? (
+                                                            <>
+                                                                <Spinner animation="border" size="sm" className="me-1" />
+                                                                Testing...
+                                                            </>
+                                                        ) : (
+                                                            <>
+                                                                <i className="bi bi-check-all me-1"></i>
+                                                                Test Byte-Perfect
+                                                            </>
+                                                        )}
+                                                    </button>
+                                                )}
+                                                <button
+                                                    className="btn btn-sm btn-outline-warning"
+                                                    onClick={handleRepairClassification}
+                                                    disabled={repairingClassification}
+                                                    title="Deletes this item and re-runs deobfuscation logic from the original NZB to fix classification errors (e.g. RAR misidentified as MKV split)"
+                                                >
+                                                    {repairingClassification ? (
+                                                        <>
+                                                            <Spinner animation="border" size="sm" className="me-1" />
+                                                            Repairing...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <i className="bi bi-tools me-1"></i>
+                                                            Repair Classification
+                                                        </>
+                                                    )}
+                                                </button>
                                             </div>
                                         </td>
                                     </tr>
                                     <tr>
                                         <td className={styles.labelCell}>File Size</td>
                                         <td className={styles.valueCell}>{formatBytes(fileDetails.fileSize)}</td>
+                                    </tr>
+                                    <tr>
+                                        <td className={styles.labelCell}>Classification</td>
+                                        <td className={styles.valueCell}>
+                                            <Badge bg="info">{fileDetails.itemTypeString}</Badge>
+                                        </td>
                                     </tr>
                                     <tr>
                                         <td className={styles.labelCell}>Is Corrupted</td>

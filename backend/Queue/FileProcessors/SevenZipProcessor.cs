@@ -45,6 +45,14 @@ public class SevenZipProcessor : BaseProcessor
             var usageContext = _ct.GetContext<ConnectionUsageContext>();
             await using var stream = new MultipartFileStream(multipartFile, _client, usageContext);
 
+            // Handle obfuscation prefix at the start of the first part
+            var firstPartOffset = _fileInfos.OrderBy(f => GetPartNumber(f.FileName)).FirstOrDefault()?.MagicOffset ?? -1;
+            if (firstPartOffset > 0)
+            {
+                Log.Information("[SevenZipProcessor] Seeking to 7z magic at offset {Offset} for {Filename}", firstPartOffset, filename);
+                stream.Seek(firstPartOffset, SeekOrigin.Begin);
+            }
+
             // Use a specific timeout for header reading to prevent indefinite hangs
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(_ct);
             timeoutCts.CancelAfter(TimeSpan.FromMinutes(5));
@@ -71,7 +79,7 @@ public class SevenZipProcessor : BaseProcessor
                 SevenZipFiles = sevenZipEntries.Select(x => new SevenZipFile()
                 {
                     PathWithinArchive = x.PathWithinArchive,
-                    DavMultipartFileMeta = GetDavMultipartFileMeta(x, multipartFile),
+                    DavMultipartFileMeta = GetDavMultipartFileMeta(x, multipartFile, firstPartOffset > 0 ? firstPartOffset : 0),
                     ReleaseDate = _fileInfos.First().ReleaseDate,
                 }).ToList(),
             };
@@ -118,18 +126,23 @@ public class SevenZipProcessor : BaseProcessor
     private DavMultipartFile.Meta GetDavMultipartFileMeta
     (
         SevenZipUtil.SevenZipEntry sevenZipEntry,
-        MultipartFile multipartFile
+        MultipartFile multipartFile,
+        int baseOffset
     )
     {
+        // Adjust archive-relative range to absolute-stream-relative range
+        var absoluteStart = sevenZipEntry.ByteRangeWithinArchive.StartInclusive + baseOffset;
+        var absoluteEnd = sevenZipEntry.ByteRangeWithinArchive.EndExclusive + baseOffset;
+
         var (startIndexInclusive, startIndexByteRange) = InterpolationSearch.Find(
-            sevenZipEntry.ByteRangeWithinArchive.StartInclusive,
+            absoluteStart,
             new LongRange(0, multipartFile.FileParts.Count),
             new LongRange(0, multipartFile.FileSize),
             guess => multipartFile.FileParts[guess].ByteRange
         );
 
         var (endIndexInclusive, endIndexByteRange) = InterpolationSearch.Find(
-            sevenZipEntry.ByteRangeWithinArchive.EndExclusive - 1,
+            absoluteEnd - 1,
             new LongRange(0, multipartFile.FileParts.Count),
             new LongRange(0, multipartFile.FileSize),
             guess => multipartFile.FileParts[guess].ByteRange
@@ -142,10 +155,10 @@ public class SevenZipProcessor : BaseProcessor
             .Select(index =>
             {
                 var partStartInclusive = index == startIndexInclusive
-                    ? sevenZipEntry.ByteRangeWithinArchive.StartInclusive - startIndexByteRange.StartInclusive
+                    ? absoluteStart - startIndexByteRange.StartInclusive
                     : 0;
                 var partEndExclusive = index == endIndexInclusive
-                    ? sevenZipEntry.ByteRangeWithinArchive.EndExclusive - endIndexByteRange.StartInclusive
+                    ? absoluteEnd - endIndexByteRange.StartInclusive
                     : multipartFile.FileParts[index].PartSize;
                 var partByteCount = partEndExclusive - partStartInclusive;
 

@@ -36,6 +36,12 @@ public class RarProcessor(
         await using var stream = await GetNzbFileStream().ConfigureAwait(false);
         Log.Debug("[RarProcessor] Stream initialized. Length: {StreamLength}", stream.Length);
 
+        if (fileInfo.MagicOffset > 0)
+        {
+            Log.Information("[RarProcessor] Seeking to RAR magic at offset {Offset} for {FileName}", fileInfo.MagicOffset, fileInfo.FileName);
+            stream.Seek(fileInfo.MagicOffset, SeekOrigin.Begin);
+        }
+
         // Create a linked token source with a timeout for the header parsing operation
         using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         headerCts.CancelAfter(TimeSpan.FromSeconds(60));
@@ -81,6 +87,8 @@ public class RarProcessor(
 
         var archiveName = GetArchiveName();
         var partNumber = GetPartNumber(headers);
+        var offset = Math.Max(0, fileInfo.MagicOffset);
+
         return new Result()
         {
             StoredFileSegments = headers
@@ -93,7 +101,7 @@ public class RarProcessor(
                     PartNumber = partNumber,
                     PathWithinArchive = x.GetFileName(),
                     ByteRangeWithinPart = LongRange.FromStartAndSize(
-                        x.GetDataStartPosition(),
+                        x.GetDataStartPosition() + offset,
                         x.GetAdditionalDataSize()
                     ),
                     AesParams = x.GetAesParams(password),

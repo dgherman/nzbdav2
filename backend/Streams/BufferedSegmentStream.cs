@@ -35,6 +35,7 @@ public class BufferedSegmentStream : Stream
 
     // Track corrupted segments for health check triggering
     private readonly ConcurrentBag<(int Index, string SegmentId)> _corruptedSegments = new();
+    private readonly long[]? _segmentSizes;
 
     public BufferedSegmentStream(
         string[] segmentIds,
@@ -43,9 +44,11 @@ public class BufferedSegmentStream : Stream
         int concurrentConnections,
         int bufferSegmentCount,
         CancellationToken cancellationToken,
-        ConnectionUsageContext? usageContext = null)
+        ConnectionUsageContext? usageContext = null,
+        long[]? segmentSizes = null)
     {
         _usageContext = usageContext;
+        _segmentSizes = segmentSizes;
         // Ensure buffer is large enough to prevent thrashing with high concurrency
         bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 5);
 
@@ -493,11 +496,23 @@ public class BufferedSegmentStream : Stream
             });
         }
 
-        // Return a zero-filled segment of typical size (512 KB)
-        // This prevents the stream from failing completely
-        var zeroBuffer = ArrayPool<byte>.Shared.Rent(512 * 1024);
-        Array.Clear(zeroBuffer, 0, 512 * 1024);
-        return new PooledSegmentData(segmentId, zeroBuffer, 512 * 1024);
+        // Determine correct size for zero-filling
+        int zeroBufferSize;
+        if (_segmentSizes != null && index < _segmentSizes.Length)
+        {
+            zeroBufferSize = (int)_segmentSizes[index];
+        }
+        else
+        {
+            // If we don't know the exact size, we cannot safely zero-fill without corrupting the file structure (shifting offsets).
+            // It is safer to fail hard here.
+            throw new InvalidDataException($"Cannot perform graceful degradation for segment {index} ({segmentId}) because segment size is unknown. Failing stream to prevent structural corruption.");
+        }
+
+        // Return a zero-filled segment of correct size
+        var zeroBuffer = ArrayPool<byte>.Shared.Rent(zeroBufferSize);
+        Array.Clear(zeroBuffer, 0, zeroBufferSize);
+        return new PooledSegmentData(segmentId, zeroBuffer, zeroBufferSize);
     }
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)

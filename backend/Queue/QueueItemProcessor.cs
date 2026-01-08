@@ -409,7 +409,7 @@ public class QueueItemProcessor(
         yield break;
 
         string GetGroup(GetFileInfosStep.FileInfo x) => false ? "impossible"
-            : FilenameUtil.Is7zFile(x.FileName) ? "7z"
+            : x.IsSevenZip || FilenameUtil.Is7zFile(x.FileName) ? "7z"
             : x.IsRar || FilenameUtil.IsRarFile(x.FileName) ? "rar"
             : FilenameUtil.IsMultipartMkv(x.FileName) ? "multipart-mkv"
             : "other";
@@ -438,7 +438,7 @@ public class QueueItemProcessor(
 
         // otherwise, create it
         categoryFolder = DavItem.New(
-            id: Guid.NewGuid(),
+            id: GuidUtil.CreateDeterministic(DavItem.ContentFolder.Id, queueItem.Category),
             parent: DavItem.ContentFolder,
             name: queueItem.Category,
             fileSize: null,
@@ -462,7 +462,7 @@ public class QueueItemProcessor(
             return IncrementMountFolder(dbClient, categoryFolder);
 
         var mountFolder = DavItem.New(
-            id: Guid.NewGuid(),
+            id: GuidUtil.CreateDeterministic(categoryFolder.Id, queueItem.JobName),
             parent: categoryFolder,
             name: queueItem.JobName,
             fileSize: null,
@@ -483,7 +483,7 @@ public class QueueItemProcessor(
             if (existingMountFolder is not null) continue;
 
             var mountFolder = DavItem.New(
-                id: Guid.NewGuid(),
+                id: GuidUtil.CreateDeterministic(categoryFolder.Id, name),
                 parent: categoryFolder,
                 name: name,
                 fileSize: null,

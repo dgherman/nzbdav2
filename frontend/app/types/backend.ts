@@ -103,6 +103,8 @@ export type FileDetails = {
     downloadUrl: string;
     nzbDownloadUrl?: string;
     fileSize: number;
+    itemType: number;
+    itemTypeString: string;
     createdAt: string | null;
     lastHealthCheck: string | null;
     nextHealthCheck: string | null;
