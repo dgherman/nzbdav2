@@ -3,21 +3,24 @@
 Based on performance analysis of `FullNzbTester` running on a 2.4GB MKV file (Babylon 5), the following optimizations are recommended to improve the user experience, particularly during seeking/scrubbing.
 
 ## Baseline Performance Stats (Babylon 5 - 2.4GB MKV)
-These stats represent the performance **after** optimizing worker cancellations (Iteration 1).
+These stats represent the performance **after** optimizing worker cancellations (Iteration 2 - Stable).
 
 | Phase | Previous (Baseline) | Current (Optimized) | Improvement |
 |-------|-------------------|-------------------|-------------|
-| **Seek to 10%** | 8.5s | **7.1s** | 16% Faster |
-| **Seek to 50%** | 4.9s | **4.9s** | - |
-| **Seek to 90%** | 2.7s | **2.4s** | 11% Faster |
-| **Seek to 20%** | 7.4s | **6.4s** | 13.5% Faster |
-| **Total Scrubbing** | 23.5s | **20.8s** | 12% Faster |
-| **Seq. Throughput** | 8.84 MB/s | **10.17 MB/s** | 15% Faster |
+| **Seek to 10%** | 8.5s | **7.9s** | ~7% Faster |
+| **Seek to 50%** | 4.9s | **5.2s** | - |
+| **Seek to 90%** | 2.7s | **2.5s** | ~7% Faster |
+| **Seek to 20%** | 7.4s | **6.8s** | ~8% Faster |
+| **Total Scrubbing** | 23.5s | **22.5s** | ~4% Faster |
+| **Seq. Throughput** | 8.84 MB/s | **9.68 MB/s** | ~10% Faster |
 
-## 1. Optimize `BufferedStream` Worker Cancellations (In Progress)
-**Status:** Initial optimization applied (Log level reduced, aggressive cancellation checks added).
-**Observation:** Seek latency improved by ~12-16%, but "Workers have not completed" warning persists, indicating tasks are still blocking during cleanup.
-- **Next Action:** Investigate why `Task.WhenAll` hangs even after cancellation. The `INntpClient` might be blocking on socket `Dispose` or `Read` operations that don't respect the token immediately.
+## 1. Optimize `BufferedStream` Worker Cancellations (Implemented)
+**Status:** Implemented with a 500ms drain timeout.
+**Details:** 
+- Reduced log verbosity for cancellations to `Debug`.
+- Added aggressive cancellation checks in worker loops.
+- Implemented a **500ms timeout** for draining connections during disposal. If a connection takes longer than 500ms to finish its current segment, it is forcibly killed and replaced. This prevents large downloads from blocking the seek operation while avoiding the overhead of killing every connection instantly.
+**Observation:** Seek latency improved slightly, and sequential throughput increased by ~10%. Log noise is significantly reduced.
 
 ## 2. Maximize Sequential Throughput (High)
 **Observation:** Seeking currently triggers multiple worker cancellations that take ~300ms-600ms each, accumulating to 10s-20s of "Read Time" latency when jumping to new positions.
