@@ -243,6 +243,45 @@ public class FullNzbTester
                         
                         totalScrubWatch.Stop();
                         Console.WriteLine($"Total Scrubbing Time: {totalScrubWatch.Elapsed.TotalSeconds:F2}s");
+
+                        // Sequential Throughput Benchmark
+                        Console.WriteLine();
+                        Console.WriteLine("--- STEP 7: SEQUENTIAL THROUGHPUT BENCHMARK ---");
+                        try
+                        {
+                            using var throughputStream = new DavMultipartFileStream(
+                                fileParts,
+                                client,
+                                configManager.GetConnectionsPerStream(),
+                                new ConnectionUsageContext(ConnectionUsageType.Streaming)
+                            );
+                            
+                            Stream benchStream = throughputStream;
+                            if (aesParams != null) benchStream = new AesDecoderStream(throughputStream, aesParams);
+
+                            long targetBytes = 50 * 1024 * 1024; // 50 MB
+                            var benchBuffer = new byte[64 * 1024]; // 64 KB buffer
+                            long totalBenchRead = 0;
+                            
+                            Console.WriteLine($"Benchmarking sequential read of {targetBytes / 1024 / 1024} MB...");
+                            var benchWatch = Stopwatch.StartNew();
+                            
+                            while (totalBenchRead < targetBytes)
+                            {
+                                int read = await benchStream.ReadAsync(benchBuffer, 0, benchBuffer.Length).ConfigureAwait(false);
+                                if (read == 0) break;
+                                totalBenchRead += read;
+                            }
+                            
+                            benchWatch.Stop();
+                            double speedMbps = (totalBenchRead / 1024.0 / 1024.0) / benchWatch.Elapsed.TotalSeconds;
+                            Console.WriteLine($"Read {totalBenchRead / 1024.0 / 1024.0:F2} MB in {benchWatch.Elapsed.TotalSeconds:F2}s");
+                            Console.WriteLine($"Sequential Speed: {speedMbps:F2} MB/s");
+                        }
+                        catch (Exception ex)
+                        {
+                            Console.WriteLine($"Benchmark failed: {ex.Message}");
+                        }
                     }
                     catch (Exception ex)
                     {

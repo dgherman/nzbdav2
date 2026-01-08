@@ -13,19 +13,24 @@ These stats represent the performance **before** the recommended optimizations b
 | **FFprobe Analysis** | < 1s | Header identification after stream is ready. |
 | **Seek to 10%** | **20.3s** | High latency due to worker cancellation. |
 | **Seek to 50%** | **14.8s** | Latency during buffer re-alignment. |
-| **Seek to 90%** | 4.3s | Significantly faster (possibly tail-end caching). |
-| **Seek to 20%** | 7.8s | Mixed performance during reverse seek. |
+| Seek to 90% | 4.3s | Significantly faster (possibly tail-end caching). |
+| Seek to 20% | 7.8s | Mixed performance during reverse seek. |
 | **Total Scrubbing** | 47.7s | Total time for 4 jumps. |
+| **Seq. Throughput** | **8.73 MB/s** | vs. ~25 MB/s reference in NZBGet. |
 
 ## 1. Optimize `BufferedStream` Worker Cancellations (Critical)
 **Observation:** Seeking currently triggers multiple worker cancellations that take ~300ms-600ms each, accumulating to 10s-20s of "Read Time" latency when jumping to new positions.
 - **Action:** Improve the `CancellationToken` propagation in `BufferedStream.cs`. Ensure that workers check for cancellation more frequently and exit immediately without waiting for outstanding NNTP requests if possible.
 - **Action:** Reduce the logging verbosity of "Worker canceled" warnings to `Debug` or `Trace` to avoid console I/O overhead during rapid seeking.
 
-## 2. Implement Predictive Pre-fetching (High)
+## 2. Maximize Sequential Throughput (High)
+**Observation:** Current throughput is ~8.7 MB/s, which is ~35% of the potential 25 MB/s.
+- **Action:** Investigate `BufferedSegmentStream` bottlenecks. The lock contention on `_bufferChannel` or the overhead of `Memory<byte>` copying might be limiting throughput.
+- **Action:** Increase the number of concurrent connections or optimize the `ConnectionPool` acquisition strategy if connections are idling unnecessarily.
+- **Action:** Review `AesDecoderStream` (if encryption is used, though not in this test case) and `YencHeaderStream` for CPU-bound bottlenecks.
+
+## 3. Implement Predictive Pre-fetching (High)
 **Observation:** Seeking to 90% was faster (4.3s) than seeking to 10% (20.3s), possibly due to the way parts are indexed or buffered.
-- **Action:** When a seek occurs, prioritize the download of the immediate segment required for the new position.
-- **Action:** Implement a small "seek buffer" that fetches the first few KB of the target segment with high priority, while background workers fill the rest of the look-ahead buffer.
 
 ## 3. Parallelize RAR Metadata Extraction (Medium)
 **Observation:** PAR2 descriptor parsing takes ~13s. While not a blocker for streaming (as it's a one-time cost), it delays the initial start of the video.
