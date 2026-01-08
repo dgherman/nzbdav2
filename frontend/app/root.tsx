@@ -20,6 +20,13 @@ import { Loading } from "./routes/_index/components/loading/loading";
 import { backendClient } from "~/clients/backend-client.server";
 import { ToastProvider } from "./context/ToastContext";
 
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "NzbDav" },
+    { name: "description", content: "NzbDav Web Interface" },
+  ];
+}
+
 export async function loader({ request }: Route.LoaderArgs) {
   // unauthenticated routes
   let path = new URL(request.url).pathname;

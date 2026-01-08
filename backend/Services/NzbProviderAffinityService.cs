@@ -28,8 +28,8 @@ public class NzbProviderAffinityService
         _scopeFactory = scopeFactory;
         _configManager = configManager;
 
-        // Persist stats every 30 seconds
-        _persistenceTimer = new Timer(PersistStats, null, TimeSpan.FromSeconds(30), TimeSpan.FromSeconds(30));
+        // Persist stats every 5 seconds
+        _persistenceTimer = new Timer(PersistStats, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
 
         // Load existing stats from database
         _ = Task.Run(LoadStatsAsync);
@@ -156,15 +156,23 @@ public class NzbProviderAffinityService
     /// <summary>
     /// Get all provider statistics for a specific NZB
     /// </summary>
-    public Dictionary<int, (double SuccessRate, long AverageSpeedBps, int SuccessfulSegments)> GetJobStats(string jobName)
+    public Dictionary<int, NzbProviderStats> GetJobStats(string jobName)
     {
         if (!_stats.TryGetValue(jobName, out var jobStats))
-            return new Dictionary<int, (double, long, int)>();
+            return new Dictionary<int, NzbProviderStats>();
 
-        return jobStats.ToDictionary(
-            kvp => kvp.Key,
-            kvp => (kvp.Value.SuccessRate, kvp.Value.AverageSpeedBps, kvp.Value.SuccessfulSegments)
-        );
+        var result = new Dictionary<int, NzbProviderStats>();
+        foreach (var (providerIndex, performance) in jobStats)
+        {
+            var stats = new NzbProviderStats
+            {
+                JobName = jobName,
+                ProviderIndex = providerIndex
+            };
+            performance.CopyTo(stats);
+            result[providerIndex] = stats;
+        }
+        return result;
     }
 
     /// <summary>
@@ -358,6 +366,19 @@ public class NzbProviderAffinityService
                 _totalTimeMs = dbStats.TotalTimeMs;
                 _recentAverageSpeedBps = dbStats.RecentAverageSpeedBps;
                 _isDirty = false;
+            }
+        }
+
+        public void CopyTo(NzbProviderStats dbStats)
+        {
+            lock (_lock)
+            {
+                dbStats.SuccessfulSegments = _successfulSegments;
+                dbStats.FailedSegments = _failedSegments;
+                dbStats.TotalBytes = _totalBytes;
+                dbStats.TotalTimeMs = _totalTimeMs;
+                dbStats.RecentAverageSpeedBps = _recentAverageSpeedBps;
+                dbStats.LastUsed = DateTimeOffset.UtcNow;
             }
         }
 

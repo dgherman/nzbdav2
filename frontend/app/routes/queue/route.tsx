@@ -2,7 +2,8 @@ import { Link, redirect } from "react-router";
 import type { Route } from "./+types/route";
 import styles from "./route.module.css"
 import { Alert } from 'react-bootstrap';
-import { backendClient, type HistorySlot, type QueueSlot } from "~/clients/backend-client.server";
+import { backendClient } from "~/clients/backend-client.server";
+import type { HistorySlot, QueueSlot } from "~/types/backend";
 import { EmptyQueue } from "./components/empty-queue/empty-queue";
 import { HistoryTable } from "./components/history-table/history-table";
 import { QueueTable } from "./components/queue-table/queue-table";
@@ -10,6 +11,13 @@ import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
 import { isAuthenticated } from "~/auth/authentication.server";
 import { useToast } from "~/context/ToastContext";
+
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "Queue | NzbDav" },
+    { name: "description", content: "NzbDav Download Queue and History" },
+  ];
+}
 
 const topicNames = {
     queueItemStatus: 'qs',
@@ -52,7 +60,7 @@ export default function Queue(props: Route.ComponentProps) {
     const [historySlots, setHistorySlots] = useState<PresentationHistorySlot[]>(props.loaderData.historySlots);
     const [totalQueueCount, setTotalQueueCount] = useState(props.loaderData.totalQueueCount);
     const [totalHistoryCount, setTotalHistoryCount] = useState(props.loaderData.totalHistoryCount);
-    const [showHidden, setShowHidden] = useState(true);
+    const [showHidden, setShowHidden] = useState(false);
     const [queueCurrentPage, setQueueCurrentPage] = useState(1);
     const [queueSearchQuery, setQueueSearchQuery] = useState('');
     const [historyCurrentPage, setHistoryCurrentPage] = useState(1);

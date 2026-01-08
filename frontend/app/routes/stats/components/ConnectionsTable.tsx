@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Table, Badge, Button, Collapse } from "react-bootstrap";
 import { ChevronDown, ChevronRight } from "lucide-react";
-import type { ConnectionUsageContext } from "~/clients/backend-client.server";
+import type { ConnectionUsageContext } from "~/types/connections";
 
 interface Props {
     connections: ConnectionUsageContext[];

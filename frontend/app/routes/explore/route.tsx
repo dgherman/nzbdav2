@@ -2,7 +2,8 @@ import type { Route } from "./+types/route";
 import { Breadcrumbs } from "./breadcrumbs/breadcrumbs";
 import styles from "./route.module.css"
 import { Link, redirect, useLocation, useNavigation, useFetcher } from "react-router";
-import { backendClient, type DirectoryItem, type SearchResult } from "~/clients/backend-client.server";
+import { backendClient } from "~/clients/backend-client.server";
+import type { DirectoryItem, SearchResult, FileDetails } from "~/types/backend";
 import { useCallback, useState, useEffect } from "react";
 import { lookup as getMimeType } from 'mime-types';
 import { getDownloadKey } from "~/auth/downloads.server";
@@ -11,6 +12,13 @@ import { formatFileSize } from "~/utils/file-size";
 import type { FileDetails } from "~/types/file-details";
 import { FileDetailsModal } from "../health/components/file-details-modal/file-details-modal";
 import { useToast } from "~/context/ToastContext";
+
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "File Explorer | NzbDav" },
+    { name: "description", content: "NzbDav File Explorer" },
+  ];
+}
 
 type SearchResultWithKey = SearchResult & { downloadKey: string | null };
 

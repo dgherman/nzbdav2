@@ -1,6 +1,7 @@
 import { Card, Row, Col, Table, Badge } from "react-bootstrap";
 import { useState, useCallback } from "react";
-import type { ProviderBandwidthSnapshot, ConnectionUsageContext } from "~/clients/backend-client.server";
+import type { ProviderBandwidthSnapshot } from "~/types/bandwidth";
+import type { ConnectionUsageContext } from "~/types/connections";
 import type { FileDetails } from "~/types/file-details";
 import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
 import { useToast } from "~/context/ToastContext";
@@ -152,16 +153,25 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                     const conns = connections[index] || [];
                     
                     // Group connections by type and jobName
-                    const groupedConns: { usageType: number; details: string | null; jobName?: string | null; davItemId?: string | null; isBackup?: boolean; isSecondary?: boolean; count: number }[] = [];
+                    const groupedConns: { usageType: number; details: string | null; jobName?: string | null; davItemId?: string | null; isBackup?: boolean; isSecondary?: boolean; bufferedCount?: number | null; count: number }[] = [];
                     const connMap = new Map<string, number>();
 
                     for (const c of conns) {
                         const key = `${c.usageType}|${c.jobName || c.details || ""}|${c.isBackup}|${c.isSecondary}`;
                         if (connMap.has(key)) {
-                            groupedConns[connMap.get(key)!].count++;
+                            const entry = groupedConns[connMap.get(key)!];
+                            entry.count++;
+                            // Use the maximum buffered count for the group
+                            if (c.bufferedCount !== undefined && c.bufferedCount !== null) {
+                                entry.bufferedCount = Math.max(entry.bufferedCount || 0, c.bufferedCount);
+                            }
                         } else {
                             connMap.set(key, groupedConns.length);
-                            groupedConns.push({ ...c, count: 1 });
+                            groupedConns.push({ 
+                                ...c, 
+                                count: 1,
+                                bufferedCount: c.bufferedCount // Ensure initial value is set
+                            });
                         }
                     }
 
@@ -205,6 +215,11 @@ export function ProviderStatus({ bandwidth, connections }: Props) {
                                                         <Badge bg={getTypeColor(c.usageType)} className="flex-shrink-0" style={{fontSize: '0.6rem', minWidth: '50px', marginTop: '2px'}}>
                                                             {getTypeLabel(c.usageType)}
                                                         </Badge>
+                                                        {c.bufferedCount !== undefined && c.bufferedCount !== null && (
+                                                            <Badge bg="dark" border="secondary" className="flex-shrink-0 border" style={{fontSize: '0.6rem', marginTop: '2px'}} title="Segments currently in memory buffer">
+                                                                Buf: {c.bufferedCount}
+                                                            </Badge>
+                                                        )}
                                                         {(c.isBackup || c.isSecondary) && (
                                                             <Badge bg="warning" text="dark" className="flex-shrink-0" style={{fontSize: '0.6rem', marginTop: '2px'}}>
                                                                 Retry

@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Table, Pagination, Button, Form as BootstrapForm } from "react-bootstrap";
 import { Form, useSearchParams } from "react-router";
-import type { HealthCheckResult } from "~/clients/backend-client.server";
+import type { HealthCheckResult } from "~/types/stats";
 
 interface Props {
     files: HealthCheckResult[];

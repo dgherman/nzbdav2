@@ -1,7 +1,8 @@
 import { useState, useEffect } from "react";
 import { Table, Button, Form as BootstrapForm, Pagination, OverlayTrigger, Tooltip, Dropdown, ButtonGroup } from "react-bootstrap";
 import { Form, useSearchParams } from "react-router";
-import type { MissingArticleItem, ProviderBandwidthSnapshot } from "~/clients/backend-client.server";
+import type { MissingArticleItem } from "~/types/stats";
+import type { ProviderBandwidthSnapshot } from "~/types/bandwidth";
 import { useToast } from "~/context/ToastContext";
 
 interface Props {

@@ -12,6 +12,13 @@ import { isRepairsSettingsUpdated, isRepairsSettingsValid, RepairsSettings } fro
 import { GeneralSettings, isGeneralSettingsUpdated } from "./general/general";
 import { DebugSettings } from "./debug/debug";
 
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "Settings | NzbDav" },
+    { name: "description", content: "Configure NzbDav Settings" },
+  ];
+}
+
 const defaultConfig = {
     "general.base-url": "",
     "general.log-level": "Information",

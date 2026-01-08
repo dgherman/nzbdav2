@@ -8,6 +8,7 @@ using NzbWebDAV.Extensions;
 using Serilog;
 using System.IO;
 using System.Collections.Concurrent;
+using NzbWebDAV.Database;
 
 namespace NzbWebDAV.Streams;
 
@@ -28,6 +29,9 @@ public class BufferedSegmentStream : Stream
     private int _currentSegmentPosition;
     private long _position;
     private bool _disposed;
+    private int _bufferedCount;
+
+    public int BufferedCount => _bufferedCount;
 
     // Track corrupted segments for health check triggering
     private readonly ConcurrentBag<(int Index, string SegmentId)> _corruptedSegments = new();
@@ -147,8 +151,13 @@ public class BufferedSegmentStream : Stream
                         {
                             while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
                             {
-                    await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
+                                await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
                                 nextIndexToWrite++;
+                                Interlocked.Increment(ref _bufferedCount);
+                                if (_usageContext?.DetailsObject != null)
+                                {
+                                    _usageContext.Value.DetailsObject.BufferedCount = _bufferedCount;
+                                }
                             }
                         }
                         finally
@@ -221,13 +230,13 @@ public class BufferedSegmentStream : Stream
                             var message = ex.Message;
                             _ = Task.Run(async () => {
                                 try {
-                                    using var db = new NzbWebDAV.Database.DavDatabaseContext();
+                                    using var db = new DavDatabaseContext();
                                     var item = await db.Items.FindAsync(davItemId);
-                                    if (item != null) {
+                                    if (item != null && !item.IsCorrupted) {
                                         item.IsCorrupted = true;
                                         item.CorruptionReason = $"Data Integrity Error: {message}";
                                         await db.SaveChangesAsync();
-                                        Log.Information("[BufferedStream] Marked item {ItemId} as corrupted in database.", davItemId);
+                                        Log.Information("[BufferedStream] Marked item {ItemId} as corrupted in database due to data integrity error.", davItemId);
                                     }
                                 } catch (Exception dbEx) {
                                     Log.Error(dbEx, "[BufferedStream] Failed to mark item as corrupted in database.");
@@ -463,7 +472,28 @@ public class BufferedSegmentStream : Stream
         // Track this segment as corrupted
         _corruptedSegments.Add((index, segmentId));
 
-        // Return a zero-filled segment of typical size (500 KB)
+        // Report corruption back to database if we have a DavItemId
+        if (_usageContext?.DetailsObject?.DavItemId != null)
+        {
+            var davItemId = _usageContext.Value.DetailsObject.DavItemId.Value;
+            var reason = $"Data missing/corrupt after {maxRetries} retries: {lastException?.Message ?? "Unknown error"}";
+            _ = Task.Run(async () => {
+                try {
+                    using var db = new DavDatabaseContext();
+                    var item = await db.Items.FindAsync(davItemId);
+                    if (item != null && !item.IsCorrupted) {
+                        item.IsCorrupted = true;
+                        item.CorruptionReason = reason;
+                        await db.SaveChangesAsync();
+                        Log.Information("[BufferedStream] Marked item {ItemId} as corrupted in database due to terminal segment failure.", davItemId);
+                    }
+                } catch (Exception dbEx) {
+                    Log.Error(dbEx, "[BufferedStream] Failed to mark item as corrupted in database.");
+                }
+            });
+        }
+
+        // Return a zero-filled segment of typical size (512 KB)
         // This prevents the stream from failing completely
         var zeroBuffer = ArrayPool<byte>.Shared.Rent(512 * 1024);
         Array.Clear(zeroBuffer, 0, 512 * 1024);
@@ -518,6 +548,11 @@ public class BufferedSegmentStream : Stream
             {
                 _currentSegment.Dispose();
                 _currentSegment = null;
+                Interlocked.Decrement(ref _bufferedCount);
+                if (_usageContext?.DetailsObject != null)
+                {
+                    _usageContext.Value.DetailsObject.BufferedCount = _bufferedCount;
+                }
             }
         }
         return totalRead;

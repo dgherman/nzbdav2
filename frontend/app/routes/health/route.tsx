@@ -1,7 +1,7 @@
 import type { Route } from "./+types/route";
 import styles from "./route.module.css"
-import { backendClient, type AnalysisItem } from "~/clients/backend-client.server";
-import type { FileDetails } from "~/types/file-details";
+import { backendClient } from "~/clients/backend-client.server";
+import type { AnalysisItem, FileDetails } from "~/types/backend";
 import { HealthTable } from "./components/health-table/health-table";
 import { AnalysisTable } from "./components/analysis-table/analysis-table";
 import { HealthStats } from "./components/health-stats/health-stats";
@@ -10,6 +10,13 @@ import { useCallback, useEffect, useState } from "react";
 import { receiveMessage } from "~/utils/websocket-util";
 import { Alert, Tabs, Tab } from "react-bootstrap";
 import { useToast } from "~/context/ToastContext";
+
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "Health Checks | NzbDav" },
+    { name: "description", content: "NzbDav File Health Monitoring" },
+  ];
+}
 
 const topicNames = {
     healthItemStatus: 'hs',

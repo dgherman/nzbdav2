@@ -1,6 +1,7 @@
 ﻿using NzbWebDAV.Config;
 using NzbWebDAV.Models;
 using NzbWebDAV.Websocket;
+using System.Text.Json;
 
 namespace NzbWebDAV.Clients.Usenet.Connections;
 
@@ -78,7 +79,18 @@ public class ConnectionPoolStats
             // Get usage breakdown from all connection pools
             var usageBreakdown = GetGlobalUsageBreakdown();
             var providerBreakdown = GetProviderUsageBreakdown(providerIndex);
-            var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}|{usageBreakdown}|{providerBreakdown}";
+            
+            // Get detailed connections for this provider to send over websocket
+            var activeConns = _connectionPools[providerIndex]?.GetActiveConnections() ?? new List<ConnectionUsageContext>();
+            var connsJson = JsonSerializer.Serialize(activeConns.Select(c => new {
+                t = (int)c.UsageType,
+                d = c.Details,
+                b = c.IsBackup,
+                s = c.IsSecondary,
+                bc = c.DetailsObject?.BufferedCount
+            }));
+
+            var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}|{usageBreakdown}|{providerBreakdown}|{connsJson}";
             _websocketManager.SendMessage(WebsocketTopic.UsenetConnections, message);
         }
     }

@@ -157,7 +157,8 @@ public class StatsController(
                         davItemId = davItemId,
                         isBackup = context.IsBackup,
                         isSecondary = context.IsSecondary,
-                        isImported = context.IsImported
+                        isImported = context.IsImported,
+                        bufferedCount = context.DetailsObject?.BufferedCount
                     });
                 }
 

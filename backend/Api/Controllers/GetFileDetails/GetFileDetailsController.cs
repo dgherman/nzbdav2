@@ -46,11 +46,19 @@ public class GetFileDetailsController(
         var queueJobName = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
 
         // Get provider stats from database
-        var providerStats = await dbClient.Ctx.NzbProviderStats
+        var dbProviderStats = await dbClient.Ctx.NzbProviderStats
             .AsNoTracking()
             .Where(x => x.JobName == providerStatsJobName)
             .ToListAsync()
             .ConfigureAwait(false);
+
+        // Get live stats from affinity service (important for active downloads)
+        var liveProviderStats = affinityService.GetJobStats(providerStatsJobName);
+
+        // Merge database and live stats (live stats take precedence)
+        var mergedStats = new Dictionary<int, NzbProviderStats>();
+        foreach (var stat in dbProviderStats) mergedStats[stat.ProviderIndex] = stat;
+        foreach (var kvp in liveProviderStats) mergedStats[kvp.Key] = kvp.Value;
 
         // Get provider configuration to map provider index to host
         var usenetConfig = configManager.GetUsenetProviderConfig();
@@ -71,6 +79,12 @@ public class GetFileDetailsController(
             .Where(x => x.DavItemId == itemGuid)
             .OrderByDescending(x => x.CreatedAt)
             .FirstOrDefaultAsync()
+            .ConfigureAwait(false);
+
+        // Get mapped path from LocalLinks
+        var mappedLink = await dbClient.Ctx.LocalLinks
+            .AsNoTracking()
+            .FirstOrDefaultAsync(x => x.DavItemId == itemGuid)
             .ConfigureAwait(false);
 
         // Generate download URL with token
@@ -143,6 +157,7 @@ public class GetFileDetailsController(
             DavItemId = davItem.Id.ToString(),
             Name = davItem.Name,
             Path = davItem.Path,
+            MappedPath = mappedLink?.LinkPath,
             JobName = queueJobName,
             DownloadUrl = downloadUrl,
             NzbDownloadUrl = nzbDownloadUrl,
@@ -154,7 +169,7 @@ public class GetFileDetailsController(
             IsCorrupted = davItem.IsCorrupted,
             CorruptionReason = davItem.CorruptionReason,
             MissingArticleCount = missingArticleCount,
-            ProviderStats = providerStats.Select(ps => new GetFileDetailsResponse.ProviderStatistic
+            ProviderStats = mergedStats.Values.OrderBy(ps => ps.ProviderIndex).Select(ps => new GetFileDetailsResponse.ProviderStatistic
             {
                 ProviderIndex = ps.ProviderIndex,
                 ProviderHost = providerHosts.GetValueOrDefault(ps.ProviderIndex, $"Provider {ps.ProviderIndex}"),

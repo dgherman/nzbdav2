@@ -1,5 +1,5 @@
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
-import type { BandwidthSample } from "~/clients/backend-client.server";
+import type { BandwidthSample } from "~/types/bandwidth";
 
 interface Props {
     data: BandwidthSample[];

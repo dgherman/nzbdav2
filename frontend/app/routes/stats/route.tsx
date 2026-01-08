@@ -1,8 +1,10 @@
 import { useEffect, useState, useCallback } from "react";
 import { useLoaderData, useSearchParams, useRevalidator } from "react-router";
-import { Button, ButtonGroup, Container, Tabs, Tab, Dropdown } from "react-bootstrap";
+import { Button, ButtonGroup, Container, Tabs, Tab } from "react-bootstrap";
 import type { Route } from "./+types/route";
-import { backendClient, type HealthCheckResult, type MissingArticleItem, type MappedFile } from "~/clients/backend-client.server";
+import { backendClient } from "~/clients/backend-client.server";
+import type { HealthCheckResult, MissingArticleItem, MappedFile } from "~/types/stats";
+import type { ConnectionUsageContext } from "~/types/connections";
 import { BandwidthTable } from "./components/BandwidthTable";
 import { ProviderStatus } from "./components/ProviderStatus";
 import { DeletedFilesTable } from "./components/DeletedFilesTable";
@@ -11,8 +13,16 @@ import { MappedFilesTable } from "./components/MappedFilesTable";
 import { LogsConsole } from "./components/LogsConsole";
 import { isAuthenticated } from "~/auth/authentication.server";
 import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
-import type { FileDetails } from "~/types/file-details";
+import type { FileDetails } from "~/types/backend";
 import { useToast } from "~/context/ToastContext";
+import { receiveMessage } from "~/utils/websocket-util";
+
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "System Monitor | NzbDav" },
+    { name: "description", content: "NzbDav System Statistics and Monitoring" },
+  ];
+}
 
 export async function loader({ request }: Route.LoaderArgs) {
     if (!await isAuthenticated(request)) throw new Response("Unauthorized", { status: 401 });
@@ -76,7 +86,6 @@ export async function action({ request }: Route.ActionArgs) {
     } else if (action === "trigger-repair") {
         const filePaths: string[] = [];
         const davItemIds: string[] = [];
-        // Iterate over formData entries to find all filePaths[] and davItemIds[]
         for (const [key, value] of formData.entries()) {
             if (key.startsWith("filePaths[") && typeof value === 'string') {
                 filePaths.push(value);
@@ -95,9 +104,10 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function StatsPage({ loaderData }: Route.ComponentProps) {
-    const { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking } = loaderData;
+    const { connections: initialConnections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking } = loaderData;
     const [searchParams, setSearchParams] = useSearchParams();
     const revalidator = useRevalidator();
+    const [connections, setConnections] = useState<Record<number, ConnectionUsageContext[]>>(initialConnections || {});
 
     const [showDetailsModal, setShowDetailsModal] = useState(false);
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
@@ -106,9 +116,60 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
 
     const activeTab = searchParams.get("tab") || "stats";
 
-    // Auto-refresh current stats every 2 seconds
+    const onWebsocketMessage = useCallback((topic: string, message: string) => {
+        if (topic === 'cxs') {
+            const parts = message.split('|');
+            if (parts.length >= 9) {
+                const providerIndex = parseInt(parts[0]);
+                const connsJson = parts[8];
+                try {
+                    const rawConns = JSON.parse(connsJson) as any[];
+                    const transformedConns = rawConns.map(c => ({
+                        usageType: c.t,
+                        details: c.d,
+                        jobName: c.d, 
+                        isBackup: c.b,
+                        isSecondary: c.s,
+                        bufferedCount: c.bc
+                    } as ConnectionUsageContext));
+
+                    setConnections(prev => ({
+                        ...prev,
+                        [providerIndex]: transformedConns
+                    }));
+                } catch (e) {
+                    console.error('Failed to parse connections JSON from websocket', e);
+                }
+            }
+        }
+    }, []);
+
     useEffect(() => {
-        if (activeTab === 'logs') return;
+        if (activeTab !== 'stats') return;
+        
+        let ws: WebSocket;
+        let disposed = false;
+        const topicSubscriptions = { 'cxs': 'state' };
+
+        function connect() {
+            ws = new WebSocket(window.location.origin.replace(/^http/, 'ws'));
+            ws.onmessage = receiveMessage(onWebsocketMessage);
+            ws.onopen = () => { ws.send(JSON.stringify(topicSubscriptions)); }
+            ws.onclose = () => { !disposed && setTimeout(() => connect(), 1000); };
+            ws.onerror = () => { ws.close() };
+            return () => { disposed = true; ws.close(); }
+        }
+
+        const cleanup = connect();
+        return () => cleanup();
+    }, [onWebsocketMessage, activeTab]);
+
+    useEffect(() => {
+        if (initialConnections) setConnections(initialConnections);
+    }, [initialConnections]);
+
+    useEffect(() => {
+        if (activeTab !== 'stats') return;
         const timer = setInterval(() => {
             if (document.visibilityState === "visible") {
                 revalidator.revalidate();
@@ -128,9 +189,9 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
         setSearchParams(prev => {
             if (k) prev.set("tab", k);
             else prev.delete("tab");
-            prev.delete("page"); // Reset page when switching tabs
-            prev.delete("search"); // Reset search when switching tabs
-            prev.delete("blocking"); // Reset blocking filter when switching tabs
+            prev.delete("page");
+            prev.delete("search");
+            prev.delete("blocking");
             return prev;
         });
     };
@@ -167,7 +228,6 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
             });
 
             if (response.ok) {
-                // Refresh the file details to show updated (empty) stats
                 setSelectedFileDetails(prev => prev ? { ...prev, providerStats: [] } : null);
                 addToast('Provider statistics for this file have been reset successfully.', "success", "Success");
             } else {
@@ -311,6 +371,3 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
         </Container>
     );
 }
-
-
-

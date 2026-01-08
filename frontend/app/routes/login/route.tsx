@@ -5,6 +5,13 @@ import { isAuthenticated, login } from "~/auth/authentication.server";
 import { Form, redirect, useNavigation } from "react-router";
 import { backendClient } from "~/clients/backend-client.server";
 
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "Login | NzbDav" },
+    { name: "description", content: "Login to NzbDav" },
+  ];
+}
+
 type LoginPageData = {
     loginError: string
 }

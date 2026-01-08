@@ -1,5 +1,5 @@
 import { Table } from "react-bootstrap";
-import type { BandwidthSample, ProviderBandwidthSnapshot } from "~/clients/backend-client.server";
+import type { BandwidthSample, ProviderBandwidthSnapshot } from "~/types/bandwidth";
 
 interface Props {
     data: BandwidthSample[];

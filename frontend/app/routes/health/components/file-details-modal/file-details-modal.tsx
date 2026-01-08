@@ -1,6 +1,5 @@
 import { Modal, Table, Badge, Spinner, OverlayTrigger, Tooltip } from "react-bootstrap";
-import type { FileDetails } from "~/types/file-details";
-import { HealthResult, RepairAction } from "~/types/file-details";
+import type { FileDetails } from "~/types/backend";
 import styles from "./file-details-modal.module.css";
 
 export type FileDetailsModalProps = {
@@ -46,6 +45,16 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                                     <tr>
                                         <td className={styles.labelCell}>Path</td>
                                         <td className={styles.valueCell}><small>{fileDetails.path}</small></td>
+                                    </tr>
+                                    <tr>
+                                        <td className={styles.labelCell}>Mapped Path</td>
+                                        <td className={styles.valueCell}>
+                                            {fileDetails.mappedPath ? (
+                                                <small className="text-info">{fileDetails.mappedPath}</small>
+                                            ) : (
+                                                <span className="text-muted small fst-italic">Not mapped</span>
+                                            )}
+                                        </td>
                                     </tr>
                                     <tr>
                                         <td className={styles.labelCell}>Downloads</td>
@@ -203,8 +212,8 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                                             <tr>
                                                 <td className={styles.labelCell}>Latest Result</td>
                                                 <td className={styles.valueCell}>
-                                                    <Badge bg={fileDetails.latestHealthCheckResult.result === HealthResult.Healthy ? "success" : "danger"}>
-                                                        {fileDetails.latestHealthCheckResult.result === HealthResult.Healthy ? "Healthy" : "Unhealthy"}
+                                                    <Badge bg={fileDetails.latestHealthCheckResult.result === 0 ? "success" : "danger"}>
+                                                        {fileDetails.latestHealthCheckResult.result === 0 ? "Healthy" : "Unhealthy"}
                                                     </Badge>
                                                 </td>
                                             </tr>
@@ -454,22 +463,22 @@ function getSuccessRateColor(rate: number): string {
     return 'danger';
 }
 
-function getRepairStatusColor(status: RepairAction): string {
+function getRepairStatusColor(status: number): string {
     switch (status) {
-        case RepairAction.None: return 'secondary';
-        case RepairAction.Repaired: return 'success';
-        case RepairAction.Deleted: return 'danger';
-        case RepairAction.ActionNeeded: return 'warning';
+        case 0: return 'secondary'; // None
+        case 1: return 'success';   // Repaired
+        case 2: return 'danger';    // Deleted
+        case 3: return 'warning';   // ActionNeeded
         default: return 'secondary';
     }
 }
 
-function getRepairStatusText(status: RepairAction): string {
+function getRepairStatusText(status: number): string {
     switch (status) {
-        case RepairAction.None: return 'None';
-        case RepairAction.Repaired: return 'Repaired';
-        case RepairAction.Deleted: return 'Deleted';
-        case RepairAction.ActionNeeded: return 'Action Needed';
+        case 0: return 'None';
+        case 1: return 'Repaired';
+        case 2: return 'Deleted';
+        case 3: return 'Action Needed';
         default: return 'Unknown';
     }
 }

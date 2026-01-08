@@ -8,6 +8,7 @@ public class ConnectionUsageDetails
     public bool IsBackup { get; set; }
     public bool IsSecondary { get; set; }
     public bool IsImported { get; set; }
+    public int? BufferedCount { get; set; }
 
     public override string ToString()
     {

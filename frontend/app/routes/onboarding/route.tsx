@@ -6,6 +6,13 @@ import { backendClient } from "~/clients/backend-client.server";
 import { Form, redirect, useNavigation } from "react-router";
 import { isAuthenticated, setSessionUser } from "~/auth/authentication.server";
 
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "Onboarding | NzbDav" },
+    { name: "description", content: "NzbDav System Onboarding" },
+  ];
+}
+
 type OnboardingPageData = {
     error: string
 }

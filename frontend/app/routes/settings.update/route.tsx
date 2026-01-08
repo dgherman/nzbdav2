@@ -1,5 +1,6 @@
 import type { Route } from "./+types/route";
-import { backendClient, type ConfigItem } from "~/clients/backend-client.server";
+import { backendClient } from "~/clients/backend-client.server";
+import type { ConfigItem } from "~/types/backend";
 import { redirect } from "react-router";
 import { isAuthenticated } from "~/auth/authentication.server";
 

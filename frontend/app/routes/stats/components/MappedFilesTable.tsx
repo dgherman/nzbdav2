@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { Table, Button, Form as BootstrapForm, Pagination, OverlayTrigger, Tooltip } from "react-bootstrap";
 import { Form, useSearchParams } from "react-router";
-import type { MappedFile } from "~/clients/backend-client.server";
+import type { MappedFile } from "~/types/stats";
 
 interface Props {
     items: MappedFile[];

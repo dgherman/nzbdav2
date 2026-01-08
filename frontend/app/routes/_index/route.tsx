@@ -4,6 +4,13 @@ import { backendClient } from "~/clients/backend-client.server";
 import { Container, Row, Col, Card } from "react-bootstrap";
 import { Activity, ShieldCheck, ShieldAlert, FileSearch, VideoOff, HardDrive } from "lucide-react";
 
+export function meta({}: Route.MetaArgs) {
+  return [
+    { title: "Dashboard | NzbDav" },
+    { name: "description", content: "NzbDav System Dashboard" },
+  ];
+}
+
 export async function loader({ request }: Route.LoaderArgs) {
     const summary = await backendClient.getDashboardSummary();
     return { summary };

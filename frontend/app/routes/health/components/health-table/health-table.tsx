@@ -1,5 +1,5 @@
 import { Table, Badge, Pagination, Form, InputGroup } from "react-bootstrap";
-import type { HealthCheckQueueItem } from "~/clients/backend-client.server";
+import type { HealthCheckQueueItem } from "~/types/backend";
 import styles from "./health-table.module.css";
 import { Truncate } from "~/routes/queue/components/truncate/truncate";
 import { ProgressBadge } from "~/routes/queue/components/status-badge/status-badge";

@@ -1,5 +1,5 @@
 import styles from "./health-stats.module.css";
-import type { HealthCheckStats } from "~/clients/backend-client.server";
+import type { HealthCheckStats } from "~/types/backend";
 
 export type HealthStatsProps = {
     stats: HealthCheckStats[];
