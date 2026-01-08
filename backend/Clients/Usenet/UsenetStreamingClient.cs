@@ -237,6 +237,20 @@ public class UsenetStreamingClient
         return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections, usageContext, useBufferedStreaming, actualBufferSize, segmentSizes);
     }
 
+    public NzbFileStream GetFastFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null)
+    {
+        // Create uninitialized segment sizes so NzbFileStream trusts the fileSize
+        var segmentSizes = new long[segmentIds.Length];
+        if (segmentIds.Length > 0)
+        {
+            var avgSize = fileSize / segmentIds.Length;
+            Array.Fill(segmentSizes, avgSize);
+            segmentSizes[^1] = fileSize - (avgSize * (segmentIds.Length - 1));
+        }
+        
+        return GetFileStream(segmentIds, fileSize, concurrentConnections, usageContext, useBufferedStreaming: false, segmentSizes: segmentSizes);
+    }
+
     public Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders, CancellationToken ct)
     {
         return _client.GetSegmentStreamAsync(segmentId, includeHeaders, ct);

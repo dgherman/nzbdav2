@@ -63,7 +63,8 @@ public static class GetFileInfosStep
             IsRar = file.HasRar4Magic() || file.HasRar5Magic(),
             IsSevenZip = file.HasSevenZipMagic(),
             MagicOffset = file.MagicOffset,
-            MissingFirstSegment = file.MissingFirstSegment
+            MissingFirstSegment = file.MissingFirstSegment,
+            SegmentSizes = file.SmartAnalysisSegmentSizes
         };
     }
 
@@ -108,5 +109,6 @@ public static class GetFileInfosStep
         public bool IsSevenZip { get; init; }
         public int MagicOffset { get; init; } = -1;
         public required bool MissingFirstSegment { get; init; }
+        public long[]? SegmentSizes { get; init; }
     }
 }

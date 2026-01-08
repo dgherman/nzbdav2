@@ -24,32 +24,39 @@ public class RarProcessor(
     int maxConcurrentConnections = 1
 ) : BaseProcessor
 {
+    private readonly GetFileInfosStep.FileInfo _primaryFile = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).First();
+
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
-        Log.Information("[RarProcessor] Starting RAR processing for {Count} parts", fileInfos.Count);
+        Log.Information("[RarProcessor] Starting parallel RAR processing for {Count} parts", fileInfos.Count);
+
+        var sortedInfos = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).ToList();
+        
+        var tasks = sortedInfos
+            .Select(async fileInfo =>
+            {
+                if (fileInfo.MissingFirstSegment)
+                {
+                    Log.Warning("[RarProcessor] Skipping part {FileName} because the first segment is missing.", fileInfo.FileName);
+                    return new List<StoredFileSegment>();
+                }
+
+                try
+                {
+                    return await ProcessPartAsync(fileInfo).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "[RarProcessor] Failed to process part {FileName}: {Message}", fileInfo.FileName, ex.Message);
+                    return new List<StoredFileSegment>();
+                }
+            })
+            .WithConcurrencyAsync(Math.Max(1, maxConcurrentConnections / 2)); // Use moderate concurrency for the parallel parts
 
         var allSegments = new List<StoredFileSegment>();
-
-        foreach (var fileInfo in fileInfos.OrderBy(f => GetPartNumber(f.FileName)))
+        await foreach (var segments in tasks.ConfigureAwait(false))
         {
-            if (fileInfo.MissingFirstSegment)
-            {
-                Log.Warning("[RarProcessor] Skipping part {FileName} because the first segment is missing.", fileInfo.FileName);
-                continue;
-            }
-
-            Log.Debug("[RarProcessor] Reading headers for part {FileName}", fileInfo.FileName);
-            
-            try 
-            {
-                var segments = await ProcessPartAsync(fileInfo);
-                allSegments.AddRange(segments);
-            }
-            catch (Exception ex)
-            {
-                Log.Warning(ex, "[RarProcessor] Failed to process part {FileName}: {Message}", fileInfo.FileName, ex.Message);
-                // Continue to next part, maybe we can still get some files
-            }
+            allSegments.AddRange(segments);
         }
 
         if (allSegments.Count == 0)
@@ -66,7 +73,8 @@ public class RarProcessor(
 
     private async Task<List<StoredFileSegment>> ProcessPartAsync(GetFileInfosStep.FileInfo fileInfo)
     {
-        await using var stream = await GetNzbFileStream(fileInfo).ConfigureAwait(false);
+        // Use FAST stream that trusts the file size to avoid slow segment re-scans
+        await using var stream = await GetFastNzbFileStream(fileInfo).ConfigureAwait(false);
         
         if (fileInfo.MagicOffset > 0)
         {
@@ -125,14 +133,30 @@ public class RarProcessor(
         return 0;
     }
 
-    private async Task<NzbFileStream> GetNzbFileStream(GetFileInfosStep.FileInfo fileInfo)
+    private async Task<NzbFileStream> GetFastNzbFileStream(GetFileInfosStep.FileInfo fileInfo)
     {
-        var filesize = fileInfo.FileSize ?? await usenet.GetFileSizeAsync(fileInfo.NzbFile, ct).ConfigureAwait(false);
-        var concurrency = Math.Min(maxConcurrentConnections, 10);
+        // For RAR processing, we trust the Par2/NZB size if available
+        var segmentSizes = fileInfo.SegmentSizes;
+        var filesize = fileInfo.FileSize;
+
+        if (segmentSizes != null && filesize == null)
+        {
+            filesize = segmentSizes.Sum();
+        }
+
+        if (filesize == null)
+        {
+            filesize = await usenet.GetFileSizeAsync(fileInfo.NzbFile, ct).ConfigureAwait(false);
+        }
+        
+        // Header reading only needs 1 connection usually
         var usageContext = ct.GetContext<ConnectionUsageContext>();
         
-        var segmentSizes = fileInfo.NzbFile.Segments.Select(x => x.Size).ToArray();
-        return usenet.GetFileStream(fileInfo.NzbFile.GetSegmentIds(), filesize, concurrency, usageContext, segmentSizes: segmentSizes);
+        // If we have exact segment sizes, use the standard stream (it will be fast)
+        // otherwise use the fast stream that trusts the total size
+        return segmentSizes != null 
+            ? usenet.GetFileStream(fileInfo.NzbFile.GetSegmentIds(), filesize.Value, 1, usageContext, useBufferedStreaming: false, segmentSizes: segmentSizes)
+            : usenet.GetFastFileStream(fileInfo.NzbFile.GetSegmentIds(), filesize.Value, 1, usageContext);
     }
 
     public new class Result : BaseProcessor.Result

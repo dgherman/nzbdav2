@@ -156,6 +156,22 @@ public static class FetchFirstSegmentsStep
                 ? buffer.AsSpan(0, totalRead).ToArray()
                 : buffer;
 
+            // Perform smart analysis to get total file size accurately and quickly
+            // This avoids slow scans later in RarProcessor
+            long[]? smartSizes = null;
+            if (nzbFile.Segments.Count > 1)
+            {
+                try {
+                    smartSizes = await client.AnalyzeNzbAsync(nzbFile.GetSegmentIds(), 1, null, timeoutCts.Token, useSmartAnalysis: true).ConfigureAwait(false);
+                } catch (Exception ex) {
+                    logger.Warning("Smart analysis failed for {FileName}: {Message}", nzbFile.FileName, ex.Message);
+                }
+            }
+            else if (nzbFile.Segments.Count == 1)
+            {
+                smartSizes = new[] { stream.Header!.PartSize };
+            }
+
             var elapsed = (DateTimeOffset.UtcNow - startTime).TotalSeconds;
             logger.Debug("Completed {FileName} in {Elapsed:F2}s (read {Bytes} bytes)",
                 nzbFile.FileName, elapsed, totalRead);
@@ -167,7 +183,8 @@ public static class FetchFirstSegmentsStep
                 First16KB = first16KB,
                 Header = stream.Header,
                 MissingFirstSegment = false,
-                ReleaseDate = stream.ArticleHeaders!.Date
+                ReleaseDate = stream.ArticleHeaders!.Date,
+                SmartAnalysisSegmentSizes = smartSizes
             };
         }
         catch (OperationCanceledException ex) when (cancellationToken.IsCancellationRequested)
@@ -220,6 +237,7 @@ public static class FetchFirstSegmentsStep
         public required byte[]? First16KB { get; init; }
         public required bool MissingFirstSegment { get; init; }
         public required DateTimeOffset ReleaseDate { get; init; }
+        public long[]? SmartAnalysisSegmentSizes { get; set; }
 
         public int MagicOffset { get; private set; } = -1;
 
