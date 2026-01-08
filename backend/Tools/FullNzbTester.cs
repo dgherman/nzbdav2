@@ -219,6 +219,7 @@ public class FullNzbTester
                         Console.WriteLine("--- STEP 6: SCRUBBING/SEEKING SIMULATION ---");
                         var percentages = new[] { 0.1, 0.5, 0.9, 0.2 };
                         var buffer = new byte[1024];
+                        var seekTimes = new System.Collections.Generic.List<(double Pct, long Ms)>();
                         var totalScrubWatch = Stopwatch.StartNew();
 
                         foreach (var pct in percentages)
@@ -234,6 +235,10 @@ public class FullNzbTester
                             var read = await stream.ReadAsync(buffer, 0, buffer.Length);
                             readWatch.Stop();
                             
+                            // We count "Seek Time" as the full latency users perceive (Seek + first Read)
+                            var totalLatency = seekWatch.ElapsedMilliseconds + readWatch.ElapsedMilliseconds;
+                            seekTimes.Add((pct, totalLatency));
+                            
                             Console.WriteLine($"  - Seek Time: {seekWatch.ElapsedMilliseconds}ms");
                             Console.WriteLine($"  - Read Time: {readWatch.ElapsedMilliseconds}ms");
                             Console.WriteLine($"  - Read Bytes: {read}");
@@ -247,6 +252,7 @@ public class FullNzbTester
                         // Sequential Throughput Benchmark
                         Console.WriteLine();
                         Console.WriteLine("--- STEP 7: SEQUENTIAL THROUGHPUT BENCHMARK ---");
+                        double sequentialSpeed = 0;
                         try
                         {
                             using var throughputStream = new DavMultipartFileStream(
@@ -274,14 +280,34 @@ public class FullNzbTester
                             }
                             
                             benchWatch.Stop();
-                            double speedMbps = (totalBenchRead / 1024.0 / 1024.0) / benchWatch.Elapsed.TotalSeconds;
+                            sequentialSpeed = (totalBenchRead / 1024.0 / 1024.0) / benchWatch.Elapsed.TotalSeconds;
                             Console.WriteLine($"Read {totalBenchRead / 1024.0 / 1024.0:F2} MB in {benchWatch.Elapsed.TotalSeconds:F2}s");
-                            Console.WriteLine($"Sequential Speed: {speedMbps:F2} MB/s");
+                            Console.WriteLine($"Sequential Speed: {sequentialSpeed:F2} MB/s");
                         }
                         catch (Exception ex)
                         {
                             Console.WriteLine($"Benchmark failed: {ex.Message}");
                         }
+
+                        // Summary Table
+                        Console.WriteLine();
+                        Console.WriteLine("═══════════════════════════════════════════════════════════════");
+                        Console.WriteLine("  FULL NZB TESTER RESULTS SUMMARY");
+                        Console.WriteLine("═══════════════════════════════════════════════════════════════");
+                        Console.WriteLine($"  File Processed:       {Path.GetFileName(nzbPath)}");
+                        Console.WriteLine($"  Total Files:          {nzbFiles.Count}");
+                        Console.WriteLine("───────────────────────────────────────────────────────────────");
+                        Console.WriteLine("  SCRUBBING LATENCY (Seek + First Read):");
+                        foreach (var (pct, ms) in seekTimes)
+                        {
+                            var color = ms < 1000 ? "" : (ms < 5000 ? "(!)" : "(!!)");
+                            Console.WriteLine($"    Seek to {pct,3:P0}:         {ms,6} ms {color}"); 
+                        }
+                        Console.WriteLine($"    Total Scrub Time:   {totalScrubWatch.Elapsed.TotalSeconds,6:F2} s");
+                        Console.WriteLine("───────────────────────────────────────────────────────────────");
+                        Console.WriteLine("  SEQUENTIAL THROUGHPUT:");
+                        Console.WriteLine($"    Speed:              {sequentialSpeed,6:F2} MB/s");
+                        Console.WriteLine("═══════════════════════════════════════════════════════════════");
                     }
                     catch (Exception ex)
                     {
