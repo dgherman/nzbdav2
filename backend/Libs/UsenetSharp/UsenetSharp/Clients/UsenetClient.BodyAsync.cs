@@ -99,7 +99,7 @@ public partial class UsenetClient
 
             var shouldWrite = true;
             var lineCount = 0;
-            const int FlushBatchSize = 32; // Flush every 32 lines for better throughput
+            const int FlushBatchSize = 128; // Increased for better throughput
 
             // Read lines until we encounter the termination sequence (single dot on a line)
             while (!cancellationToken.IsCancellationRequested)
@@ -119,7 +119,7 @@ public partial class UsenetClient
                 }
 
                 // Check for NNTP termination sequence (single dot)
-                if (line == ".")
+                if (line.Length == 1 && line[0] == '.')
                 {
                     break;
                 }
@@ -127,24 +127,25 @@ public partial class UsenetClient
                 if (!shouldWrite) continue;
 
                 // NNTP escaping: Lines starting with ".." should have the first dot removed
-                // Use ReadOnlySpan to avoid string allocation from Substring
                 ReadOnlySpan<char> lineSpan = line.AsSpan();
                 if (lineSpan.Length >= 2 && lineSpan[0] == '.' && lineSpan[1] == '.')
                 {
                     lineSpan = lineSpan.Slice(1);
                 }
 
-                // Write the line to the pipe using Latin1 to preserve byte values 0-255
-                var byteCount = Encoding.Latin1.GetByteCount(lineSpan) + 2; // +2 for CRLF
-                var span = writer.GetSpan(byteCount);
-                var written = Encoding.Latin1.GetBytes(lineSpan, span);
-                span[written++] = (byte)'\r';
-                span[written++] = (byte)'\n';
-                writer.Advance(written);
+                // Fast write to pipe (direct cast char to byte for Latin1)
+                var span = writer.GetSpan(lineSpan.Length + 2);
+                for (int i = 0; i < lineSpan.Length; i++)
+                {
+                    span[i] = (byte)lineSpan[i];
+                }
+                span[lineSpan.Length] = (byte)'\r';
+                span[lineSpan.Length + 1] = (byte)'\n';
+                writer.Advance(lineSpan.Length + 2);
 
                 lineCount++;
 
-                // Batch flushes for better performance - flush every N lines instead of every line
+                // Batch flushes for better performance
                 if (lineCount >= FlushBatchSize)
                 {
                     var result = await RunWithTimeoutAsync(writer.FlushAsync, cancellationToken);
@@ -164,8 +165,7 @@ public partial class UsenetClient
         }
         catch (NullReferenceException)
         {
-            // Connection was disposed while reading - treat as graceful shutdown
-            // Don't store in _backgroundException as this is expected during cleanup
+            // Connection was disposed while reading
         }
         catch (Exception e)
         {

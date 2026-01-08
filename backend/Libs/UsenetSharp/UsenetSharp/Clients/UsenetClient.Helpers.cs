@@ -1,5 +1,6 @@
 using UsenetSharp.Concurrency;
 using UsenetSharp.Exceptions;
+using System.Runtime.ExceptionServices;
 
 namespace UsenetSharp.Clients;
 
