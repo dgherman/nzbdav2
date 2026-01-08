@@ -47,6 +47,7 @@ To close the gap to 25MB/s+, NzbDav needs to move away from `StreamReader.ReadLi
 ### 1. Implement Direct Socket Reading (High Impact)
 Instead of `_reader.ReadLineAsync()`, we should access the underlying `NetworkStream` (or `SslStream`) directly.
 *   **Action:** In `UsenetClient`, bypass `StreamReader` for the body. Read raw bytes into a pooled `Memory<byte>`.
+*   **Status:** Initial attempt with `PipeReader` caused segmentation faults and buffer issues with `SslStream`. Reverted to optimized `StreamReader` (64KB buffer) which yielded 11.6 MB/s. Future work should implement a custom raw buffer reader safer than `PipeReader`.
 
 ### 2. Chunk-Based Decoding (High Impact)
 Currently, `UsenetClient` manually parses lines to find the `.` terminator and unescape `..`. This requires inspecting every byte and often copying data.
