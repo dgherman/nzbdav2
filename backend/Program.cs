@@ -93,6 +93,13 @@ class Program
             return;
         }
 
+        // Run test nzb extraction
+        if (args.Contains("--extract-test-nzbs"))
+        {
+            await ExtractTestNzbs.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
         // initialize database
         await using var databaseContext = new DavDatabaseContext();
 
