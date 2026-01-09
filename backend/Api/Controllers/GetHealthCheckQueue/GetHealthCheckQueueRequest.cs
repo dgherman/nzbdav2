@@ -9,6 +9,7 @@ public class GetHealthCheckQueueRequest
     public int PageSize { get; init; } = 20;
     public string? Search { get; init; }
     public bool ShowAll { get; init; } = false;
+    public bool ShowFailed { get; init; } = false;
     public CancellationToken CancellationToken { get; init; }
 
     public GetHealthCheckQueueRequest(HttpContext context)
@@ -17,6 +18,7 @@ public class GetHealthCheckQueueRequest
         var pageSizeParam = context.GetQueryParam("pageSize");
         var searchParam = context.GetQueryParam("search");
         var showAllParam = context.GetQueryParam("showAll");
+        var showFailedParam = context.GetQueryParam("showFailed");
         CancellationToken = context.RequestAborted;
 
         if (pageParam is not null)
@@ -42,6 +44,12 @@ public class GetHealthCheckQueueRequest
         {
             bool.TryParse(showAllParam, out bool showAll);
             ShowAll = showAll;
+        }
+
+        if (showFailedParam is not null)
+        {
+            bool.TryParse(showFailedParam, out bool showFailed);
+            ShowFailed = showFailed;
         }
     }
 }
