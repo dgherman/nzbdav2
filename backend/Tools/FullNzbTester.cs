@@ -88,7 +88,7 @@ public class FullNzbTester
                 .GroupBy(x => FilenameUtil.GetMultipartBaseName(x.FileName))
                 .ToList();
 
-            RarProcessor.Result? finalRarResult = null;
+            var allResults = new System.Collections.Generic.List<RarProcessor.Result>();
 
             foreach (var baseGroup in baseGroups)
             {
@@ -108,7 +108,7 @@ public class FullNzbTester
                     
                     if (result is RarProcessor.Result rarResult)
                     {
-                        finalRarResult = rarResult;
+                        allResults.Add(rarResult);
                         Console.WriteLine($"  RAR Processing Success. Extracted segments: {rarResult.StoredFileSegments.Length}");
                         var filesInArchive = rarResult.StoredFileSegments.GroupBy(s => s.PathWithinArchive);
                         foreach (var archivedFile in filesInArchive)
@@ -152,7 +152,7 @@ public class FullNzbTester
                     Console.WriteLine($"    File size: {fileSize / 1024.0 / 1024.0:F2} MB ({file.NzbFile.GetSegmentIds().Length} segments)");
 
                     // Create a simple single-part file structure
-                    finalRarResult = new RarProcessor.Result
+                    allResults.Add(new RarProcessor.Result
                     {
                         StoredFileSegments = new[]
                         {
@@ -168,8 +168,26 @@ public class FullNzbTester
                                 ReleaseDate = file.ReleaseDate
                             }
                         }
-                    };
+                    });
                 }
+            }
+
+            // Select the largest result for analysis
+            var finalRarResult = allResults
+                .SelectMany(r => r.StoredFileSegments.GroupBy(s => s.PathWithinArchive))
+                .MaxBy(g => g.Sum(s => s.ByteRangeWithinPart.Count))
+                ?.First().NzbFile != null 
+                    ? allResults.FirstOrDefault(r => r.StoredFileSegments.Any(s => s.PathWithinArchive == allResults.SelectMany(x => x.StoredFileSegments).MaxBy(y => y.ByteRangeWithinPart.Count)?.PathWithinArchive))
+                    : null;
+            
+            // Simplified selection: just pick the result containing the largest file
+            var largestFileSegment = allResults
+                .SelectMany(r => r.StoredFileSegments)
+                .MaxBy(s => s.ByteRangeWithinPart.Count);
+                
+            if (largestFileSegment != null)
+            {
+                finalRarResult = allResults.First(r => r.StoredFileSegments.Contains(largestFileSegment));
             }
 
             // Step 5: FFprobe Analysis

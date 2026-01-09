@@ -584,7 +584,17 @@ public class BufferedSegmentStream : Stream
                     // Update usage context while waiting to ensure UI shows we are waiting for next segment
                     UpdateUsageContext();
 
-                    if (!await _bufferChannel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false))
+                    var waitWatch = Stopwatch.StartNew();
+                    var hasData = await _bufferChannel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false);
+                    waitWatch.Stop();
+
+                    if (waitWatch.ElapsedMilliseconds > 50)
+                    {
+                        Log.Warning("[BufferedStream] Starvation: Waited {Duration}ms for next segment (Buffered: {Buffered}, Fetched: {Fetched}, Read: {Read})", 
+                            waitWatch.ElapsedMilliseconds, _bufferedCount, _totalFetchedCount, _totalReadCount);
+                    }
+
+                    if (!hasData)
                     {
                         break; // No more segments
                     }
