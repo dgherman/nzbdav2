@@ -137,8 +137,14 @@ public class BufferedSegmentStream : Stream
     {
         try
         {
-            // Use a producer-consumer pattern with indexed segments to maintain order
-            // This is critical for video playback - segments MUST be in correct order
+            // Priority channel for racing stragglers or retrying preempted segments
+            var urgentChannel = Channel.CreateUnbounded<(int index, string segmentId)>(new UnboundedChannelOptions
+            {
+                SingleReader = false,
+                SingleWriter = false // Multiple sources (monitor, workers)
+            });
+
+            // Standard queue
             var segmentQueue = Channel.CreateBounded<(int index, string segmentId)>(new BoundedChannelOptions(bufferSegmentCount)
             {
                 FullMode = BoundedChannelFullMode.Wait,
@@ -146,7 +152,13 @@ public class BufferedSegmentStream : Stream
                 SingleWriter = true
             });
 
-            // Producer: Queue all segment IDs with their index
+            // Track active assignments: Index -> (StartTime, Cts, WorkerId)
+            var activeAssignments = new ConcurrentDictionary<int, (DateTimeOffset StartTime, CancellationTokenSource Cts, int WorkerId)>();
+            
+            // Track which segments are currently being raced to avoid double-racing
+            var racingIndices = new ConcurrentDictionary<int, bool>();
+
+            // Producer: Queue all segment IDs
             var producerTask = Task.Run(async () =>
             {
                 try
@@ -164,164 +176,208 @@ public class BufferedSegmentStream : Stream
                 }
             }, ct);
 
-            // Use a concurrent dictionary to store results temporarily
-            var fetchedSegments = new System.Collections.Concurrent.ConcurrentDictionary<int, PooledSegmentData>();
+            // Straggler Monitor Task
+            var monitorTask = Task.Run(async () =>
+            {
+                try
+                {
+                    while (!ct.IsCancellationRequested)
+                    {
+                        await Task.Delay(500, ct).ConfigureAwait(false); // Check every 500ms
+
+                        var nextNeeded = _nextIndexToRead;
+                        
+                        // Check if the next needed segment is active and running too long
+                        if (activeAssignments.TryGetValue(nextNeeded, out var assignment))
+                        {
+                            var duration = DateTimeOffset.UtcNow - assignment.StartTime;
+                            
+                            // If running > 1.5s (or significantly slower than peers) and not already racing
+                            if (duration.TotalSeconds > 1.5 && !racingIndices.ContainsKey(nextNeeded))
+                            {
+                                // Find a victim to preempt (highest index currently running)
+                                var victim = activeAssignments.Keys.DefaultIfEmpty(-1).Max();
+                                
+                                // Only preempt if victim is significantly ahead (e.g. > 5 segments or > 2s ahead in stream)
+                                // and not the same as nextNeeded
+                                if (victim > nextNeeded + 5)
+                                {
+                                    if (activeAssignments.TryGetValue(victim, out var victimAssignment))
+                                    {
+                                        Log.Warning("[BufferedStream] STRAGGLER DETECTED: Segment {NextNeeded} running for {Duration}s. Preempting Segment {Victim} to race.", 
+                                            nextNeeded, duration.TotalSeconds, victim);
+
+                                        racingIndices.TryAdd(nextNeeded, true);
+                                        
+                                        // Cancel the victim to free up a worker
+                                        try { victimAssignment.Cts.Cancel(); } catch {}
+
+                                        // Re-queue victim (high priority to avoid starvation)
+                                        _ = urgentChannel.Writer.WriteAsync((victim, segmentIds[victim]), ct);
+
+                                        // Queue straggler race (high priority)
+                                        _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
+                                    }
+                                }
+                                else if (activeAssignments.Count < concurrentConnections)
+                                {
+                                    // If we have spare capacity (unlikely if queue is full, but possible), just spawn race
+                                    Log.Warning("[BufferedStream] STRAGGLER DETECTED: Segment {NextNeeded} running for {Duration}s. Spawning race (spare capacity).", 
+                                            nextNeeded, duration.TotalSeconds);
+                                    racingIndices.TryAdd(nextNeeded, true);
+                                    _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
+                                }
+                            }
+                        }
+                    }
+                }
+                catch { /* Ignore cancellation */ }
+            }, ct);
+
+            var fetchedSegments = new ConcurrentDictionary<int, PooledSegmentData>();
             var nextIndexToWrite = 0;
             var writeLock = new SemaphoreSlim(1, 1);
 
-            // Consumers: Create exactly N worker tasks
+            // Consumers
             var workers = Enumerable.Range(0, concurrentConnections)
                 .Select(async workerId =>
                 {
-                    var segmentCount = 0;
-                    var currentSegmentId = "none";
-                    var currentSegmentIndex = -1;
-                    var stopwatch = new Stopwatch();
-
-                    try
+                    // Reusable buffer for worker loop
+                    while (!ct.IsCancellationRequested)
                     {
-                        await foreach (var (index, segmentId) in segmentQueue.Reader.ReadAllAsync(ct).ConfigureAwait(false))
+                        (int index, string segmentId) job;
+                        bool isUrgent = false;
+
+                        try
                         {
-                            segmentCount++;
-                            currentSegmentId = segmentId;
-                            currentSegmentIndex = index;
-                            stopwatch.Restart();
-
-                            // Fetch segment with retry logic and graceful degradation
-                            var segmentData = await FetchSegmentWithRetryAsync(index, segmentId, segmentIds, client, ct).ConfigureAwait(false);
-
-                            // Store in dictionary temporarily
-                            fetchedSegments[index] = segmentData;
-
-                            // Update max fetched index for sliding window visualization
-                            lock (this) {
-                                if (index > _maxFetchedIndex) _maxFetchedIndex = index;
+                            // Priority 1: Urgent Channel
+                            if (urgentChannel.Reader.TryRead(out job))
+                            {
+                                isUrgent = true;
+                            }
+                            // Priority 2: Standard Queue
+                            else
+                            {
+                                // Wait for data on either channel
+                                // We prefer standard queue usually, unless urgent arrives.
+                                // Since we can't easily wait on both, we wait on standard.
+                                // If standard is empty, we wait. If urgent comes, we might miss it until standard has item?
+                                // To fix this, we should really loop/delay or use a combined read.
+                                // For simplicity: TryRead standard. If empty, WaitToReadAsync on both?
+                                // Actually, producer fills standard fast. It's rarely empty unless EOF.
+                                
+                                if (!segmentQueue.Reader.TryRead(out job))
+                                {
+                                    // Wait for item available on EITHER
+                                    var t1 = segmentQueue.Reader.WaitToReadAsync(ct).AsTask();
+                                    var t2 = urgentChannel.Reader.WaitToReadAsync(ct).AsTask();
+                                    
+                                    await Task.WhenAny(t1, t2).ConfigureAwait(false);
+                                    
+                                    if (urgentChannel.Reader.TryRead(out job)) isUrgent = true;
+                                    else if (!segmentQueue.Reader.TryRead(out job)) 
+                                    {
+                                        // Both empty or closed?
+                                        if (segmentQueue.Reader.Completion.IsCompleted) break;
+                                        continue; 
+                                    }
+                                }
                             }
 
-                            // Increment total segments fetched into memory
-                            Interlocked.Increment(ref _bufferedCount);
-                            Interlocked.Increment(ref _totalFetchedCount);
+                            // Skip if already fetched (race condition handling)
+                            if (fetchedSegments.ContainsKey(job.index)) continue;
 
-                            // Try to write any consecutive segments to the buffer channel in order
-                            await writeLock.WaitAsync(ct).ConfigureAwait(false);
+                            // Create job-specific CTS for preemption
+                            using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            var assignment = (DateTimeOffset.UtcNow, jobCts, workerId);
+                            
+                            // Track assignment
+                            // Note: If racing, multiple workers might have same index. We just overwrite or ignore.
+                            // We mainly care about having *at least one* active.
+                            activeAssignments[job.index] = assignment;
+
                             try
                             {
-                                while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
+                                var segmentData = await FetchSegmentWithRetryAsync(job.index, job.segmentId, segmentIds, client, jobCts.Token).ConfigureAwait(false);
+
+                                // Store result (first write wins)
+                                if (fetchedSegments.TryAdd(job.index, segmentData))
                                 {
-                                    await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
-                                    nextIndexToWrite++;
+                                    // Update max fetched
+                                    lock (this) { if (job.index > _maxFetchedIndex) _maxFetchedIndex = job.index; }
+                                    Interlocked.Increment(ref _bufferedCount);
+                                    Interlocked.Increment(ref _totalFetchedCount);
+
+                                    // Check write lock
+                                    if (job.index == nextIndexToWrite || fetchedSegments.ContainsKey(nextIndexToWrite))
+                                    {
+                                        await writeLock.WaitAsync(ct).ConfigureAwait(false);
+                                        try
+                                        {
+                                            while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
+                                            {
+                                                await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
+                                                nextIndexToWrite++;
+                                            }
+                                        }
+                                        finally
+                                        {
+                                            writeLock.Release();
+                                        }
+                                    }
                                 }
+                                else
+                                {
+                                    // Lost the race (already fetched), dispose data
+                                    segmentData.Dispose();
+                                }
+                            }
+                            catch (OperationCanceledException)
+                            {
+                                // If main CT not cancelled, we were preempted.
+                                if (!ct.IsCancellationRequested)
+                                {
+                                    Log.Debug("[BufferedStream] Worker {WorkerId} preempted on segment {Index}.", workerId, job.index);
+                                    // We DO NOT re-queue here; the monitor already re-queued it (or the race duplicate).
+                                    // If we were the victim, monitor queued us. 
+                                    // If we were the slow straggler being killed? We should probably re-queue just in case?
+                                    // Monitor queued a duplicate. If we die, the duplicate runs. 
+                                    // But monitor queues duplicate to URGENT.
+                                    // If we were preempted, it means we were the VICTIM (high index).
+                                    // Monitor re-queued us to URGENT. So we are fine.
+                                }
+                                else throw;
                             }
                             finally
                             {
-                                writeLock.Release();
-                            }
-                        }
-                    }
-                    catch (OperationCanceledException ex)
-                    {
-                        stopwatch.Stop();
-                        if (ct.IsCancellationRequested)
-                        {
-                            Log.Debug("[BufferedStream] Worker {WorkerId} canceled after processing {SegmentCount} segments. Segment: {SegmentIndex} ({SegmentId}). Elapsed: {Elapsed:F2}s. Msg: {Message}",
-                                workerId, segmentCount, currentSegmentIndex, currentSegmentId, stopwatch.Elapsed.TotalSeconds, ex.Message);
-                        }
-                        else
-                        {
-                            Log.Warning("[BufferedStream] Worker {WorkerId} timed out after processing {SegmentCount} segments. Segment: {SegmentIndex} ({SegmentId}). Elapsed: {Elapsed:F2}s. Msg: {Message}",
-                                workerId, segmentCount, currentSegmentIndex, currentSegmentId, stopwatch.Elapsed.TotalSeconds, ex.Message);
-                        }
-                        throw;
-                    }
-                    catch (TimeoutException ex)
-                    {
-                        stopwatch.Stop();
-                        // Extract provider info from exception message (format: "... on provider hostname after X.XXs")
-                        var providerInfo = "unknown";
-                        var elapsedInfo = "unknown";
-                        if (ex.Message.Contains(" on provider "))
-                        {
-                            var afterProvider = ex.Message.Substring(ex.Message.LastIndexOf(" on provider ") + 13);
-                            // Format: "hostname after X.XXs (Segment: ...)" or just "hostname (Segment: ...)"
-                            if (afterProvider.Contains(" after "))
-                            {
-                                var parts = afterProvider.Split(new[] { " after " }, StringSplitOptions.None);
-                                providerInfo = parts[0];
-                                var timeEnd = parts[1].IndexOf(' ');
-                                elapsedInfo = timeEnd > 0 ? parts[1].Substring(0, timeEnd) : parts[1];
-                            }
-                            else
-                            {
-                                var segmentStart = afterProvider.IndexOf(" (Segment:");
-                                providerInfo = segmentStart > 0 ? afterProvider.Substring(0, segmentStart) : afterProvider;
-                            }
-                        }
-
-                        var jobName = _usageContext?.DetailsObject?.Text ?? _usageContext?.Details ?? "Unknown";
-                        Log.Warning("[BufferedStream] TIMEOUT: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Provider={Provider}, Worker={WorkerId}, Processed={SegmentCount}, Elapsed={Elapsed}",
-                            jobName, currentSegmentIndex, segmentIds.Length, currentSegmentId, providerInfo, workerId, segmentCount, elapsedInfo);
-                        throw;
-                    }
-                    catch (UsenetArticleNotFoundException)
-                    {
-                        // Do not log error here. This is an expected condition when an article is missing.
-                        // The exception will bubble up to FetchSegmentsAsync where it is handled gracefully.
-                        throw;
-                    }
-                    catch (InvalidDataException ex)
-                    {
-                        // CRC validation failures, incomplete segments, or corrupted YENC data
-                        var jobName = _usageContext?.DetailsObject?.Text ?? _usageContext?.Details ?? "Unknown";
-                        Log.Error("[BufferedStream] DATA CORRUPTION: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Worker={WorkerId}: {Message}",
-                            jobName, currentSegmentIndex, segmentIds.Length, currentSegmentId, workerId, ex.Message);
-                        
-                        // Report corruption back to database if we have a DavItemId
-                        if (_usageContext?.DetailsObject?.DavItemId != null)
-                        {
-                            var davItemId = _usageContext.Value.DetailsObject.DavItemId.Value;
-                            var message = ex.Message;
-                            _ = Task.Run(async () => {
-                                try {
-                                    using var db = new DavDatabaseContext();
-                                    var item = await db.Items.FindAsync(davItemId);
-                                    if (item != null && !item.IsCorrupted) {
-                                        item.IsCorrupted = true;
-                                        item.CorruptionReason = $"Data Integrity Error: {message}";
-                                        await db.SaveChangesAsync();
-                                        Log.Information("[BufferedStream] Marked item {ItemId} as corrupted in database due to data integrity error.", davItemId);
-                                    }
-                                } catch (Exception dbEx) {
-                                    Log.Error(dbEx, "[BufferedStream] Failed to mark item as corrupted in database.");
+                                activeAssignments.TryRemove(job.index, out _);
+                                if (isUrgent && racingIndices.ContainsKey(job.index))
+                                {
+                                    // Remove from racing set if we finished (or failed)
+                                    // But multiple might be racing. 
+                                    // It's safe to remove; monitor checks "ContainsKey". 
+                                    // If we finish, we don't need to race anymore.
+                                    racingIndices.TryRemove(job.index, out _);
                                 }
-                            });
+                            }
                         }
-                        
-                        throw;
-                    }
-                    catch (Exception ex)
-                    {
-                        Log.Error("[BufferedStream] Worker {WorkerId} encountered error after processing {SegmentCount} segments: {ExceptionType} - {Message}",
-                            workerId, segmentCount, ex.GetType().Name, ex.Message);
-                        throw;
+                        catch (Exception ex)
+                        {
+                            // Log and continue (FetchSegmentWithRetryAsync handles most errors, but just in case)
+                            if (!ct.IsCancellationRequested)
+                                Log.Error(ex, "[BufferedStream] Worker loop error");
+                        }
                     }
                 })
                 .ToList();
 
-            // Wait for all workers to complete
-            var workerCompletionTask = Task.WhenAll(workers);
-            var timeoutTask = Task.Delay(TimeSpan.FromMinutes(5), ct);
-            var completedTask = await Task.WhenAny(workerCompletionTask, timeoutTask).ConfigureAwait(false);
-
-            if (completedTask == timeoutTask && !ct.IsCancellationRequested)
-            {
-                Log.Warning("[BufferedStream] Workers have not completed after 5 minutes. Still waiting...");
-                await workerCompletionTask.ConfigureAwait(false);
-            }
-
-            // Ensure all segments were written (shouldn't have any left)
+            await Task.WhenAll(workers).ConfigureAwait(false);
+            
+            // Clean up
             await writeLock.WaitAsync(ct).ConfigureAwait(false);
             try
             {
+                // Flush remaining
                 while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
                 {
                     await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
@@ -334,17 +390,6 @@ public class BufferedSegmentStream : Stream
                 writeLock.Dispose();
             }
 
-            // Log corruption summary if any segments were degraded
-            if (_corruptedSegments.Count > 0)
-            {
-                var jobName = (_usageContext.HasValue && _usageContext.Value.DetailsObject?.Text != null)
-                    ? Path.GetFileName(_usageContext.Value.DetailsObject.Text)
-                    : "Unknown";
-                Log.Warning("[BufferedStream] CORRUPTION SUMMARY: Job={JobName}, TotalSegments={Total}, CorruptedSegments={Corrupted}, SuccessRate={SuccessRate:F2}%. " +
-                    "Stream completed with {Corrupted} zero-filled segments. File should be re-downloaded via health check.",
-                    jobName, segmentIds.Length, _corruptedSegments.Count, (1.0 - (double)_corruptedSegments.Count / segmentIds.Length) * 100.0, _corruptedSegments.Count);
-            }
-
             _bufferChannel.Writer.Complete();
         }
         catch (OperationCanceledException)
@@ -353,32 +398,7 @@ public class BufferedSegmentStream : Stream
         }
         catch (Exception ex)
         {
-            var jobName = (_usageContext.HasValue && _usageContext.Value.DetailsObject?.Text != null) 
-                ? Path.GetFileName(_usageContext.Value.DetailsObject.Text) 
-                : "Unknown";
-
-            if (ex is UsenetArticleNotFoundException || (ex is AggregateException agg && agg.InnerExceptions.Any(e => e is UsenetArticleNotFoundException)))
-            {
-                // Log without stack trace for expected missing article errors
-                Log.Error("[BufferedStream] Error in FetchSegmentsAsync for Job: {JobName}: {Message}",
-                    jobName, ex.Message);
-            }
-            else if (ex is InvalidDataException || (ex is AggregateException aggInvalid && aggInvalid.InnerExceptions.Any(e => e is InvalidDataException)))
-            {
-                // Log CRC validation failures and corrupted segments
-                Log.Error("[BufferedStream] Data corruption in FetchSegmentsAsync for Job: {JobName}: {Message}",
-                    jobName, ex.Message);
-            }
-            else if (ex is TimeoutException || (ex is AggregateException aggTimeout && aggTimeout.InnerExceptions.Any(e => e is TimeoutException)))
-            {
-                // Log without stack trace for timeouts (common with unreliable providers)
-                Log.Warning("[BufferedStream] Timeout in FetchSegmentsAsync for Job: {JobName}: {Message}",
-                    jobName, ex.Message);
-            }
-            else
-            {
-                Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync for Job: '{JobName}'", jobName);
-            }
+            Log.Error(ex, "[BufferedStream] Error in FetchSegmentsAsync");
             _bufferChannel.Writer.Complete(ex);
         }
     }

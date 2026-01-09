@@ -15,14 +15,15 @@ Through detailed profiling with `FullNzbTester` and instrumented `BufferedSegmen
 ## Benchmark Results (Jan 9, 2026)
 
 **Test File:** `YG7NrjDbpf1DhhrvQulbaZ5tLtJLdkmf.mkv` (1 GB)
-- **Sequential Speed:** 4.33 MB/s
-- **Avg Read Time:** 57.75ms
-- **Max Read Time:** 6378ms (6.4 seconds waiting for one segment!)
-- **Starvation Logs:**
-  ```
-  [12:58:43 WRN] [BufferedStream] Starvation: Waited 13601ms for next segment (Buffered: 156, Fetched: 158, Read: 2)
-  ```
-  **Interpretation:** The system had **156 segments** (~117MB) downloaded and sitting in memory. But it could not deliver *any* of them to the application because it was waiting for **Segment #2** to finish. This blocked the entire pipeline for 13.6 seconds.
+
+| Strategy | Throughput | Max Read Time | Notes |
+| :--- | :--- | :--- | :--- |
+| **Baseline (Phase 3)** | 4.33 MB/s | 6378ms | Severe stalling (6.4s) |
+| **Straggler Detect (3s)** | 5.56 MB/s | 1910ms | +28% speedup |
+| **Straggler Detect (1.5s)** | **11.64 MB/s** | **1052ms** | **+168% speedup** |
+
+**Interpretation:**
+Reducing the straggler detection threshold from 3s to **1.5s** yielded a massive performance gain. The system now aggressively "races" any segment that blocks the head of the line for more than 1.5 seconds, effectively neutralizing slow connections.
 
 ## Root Cause: Head-of-Line Blocking
 
