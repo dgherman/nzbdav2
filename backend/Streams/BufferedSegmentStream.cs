@@ -58,8 +58,8 @@ public class BufferedSegmentStream : Stream
         _usageContext = usageContext;
         _segmentSizes = segmentSizes;
         _client = client;
-        // Ensure buffer is large enough to prevent thrashing with high concurrency
-        bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 5);
+        // Ensure buffer is large enough to handle stalls and jitter better.
+        bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 10);
 
         // Create bounded channel for buffering
         var channelOptions = new BoundedChannelOptions(bufferSegmentCount)
@@ -183,7 +183,7 @@ public class BufferedSegmentStream : Stream
                 {
                     while (!ct.IsCancellationRequested)
                     {
-                        await Task.Delay(500, ct).ConfigureAwait(false); // Check every 500ms
+                        await Task.Delay(100, ct).ConfigureAwait(false); // Check every 100ms
 
                         var nextNeeded = _nextIndexToRead;
                         
@@ -192,40 +192,28 @@ public class BufferedSegmentStream : Stream
                         {
                             var duration = DateTimeOffset.UtcNow - assignment.StartTime;
                             
-                            // If running > 1.5s (or significantly slower than peers) and not already racing
+                            // If running > 1.5s (Original threshold) and not already racing
                             if (duration.TotalSeconds > 1.5 && !racingIndices.ContainsKey(nextNeeded))
                             {
                                 // Find a victim to preempt (highest index currently running)
                                 var victim = activeAssignments.Keys.DefaultIfEmpty(-1).Max();
                                 
-                                // Only preempt if victim is significantly ahead (e.g. > 5 segments or > 2s ahead in stream)
-                                // and not the same as nextNeeded
-                                if (victim > nextNeeded + 5)
+                                if (victim > nextNeeded)
                                 {
                                     if (activeAssignments.TryGetValue(victim, out var victimAssignment))
                                     {
-                                        Log.Warning("[BufferedStream] STRAGGLER DETECTED: Segment {NextNeeded} running for {Duration}s. Preempting Segment {Victim} to race.", 
-                                            nextNeeded, duration.TotalSeconds, victim);
-
-                                        racingIndices.TryAdd(nextNeeded, true);
+                                        Log.Warning("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration}s. Preempting Segment {Victim} to race.", nextNeeded, duration.TotalSeconds, victim);
                                         
-                                        // Cancel the victim to free up a worker
-                                        try { victimAssignment.Cts.Cancel(); } catch {}
-
+                                        // Cancel victim to free up its worker
+                                        victimAssignment.Cts.Cancel();
+                                        
                                         // Re-queue victim (high priority to avoid starvation)
                                         _ = urgentChannel.Writer.WriteAsync((victim, segmentIds[victim]), ct);
-
-                                        // Queue straggler race (high priority)
+                                        
+                                        // Race the needed segment
                                         _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
+                                        racingIndices.TryAdd(nextNeeded, true);
                                     }
-                                }
-                                else if (activeAssignments.Count < concurrentConnections)
-                                {
-                                    // If we have spare capacity (unlikely if queue is full, but possible), just spawn race
-                                    Log.Warning("[BufferedStream] STRAGGLER DETECTED: Segment {NextNeeded} running for {Duration}s. Spawning race (spare capacity).", 
-                                            nextNeeded, duration.TotalSeconds);
-                                    racingIndices.TryAdd(nextNeeded, true);
-                                    _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
                                 }
                             }
                         }
@@ -351,14 +339,7 @@ public class BufferedSegmentStream : Stream
                             finally
                             {
                                 activeAssignments.TryRemove(job.index, out _);
-                                if (isUrgent && racingIndices.ContainsKey(job.index))
-                                {
-                                    // Remove from racing set if we finished (or failed)
-                                    // But multiple might be racing. 
-                                    // It's safe to remove; monitor checks "ContainsKey". 
-                                    // If we finish, we don't need to race anymore.
-                                    racingIndices.TryRemove(job.index, out _);
-                                }
+                                racingIndices.TryRemove(job.index, out _);
                             }
                         }
                         catch (Exception ex)

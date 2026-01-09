@@ -339,7 +339,8 @@ public class FullNzbTester
                             Stream benchStream = throughputStream;
                             if (aesParams != null) benchStream = new AesDecoderStream(throughputStream, aesParams);
 
-                            long targetBytes = 100 * 1024 * 1024; // 100 MB
+                            // Benchmark up to 200MB or the full file length if it's close to that
+                            long targetBytes = Math.Min(benchStream.Length, 200 * 1024 * 1024);
                             var benchBuffer = new byte[256 * 1024]; // 256 KB buffer
                             long totalBenchRead = 0;
                             int readCount = 0;

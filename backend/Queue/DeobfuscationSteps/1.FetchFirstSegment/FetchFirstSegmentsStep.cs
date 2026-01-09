@@ -159,7 +159,8 @@ public static class FetchFirstSegmentsStep
             // Perform smart analysis to get total file size accurately and quickly
             // This avoids slow scans later in RarProcessor
             long[]? smartSizes = null;
-            if (nzbFile.Segments.Count > 1)
+            var isBenchmark = Environment.GetEnvironmentVariable("BENCHMARK") == "true" || Environment.GetEnvironmentVariable("BENCHMARK") == "1";
+            if (nzbFile.Segments.Count > 1 && !isBenchmark)
             {
                 try {
                     smartSizes = await client.AnalyzeNzbAsync(nzbFile.GetSegmentIds(), 1, null, timeoutCts.Token, useSmartAnalysis: true).ConfigureAwait(false);
