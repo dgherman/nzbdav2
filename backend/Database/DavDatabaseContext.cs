@@ -224,7 +224,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .HasConversion(new ValueConverter<string[], string>
                 (
                     v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<string[]>(v, (JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                    v => JsonSerializer.Deserialize<string[]>(v.Replace("\t", "\\t"), (JsonSerializerOptions?)null) ?? Array.Empty<string>()
                 ))
                 .HasColumnType("TEXT") // store raw JSON
                 .IsRequired();
@@ -248,7 +248,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .HasConversion(new ValueConverter<DavRarFile.RarPart[], string>
                 (
                     v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<DavRarFile.RarPart[]>(v, (JsonSerializerOptions?)null)
+                    v => JsonSerializer.Deserialize<DavRarFile.RarPart[]>(v.Replace("\t", "\\t"), (JsonSerializerOptions?)null)
                          ?? Array.Empty<DavRarFile.RarPart>()
                 ))
                 .HasColumnType("TEXT") // store raw JSON
@@ -273,7 +273,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .HasConversion(new ValueConverter<DavMultipartFile.Meta, string>
                 (
                     v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<DavMultipartFile.Meta>(v, (JsonSerializerOptions?)null) ??
+                    v => JsonSerializer.Deserialize<DavMultipartFile.Meta>(v.Replace("\t", "\\t"), (JsonSerializerOptions?)null) ??
                          new DavMultipartFile.Meta()
                 ))
                 .HasColumnType("TEXT") // store raw JSON
