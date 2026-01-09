@@ -26,4 +26,4 @@ nuget
 !UPSTREAM_ANALYSIS.md
 !OPTIMIZATIONS.md
 !DATABASE_OPTIMIZATION.md
-!CLAUDE.md
+!CLAUDE.mdlocal_data/db.sqlite

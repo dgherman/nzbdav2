@@ -100,6 +100,13 @@ class Program
             return;
         }
 
+        // Run mock benchmark
+        if (args.Contains("--mock-benchmark"))
+        {
+            await MockBenchmark.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
         // initialize database
         await using var databaseContext = new DavDatabaseContext();
 
