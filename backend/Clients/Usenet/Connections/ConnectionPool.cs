@@ -132,18 +132,22 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                 continue;
             }
 
-            // Health check for long-idle connections (>30s) before reuse
-            if (unchecked(Environment.TickCount64 - item.LastTouchedMillis) > 30000 && item.Connection is INntpClient client)
+            // Health check for long-idle connections (>60s) before reuse
+            // Increased from 30s to 60s to reduce unnecessary health checks
+            // This still catches stale connections while reducing overhead
+            if (unchecked(Environment.TickCount64 - item.LastTouchedMillis) > 60000 && item.Connection is INntpClient client)
             {
                 try
                 {
-                    // Quick liveness check
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    // Quick liveness check with 3s timeout (reduced from 5s for faster failure detection)
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
                     await client.DateAsync(cts.Token).ConfigureAwait(false);
+                    Serilog.Log.Debug("[ConnectionPool][{PoolName}] Health check passed for idle connection (idle: {IdleTime:F0}s)", PoolName, (Environment.TickCount64 - item.LastTouchedMillis) / 1000.0);
                 }
-                catch
+                catch (Exception ex)
                 {
                     // Failed check - discard
+                    Serilog.Log.Warning("[ConnectionPool][{PoolName}] Health check failed for idle connection (idle: {IdleTime:F0}s), discarding: {Error}", PoolName, (Environment.TickCount64 - item.LastTouchedMillis) / 1000.0, ex.Message);
                     await DisposeConnectionAsync(item.Connection).ConfigureAwait(false);
                     Interlocked.Decrement(ref _live);
                     TriggerConnectionPoolChangedEvent();
@@ -164,31 +168,36 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
         while (true)
         {
-            // Circuit breaker check
+            // Circuit breaker check - reduced cooldown from 5s to 2s for faster recovery
             if (_consecutiveConnectionFailures > 5)
             {
-                var cooldown = TimeSpan.FromSeconds(5);
+                var cooldown = TimeSpan.FromSeconds(2);
                 var timeSinceFailure = DateTimeOffset.UtcNow - _lastConnectionFailure;
                 if (timeSinceFailure < cooldown)
                 {
                     var wait = cooldown - timeSinceFailure;
-                    Serilog.Log.Warning("[GlobalPool] Circuit breaker active. Pausing connection attempts for {Wait}s.", wait.TotalSeconds);
+                    Serilog.Log.Warning("[ConnectionPool][{PoolName}] Circuit breaker active ({Failures} consecutive failures). Pausing for {Wait:F1}s.", PoolName, _consecutiveConnectionFailures, wait.TotalSeconds);
                     await Task.Delay(wait, linked.Token).ConfigureAwait(false);
                 }
             }
 
             try
             {
+                Serilog.Log.Debug("[ConnectionPool][{PoolName}] Creating new connection (attempt {Retries}/{MaxRetries})...", PoolName, retries + 1, maxRetries);
                 conn = await _factory(linked.Token).ConfigureAwait(false);
-                
+
                 // Reset circuit breaker on success
-                Interlocked.Exchange(ref _consecutiveConnectionFailures, 0);
+                var previousFailures = Interlocked.Exchange(ref _consecutiveConnectionFailures, 0);
+                if (previousFailures > 0)
+                {
+                    Serilog.Log.Information("[ConnectionPool][{PoolName}] Connection created successfully after {Failures} previous failures. Circuit breaker reset.", PoolName, previousFailures);
+                }
                 break;
             }
             catch (Exception ex)
             {
                 // Update circuit breaker stats
-                Interlocked.Increment(ref _consecutiveConnectionFailures);
+                var currentFailures = Interlocked.Increment(ref _consecutiveConnectionFailures);
                 _lastConnectionFailure = DateTimeOffset.UtcNow;
                 // Check for socket exhaustion errors (AddressInUse, TryAgain/EAGAIN)
                 // We check string message too because sometimes it's wrapped or platform specific
@@ -201,9 +210,9 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                 if (isSocketExhaustion && retries < maxRetries)
                 {
                     retries++;
-                    var delay = 200 * retries; // Linear backoff: 200, 400, 600, 800, 1000 ms
-                    Serilog.Log.Warning("[GlobalPool] Socket exhaustion detected (EAGAIN/AddressInUse). Retrying connection creation in {Delay}ms (Attempt {Retry}/{Max})...", delay, retries, maxRetries);
-                    
+                    var delay = 100 * (1 << (retries - 1)); // Exponential backoff: 100, 200, 400, 800, 1600 ms
+                    Serilog.Log.Warning("[ConnectionPool][{PoolName}] Socket exhaustion detected (EAGAIN/AddressInUse). Retrying in {Delay}ms (Attempt {Retry}/{Max}, Failures: {Failures})...", PoolName, delay, retries, maxRetries, currentFailures);
+
                     try
                     {
                         await Task.Delay(delay, linked.Token).ConfigureAwait(false);
@@ -216,7 +225,16 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                     continue;
                 }
 
-                Serilog.Log.Error(ex, "[GlobalPool][{PoolName}] Failed to create fresh connection for {UsageType}. Error: {Message}", PoolName, usageContext.UsageType, ex.Message);
+                // Log the error with circuit breaker context
+                if (currentFailures > 3)
+                {
+                    Serilog.Log.Error("[ConnectionPool][{PoolName}] Failed to create connection for {UsageType} (Failure #{Failures}). Circuit breaker will activate after 5 failures. Error: {Error}", PoolName, usageContext.UsageType, currentFailures, ex.Message);
+                }
+                else
+                {
+                    Serilog.Log.Warning("[ConnectionPool][{PoolName}] Failed to create connection for {UsageType}: {Error}", PoolName, usageContext.UsageType, ex.Message);
+                }
+
                 _gate.Release(); // free the permit on failure
                 throw;
             }

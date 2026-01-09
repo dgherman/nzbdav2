@@ -192,30 +192,30 @@ public class BufferedSegmentStream : Stream
 
                             // Store in dictionary temporarily
                             fetchedSegments[index] = segmentData;
-                            
+
                             // Update max fetched index for sliding window visualization
                             lock (this) {
                                 if (index > _maxFetchedIndex) _maxFetchedIndex = index;
                             }
-                            
+
                             // Increment total segments fetched into memory
                             Interlocked.Increment(ref _bufferedCount);
                             Interlocked.Increment(ref _totalFetchedCount);
 
                             // Try to write any consecutive segments to the buffer channel in order
-                        await writeLock.WaitAsync(ct).ConfigureAwait(false);
-                        try
-                        {
-                            while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
+                            await writeLock.WaitAsync(ct).ConfigureAwait(false);
+                            try
                             {
-                                await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
-                                nextIndexToWrite++;
+                                while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
+                                {
+                                    await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
+                                    nextIndexToWrite++;
+                                }
                             }
-                        }
-                        finally
-                        {
-                            writeLock.Release();
-                        }
+                            finally
+                            {
+                                writeLock.Release();
+                            }
                         }
                     }
                     catch (OperationCanceledException ex)
@@ -700,7 +700,7 @@ public class BufferedSegmentStream : Stream
         catch { }
 
         _cts.Dispose();
-        
+
         _currentSegment?.Dispose();
         _currentSegment = null;
 
@@ -717,7 +717,7 @@ public class BufferedSegmentStream : Stream
     private class PooledSegmentData : IDisposable
     {
         private byte[]? _buffer;
-        
+
         public string SegmentId { get; }
         public byte[] Data => _buffer ?? Array.Empty<byte>();
         public int Length { get; }

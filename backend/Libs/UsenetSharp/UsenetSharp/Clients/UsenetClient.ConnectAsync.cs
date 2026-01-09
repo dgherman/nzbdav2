@@ -17,9 +17,9 @@ public partial class UsenetClient
         {
             _tcpClient = new TcpClient();
 
-            // Optimize TCP socket for high-throughput Usenet streaming
-            _tcpClient.ReceiveBufferSize = 262144;  // 256KB receive buffer for better network throughput
-            _tcpClient.SendBufferSize = 65536;      // 64KB send buffer
+            // Phase 6: Optimize TCP socket for high-throughput Usenet streaming
+            _tcpClient.ReceiveBufferSize = 524288;  // 512KB receive buffer (2x increase for better throughput)
+            _tcpClient.SendBufferSize = 131072;     // 128KB send buffer (aligned to NZBGet chunk size)
             _tcpClient.NoDelay = false;             // Enable Nagle's algorithm (optimize for throughput over latency)
 
             await _tcpClient.ConnectAsync(host, port, cancellationToken);
@@ -34,10 +34,9 @@ public partial class UsenetClient
                 _stream = sslStream;
             }
 
-            // Use Latin1 encoding to preserve exact byte values 0-255 for yEnc-encoded content
-            // Use 64KB buffer for StreamReader to match TcpClient buffer optimizations
-            _reader = new StreamReader(_stream, Encoding.Latin1, false, 65536);
-            _writer = new StreamWriter(_stream, Encoding.Latin1, 65536) { AutoFlush = true };
+            // Phase 6: Align buffers to 128KB (NZBGet chunk size)
+            _reader = new StreamReader(_stream, Encoding.Latin1, false, 131072);  // 128KB buffer
+            _writer = new StreamWriter(_stream, Encoding.Latin1, 131072) { AutoFlush = true };
 
             // Read the server response
             var response = await ReadLineAsync(_cts.Token);

@@ -56,12 +56,13 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-06-ARCHIVED-STATE");
-        Log.Warning("  FEATURE: Archived State for History Items (Arr Sync + 24h Safety Net)");
-        Log.Warning("  - Arr deletes move items to 'archived' state (keeps queue in sync)");
-        Log.Warning("  - Archived items deleted after 24h retention period");
-        Log.Warning("  - UI requests can permanently delete immediately");
-        Log.Warning("  - Always returns success to prevent Arr errors");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-09-CONNECTION-TIMEOUT-FIX");
+        Log.Warning("  FEATURE: Connection Timeout & Pooling Optimizations");
+        Log.Warning("  - Separate 60s timeout for connection creation (independent of 180s operation timeout)");
+        Log.Warning("  - Increased idle timeout from 30s to 120s (reduces reconnection overhead)");
+        Log.Warning("  - Improved health checks (60s idle threshold, 3s timeout)");
+        Log.Warning("  - Faster circuit breaker recovery (2s cooldown, was 5s)");
+        Log.Warning("  - Enhanced diagnostic logging for connection lifecycle");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

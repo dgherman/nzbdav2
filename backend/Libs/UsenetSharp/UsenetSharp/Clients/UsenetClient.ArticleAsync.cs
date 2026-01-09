@@ -49,8 +49,9 @@ public partial class UsenetClient
 
                 // Create a pipe for streaming the body data
                 var pipe = new Pipe(new PipeOptions(
-                    pauseWriterThreshold: long.MaxValue,
-                    resumeWriterThreshold: long.MaxValue - 1
+                    pauseWriterThreshold: 1024 * 1024,      // 1MB
+                    resumeWriterThreshold: 512 * 1024,       // 512KB
+                    minimumSegmentSize: 65536                // 64KB
                 ));
 
                 // Start background task to read the body and write to pipe

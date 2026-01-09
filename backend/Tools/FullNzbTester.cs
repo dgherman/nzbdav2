@@ -126,8 +126,52 @@ public class FullNzbTester
                         Console.WriteLine("  RAR Processing Failed (Result was null)");
                     }
                 }
+                else if (groupType == "other")
+                {
+                    // Handle plain non-RAR files (like test-2.nzb)
+                    Console.WriteLine($"  Non-RAR file detected. Treating as single-part file for throughput testing.");
+                    var file = files.First();
+
+                    // Calculate file size from segment sizes if available, otherwise use approximation
+                    long fileSize;
+                    if (file.SegmentSizes != null && file.SegmentSizes.Length > 0)
+                    {
+                        fileSize = file.SegmentSizes.Sum();
+                    }
+                    else if (file.FileSize.HasValue && file.FileSize.Value > 0)
+                    {
+                        fileSize = file.FileSize.Value;
+                    }
+                    else
+                    {
+                        // Fallback: approximate from article count (rough estimate)
+                        var segmentCount = file.NzbFile.GetSegmentIds().Length;
+                        fileSize = segmentCount * 700000L; // ~700KB per segment average
+                    }
+
+                    Console.WriteLine($"    File size: {fileSize / 1024.0 / 1024.0:F2} MB ({file.NzbFile.GetSegmentIds().Length} segments)");
+
+                    // Create a simple single-part file structure
+                    finalRarResult = new RarProcessor.Result
+                    {
+                        StoredFileSegments = new[]
+                        {
+                            new RarProcessor.StoredFileSegment
+                            {
+                                NzbFile = file.NzbFile,
+                                PartNumber = 1,
+                                PartSize = fileSize,
+                                ArchiveName = file.FileName,
+                                PathWithinArchive = file.FileName,
+                                ByteRangeWithinPart = LongRange.FromStartAndSize(0, fileSize),
+                                AesParams = null,
+                                ReleaseDate = file.ReleaseDate
+                            }
+                        }
+                    };
+                }
             }
-            
+
             // Step 5: FFprobe Analysis
             if (finalRarResult != null)
             {
@@ -264,35 +308,75 @@ public class FullNzbTester
                         double sequentialSpeed = 0;
                         try
                         {
+                            var streamCreateWatch = Stopwatch.StartNew();
                             using var throughputStream = new DavMultipartFileStream(
                                 fileParts,
                                 client,
                                 configManager.GetConnectionsPerStream(),
                                 new ConnectionUsageContext(ConnectionUsageType.Streaming)
                             );
-                            
+                            streamCreateWatch.Stop();
+                            Console.WriteLine($"Stream creation time: {streamCreateWatch.ElapsedMilliseconds}ms");
+
                             Stream benchStream = throughputStream;
                             if (aesParams != null) benchStream = new AesDecoderStream(throughputStream, aesParams);
 
-                            long targetBytes = 50 * 1024 * 1024; // 50 MB
-                            var benchBuffer = new byte[64 * 1024]; // 64 KB buffer
+                            long targetBytes = 100 * 1024 * 1024; // 100 MB
+                            var benchBuffer = new byte[256 * 1024]; // 256 KB buffer
                             long totalBenchRead = 0;
-                            
+                            int readCount = 0;
+                            double totalReadTime = 0;
+                            double minReadTime = double.MaxValue;
+                            double maxReadTime = 0;
+                            var readTimes = new List<double>();
+
                             Console.WriteLine($"Benchmarking sequential read of {targetBytes / 1024 / 1024} MB...");
                             var benchWatch = Stopwatch.StartNew();
-                            using var benchCts = new CancellationTokenSource(TimeSpan.FromSeconds(60));
-                            
+                            using var benchCts = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+
                             while (totalBenchRead < targetBytes)
                             {
+                                var readWatch = Stopwatch.StartNew();
                                 int read = await benchStream.ReadAsync(benchBuffer, 0, benchBuffer.Length, benchCts.Token).ConfigureAwait(false);
+                                readWatch.Stop();
+
                                 if (read == 0) break;
+
+                                var readTimeMs = readWatch.Elapsed.TotalMilliseconds;
+                                totalReadTime += readTimeMs;
+                                readTimes.Add(readTimeMs);
+                                minReadTime = Math.Min(minReadTime, readTimeMs);
+                                maxReadTime = Math.Max(maxReadTime, readTimeMs);
+
                                 totalBenchRead += read;
+                                readCount++;
+
+                                // Report progress every 10MB
+                                if (totalBenchRead % (10 * 1024 * 1024) < benchBuffer.Length)
+                                {
+                                    var currentSpeed = (totalBenchRead / 1024.0 / 1024.0) / benchWatch.Elapsed.TotalSeconds;
+                                    Console.WriteLine($"  Progress: {totalBenchRead / 1024.0 / 1024.0:F1} MB @ {currentSpeed:F2} MB/s (last read: {read / 1024.0:F1} KB in {readTimeMs:F1}ms)");
+                                }
                             }
-                            
+
                             benchWatch.Stop();
                             sequentialSpeed = (totalBenchRead / 1024.0 / 1024.0) / benchWatch.Elapsed.TotalSeconds;
-                            Console.WriteLine($"Read {totalBenchRead / 1024.0 / 1024.0:F2} MB in {benchWatch.Elapsed.TotalSeconds:F2}s");
+
+                            // Calculate statistics
+                            var avgReadTime = totalReadTime / readCount;
+                            readTimes.Sort();
+                            var medianReadTime = readTimes[readTimes.Count / 2];
+                            var p95ReadTime = readTimes[(int)(readTimes.Count * 0.95)];
+
+                            Console.WriteLine($"\nRead {totalBenchRead / 1024.0 / 1024.0:F2} MB in {benchWatch.Elapsed.TotalSeconds:F2}s");
                             Console.WriteLine($"Sequential Speed: {sequentialSpeed:F2} MB/s");
+                            Console.WriteLine($"\nRead Statistics:");
+                            Console.WriteLine($"  Total Reads: {readCount}");
+                            Console.WriteLine($"  Avg Read Time: {avgReadTime:F2}ms");
+                            Console.WriteLine($"  Median Read Time: {medianReadTime:F2}ms");
+                            Console.WriteLine($"  Min/Max Read Time: {minReadTime:F2}ms / {maxReadTime:F2}ms");
+                            Console.WriteLine($"  P95 Read Time: {p95ReadTime:F2}ms");
+                            Console.WriteLine($"  Time in ReadAsync: {totalReadTime:F2}ms ({totalReadTime / benchWatch.Elapsed.TotalMilliseconds * 100:F1}% of total)");
                         }
                         catch (Exception ex)
                         {

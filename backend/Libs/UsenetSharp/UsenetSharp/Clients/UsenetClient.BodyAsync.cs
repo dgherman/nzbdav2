@@ -46,8 +46,9 @@ public partial class UsenetClient
             {
                 // Create a pipe for streaming the body data
                 var pipe = new Pipe(new PipeOptions(
-                    pauseWriterThreshold: long.MaxValue,
-                    resumeWriterThreshold: long.MaxValue - 1
+                    pauseWriterThreshold: 1024 * 1024,      // 1MB
+                    resumeWriterThreshold: 512 * 1024,       // 512KB
+                    minimumSegmentSize: 65536                // 64KB
                 ));
 
                 // Start background task to read the body and write to pipe
@@ -87,8 +88,10 @@ public partial class UsenetClient
         }
     }
 
+    // Phase 3: Chunk-based reading through StreamReader for maximum throughput
     private async Task ReadBodyToPipeAsync(PipeWriter writer, CancellationToken cancellationToken, Action onFinally)
     {
+        CancellationTokenSource? cts = null;
         try
         {
             if (_reader == null)
@@ -97,70 +100,92 @@ public partial class UsenetClient
                 return;
             }
 
-            var shouldWrite = true;
-            var lineCount = 0;
-            const int FlushBatchSize = 128; // Increased for better throughput
-
-            // Read lines until we encounter the termination sequence (single dot on a line)
-            while (!cancellationToken.IsCancellationRequested)
+            cts = CreateCtsWithTimeout(cancellationToken);
+            var charBuffer = new char[131072]; // 128KB char buffer
+            var byteBuffer = System.Buffers.ArrayPool<byte>.Shared.Rent(262144); // 256KB byte buffer for conversion
+            try
             {
-                // Check if reader is still valid (could be disposed during execution)
-                if (_reader == null)
+                int byteBufferPos = 0;
+                int byteBufferLen = 0;
+                bool shouldWrite = true;
+                int totalBytesWritten = 0;
+                const int FlushThreshold = 262144; // Flush every 256KB
+                bool foundTerminator = false;
+
+                while (!cts.Token.IsCancellationRequested && !foundTerminator)
                 {
-                    break;
-                }
-
-                var line = await ReadLineAsync(cancellationToken);
-
-                if (line == null)
-                {
-                    // End of stream
-                    break;
-                }
-
-                // Check for NNTP termination sequence (single dot)
-                if (line.Length == 1 && line[0] == '.')
-                {
-                    break;
-                }
-
-                if (!shouldWrite) continue;
-
-                // NNTP escaping: Lines starting with ".." should have the first dot removed
-                ReadOnlySpan<char> lineSpan = line.AsSpan();
-                if (lineSpan.Length >= 2 && lineSpan[0] == '.' && lineSpan[1] == '.')
-                {
-                    lineSpan = lineSpan.Slice(1);
-                }
-
-                // Fast write to pipe (direct cast char to byte for Latin1)
-                var span = writer.GetSpan(lineSpan.Length + 2);
-                for (int i = 0; i < lineSpan.Length; i++)
-                {
-                    span[i] = (byte)lineSpan[i];
-                }
-                span[lineSpan.Length] = (byte)'\r';
-                span[lineSpan.Length + 1] = (byte)'\n';
-                writer.Advance(lineSpan.Length + 2);
-
-                lineCount++;
-
-                // Batch flushes for better performance
-                if (lineCount >= FlushBatchSize)
-                {
-                    var result = await RunWithTimeoutAsync(writer.FlushAsync, cancellationToken);
-                    if (result.IsCompleted || result.IsCanceled)
+                    // Refill byte buffer if needed
+                    if (byteBufferPos >= byteBufferLen)
                     {
-                        shouldWrite = false;
+                        // Read a large chunk of characters from StreamReader
+                        var charsRead = await _reader.ReadAsync(charBuffer, 0, charBuffer.Length);
+                        if (charsRead == 0) break; // EOF
+
+                        // Convert Latin1 chars to bytes
+                        byteBufferLen = 0;
+                        for (int i = 0; i < charsRead; i++)
+                        {
+                            byteBuffer[byteBufferLen++] = (byte)charBuffer[i];
+                        }
+                        byteBufferPos = 0;
                     }
-                    lineCount = 0;
+
+                    // Scan for terminator: \r\n.\r\n
+                    var chunk = new ReadOnlySpan<byte>(byteBuffer, byteBufferPos, byteBufferLen - byteBufferPos);
+                    var terminatorPos = FindTerminator(chunk);
+
+                    int dataLen;
+                    if (terminatorPos >= 0)
+                    {
+                        // Found terminator - write data up to (but not including) terminator
+                        dataLen = terminatorPos;
+                        foundTerminator = true;
+                    }
+                    else
+                    {
+                        // No terminator - write all available data
+                        dataLen = chunk.Length;
+                    }
+
+                    if (shouldWrite && dataLen > 0)
+                    {
+                        // Write data to pipe with dot-unescaping
+                        var dataToWrite = new ReadOnlySpan<byte>(byteBuffer, byteBufferPos, dataLen);
+                        WriteDataToPipe(dataToWrite, writer);
+                        totalBytesWritten += dataLen;
+
+                        // Flush periodically for backpressure
+                        if (totalBytesWritten >= FlushThreshold)
+                        {
+                            var result = await writer.FlushAsync(cts.Token);
+                            if (result.IsCompleted || result.IsCanceled)
+                            {
+                                shouldWrite = false;
+                            }
+                            totalBytesWritten = 0;
+                        }
+                    }
+
+                    // Advance buffer position
+                    byteBufferPos += dataLen;
+                }
+
+                // Final flush
+                if (totalBytesWritten > 0 && shouldWrite)
+                {
+                    await writer.FlushAsync(cts.Token);
                 }
             }
-
-            // Final flush for any remaining data
-            if (lineCount > 0 && shouldWrite)
+            finally
             {
-                await RunWithTimeoutAsync(writer.FlushAsync, cancellationToken);
+                System.Buffers.ArrayPool<byte>.Shared.Return(byteBuffer);
+            }
+        }
+        catch (OperationCanceledException) when (cts != null && cts.Token.IsCancellationRequested && !cancellationToken.IsCancellationRequested)
+        {
+            lock (this)
+            {
+                _backgroundException = ExceptionDispatchInfo.Capture(new TimeoutException("Timeout reading body from NNTP stream."));
             }
         }
         catch (NullReferenceException)
@@ -176,6 +201,7 @@ public partial class UsenetClient
         }
         finally
         {
+            cts?.Dispose();
             onFinally.Invoke();
         }
     }
