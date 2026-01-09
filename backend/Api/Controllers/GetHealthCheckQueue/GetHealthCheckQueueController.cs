@@ -15,6 +15,11 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
     {
         var query = HealthCheckService.GetHealthCheckQueueItems(dbClient);
 
+        if (request.ShowFailed)
+        {
+            query = (IOrderedQueryable<DavItem>)query.Where(x => x.IsCorrupted);
+        }
+
         if (!string.IsNullOrWhiteSpace(request.Search))
         {
             query = (IOrderedQueryable<DavItem>)query.Where(x => EF.Functions.Like(x.Name, $"%{request.Search}%"));

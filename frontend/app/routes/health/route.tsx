@@ -62,6 +62,7 @@ export default function Health({ loaderData }: Route.ComponentProps) {
     const [page, setPage] = useState(0);
     const [search, setSearch] = useState("");
     const [showAll, setShowAll] = useState(false);
+    const [showFailed, setShowFailed] = useState(false);
     const [showDetailsModal, setShowDetailsModal] = useState(false);
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
     const [loadingFileDetails, setLoadingFileDetails] = useState(false);
@@ -70,7 +71,7 @@ export default function Health({ loaderData }: Route.ComponentProps) {
     // effects
     useEffect(() => {
         const refetchData = async () => {
-            var response = await fetch(`/api/get-health-check-queue?pageSize=30&page=${page}&search=${encodeURIComponent(search)}&showAll=${showAll}`);
+            var response = await fetch(`/api/get-health-check-queue?pageSize=30&page=${page}&search=${encodeURIComponent(search)}&showAll=${showAll}&showFailed=${showFailed}`);
             if (response.ok) {
                 const healthCheckQueue = await response.json();
                 setQueueItems(healthCheckQueue.items);
@@ -79,7 +80,7 @@ export default function Health({ loaderData }: Route.ComponentProps) {
             }
         };
         refetchData();
-    }, [page, search, showAll])
+    }, [page, search, showAll, showFailed])
 
     // events
     const onHealthItemStatus = useCallback(async (message: string) => {
@@ -363,11 +364,15 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
                                                 showAll={showAll}
 
+                                                showFailed={showFailed}
+
                                                 onPageChange={setPage}
 
                                                 onSearchChange={(s) => { setSearch(s); setPage(0); }}
 
                                                 onShowAllChange={(val) => { setShowAll(val); setPage(0); }}
+
+                                                onShowFailedChange={(val) => { setShowFailed(val); setPage(0); }}
 
                                                 onRunHealthCheck={onRunHealthCheck}
 

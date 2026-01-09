@@ -224,7 +224,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .HasConversion(new ValueConverter<string[], string>
                 (
                     v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<string[]>(v, (JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                    v => JsonSerializer.Deserialize<string[]>(System.Text.RegularExpressions.Regex.Replace(v, "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""), (JsonSerializerOptions?)null) ?? Array.Empty<string>()
                 ))
                 .HasColumnType("TEXT") // store raw JSON
                 .IsRequired();
@@ -248,7 +248,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .HasConversion(new ValueConverter<DavRarFile.RarPart[], string>
                 (
                     v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<DavRarFile.RarPart[]>(v, (JsonSerializerOptions?)null)
+                    v => JsonSerializer.Deserialize<DavRarFile.RarPart[]>(System.Text.RegularExpressions.Regex.Replace(v, "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""), (JsonSerializerOptions?)null)
                          ?? Array.Empty<DavRarFile.RarPart>()
                 ))
                 .HasColumnType("TEXT") // store raw JSON
@@ -273,7 +273,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .HasConversion(new ValueConverter<DavMultipartFile.Meta, string>
                 (
                     v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<DavMultipartFile.Meta>(v, (JsonSerializerOptions?)null) ??
+                    v => JsonSerializer.Deserialize<DavMultipartFile.Meta>(System.Text.RegularExpressions.Regex.Replace(v, "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""), (JsonSerializerOptions?)null) ??
                          new DavMultipartFile.Meta()
                 ))
                 .HasColumnType("TEXT") // store raw JSON

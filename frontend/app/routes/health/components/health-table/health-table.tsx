@@ -12,9 +12,11 @@ export type HealthTableProps = {
     pageSize: number,
     search: string,
     showAll: boolean,
+    showFailed: boolean,
     onPageChange: (page: number) => void,
     onSearchChange: (search: string) => void,
     onShowAllChange: (showAll: boolean) => void,
+    onShowFailedChange: (showFailed: boolean) => void,
     onRunHealthCheck: (id: string) => void,
     onItemClick: (id: string) => void,
 }
@@ -27,9 +29,11 @@ export function HealthTable({
     pageSize,
     search,
     showAll,
+    showFailed,
     onPageChange,
     onSearchChange,
     onShowAllChange,
+    onShowFailedChange,
     onRunHealthCheck,
     onItemClick
 }: HealthTableProps) {
@@ -58,7 +62,14 @@ export function HealthTable({
                         />
                     </InputGroup>
                 </div>
-                <div className={styles.filterContainer}>
+                <div className={styles.filterContainer} style={{ display: 'flex', gap: '1rem' }}>
+                    <Form.Check 
+                        type="switch"
+                        id="show-failed-switch"
+                        label="Failed Only"
+                        checked={showFailed}
+                        onChange={(e) => onShowFailedChange(e.target.checked)}
+                    />
                     <Form.Check 
                         type="switch"
                         id="show-all-switch"
