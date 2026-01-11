@@ -1,0 +1,13 @@
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/" 
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "nuget"
+    directory: "/"    # change to "/src/YourProject" if .csproj files are in subfolders
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # optional: target-branch: "master"
