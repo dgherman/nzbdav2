@@ -12,9 +12,10 @@ interface Props {
     onFileClick: (id: string) => void;
     onAnalyze: (id: string | string[]) => void;
     onRepair: (id: string | string[]) => void;
+    onRunHealthCheck: (id: string | string[]) => void;
 }
 
-export function MappedFilesTable({ items, totalCount, page, search, onFileClick, onAnalyze, onRepair }: Props) {
+export function MappedFilesTable({ items, totalCount, page, search, onFileClick, onAnalyze, onRepair, onRunHealthCheck }: Props) {
     const [searchParams, setSearchParams] = useSearchParams();
     const [searchValue, setSearchValue] = useState(search);
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -103,6 +104,11 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
         onRepair(Array.from(selectedIds));
     };
 
+    const handleBulkHealthCheck = () => {
+        if (selectedIds.size === 0) return;
+        onRunHealthCheck(Array.from(selectedIds));
+    };
+
     return (
         <div className="p-4 rounded-lg bg-black bg-opacity-20 mb-4">
             <div className="d-flex justify-content-between align-items-center mb-3">
@@ -112,6 +118,9 @@ export function MappedFilesTable({ items, totalCount, page, search, onFileClick,
                         <div className="d-flex gap-2 animate-fadeIn">
                             <Button variant="primary" size="sm" onClick={handleBulkAnalyze}>
                                 Analyze ({selectedIds.size})
+                            </Button>
+                            <Button variant="info" size="sm" onClick={handleBulkHealthCheck}>
+                                Health Check ({selectedIds.size})
                             </Button>
                             <Button variant="danger" size="sm" onClick={handleBulkRepair}>
                                 Repair ({selectedIds.size})

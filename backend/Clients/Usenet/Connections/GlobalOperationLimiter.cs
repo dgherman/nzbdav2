@@ -106,12 +106,12 @@ public class GlobalOperationLimiter : IDisposable
         {
             if (fileDetails != null)
             {
-                LogInfoForType(usageType, "Acquired permit for {UsageType}. File: {FileDetails}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
+                LogDebugForType(usageType, "Acquired permit for {UsageType}. File: {FileDetails}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
                     usageType, fileDetails, currentUsage, guaranteedLimit, GetUsageBreakdown());
             }
             else
             {
-                LogInfoForType(usageType, "Acquired permit for {UsageType}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
+                LogDebugForType(usageType, "Acquired permit for {UsageType}. Current usage: {CurrentUsage}/{GuaranteedLimit}. Total: {UsageBreakdown}",
                     usageType, currentUsage, guaranteedLimit, GetUsageBreakdown());
             }
         }

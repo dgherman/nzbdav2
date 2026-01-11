@@ -3,6 +3,8 @@ namespace NzbWebDAV.Clients.Usenet.Connections;
 public class ConnectionUsageDetails
 {
     public string Text { get; init; } = "";
+    public string? JobName { get; init; }
+    public string? AffinityKey { get; init; }
     public Guid? DavItemId { get; set; }
     public DateTimeOffset? FileDate { get; set; }
     public bool IsBackup { get; set; }
@@ -35,6 +37,8 @@ public readonly struct ConnectionUsageContext
     private readonly string? _detailsStr;
 
     public string? Details => _detailsObj?.ToString() ?? _detailsStr;
+    public string? JobName => _detailsObj?.JobName ?? Details;
+    public string? AffinityKey => _detailsObj?.AffinityKey ?? JobName;
     public bool IsBackup => _detailsObj?.IsBackup ?? false;
     public bool IsSecondary => _detailsObj?.IsSecondary ?? false;
     public bool IsImported => _detailsObj?.IsImported ?? false;

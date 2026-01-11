@@ -261,10 +261,13 @@ public class NzbFileStream : Stream
         if (shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections)
         {
             // Set BufferedStreaming context - this will be the ONLY ConnectionUsageContext
-            var detailsObj = new ConnectionUsageDetails 
-            { 
+            var detailsObj = new ConnectionUsageDetails
+            {
                 Text = _usageContext.Details ?? "",
-                DavItemId = _usageContext.DetailsObject?.DavItemId
+                JobName = _usageContext.DetailsObject?.JobName,
+                AffinityKey = _usageContext.DetailsObject?.AffinityKey,
+                DavItemId = _usageContext.DetailsObject?.DavItemId,
+                FileDate = _usageContext.DetailsObject?.FileDate
             };
             var bufferedContext = new ConnectionUsageContext(
                 ConnectionUsageType.BufferedStreaming,

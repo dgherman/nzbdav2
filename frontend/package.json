@@ -15,6 +15,7 @@
     "@react-router/node": "^7.5.3",
     "bootstrap": "^5.3.6",
     "compression": "^1.7.5",
+    "date-fns": "^4.1.0",
     "express": "^5.1.0",
     "http-proxy-middleware": "^3.0.5",
     "isbot": "^5.1.27",

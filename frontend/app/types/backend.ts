@@ -73,6 +73,7 @@ export type HealthCheckQueueItem = {
     nextHealthCheck: string | null;
     progress: number;
     operationType: string;
+    latestResult?: string | null;
 }
 
 export type HealthCheckHistoryResponse = {
@@ -148,4 +149,15 @@ export type DashboardSummary = {
     pendingAnalysisCount: number;
     healthyCount: number;
     unhealthyCount: number;
+}
+
+export type AnalysisHistoryItem = {
+    id: string;
+    davItemId: string;
+    fileName: string;
+    jobName?: string | null;
+    createdAt: string;
+    result: string;
+    details?: string | null;
+    durationMs: number;
 }

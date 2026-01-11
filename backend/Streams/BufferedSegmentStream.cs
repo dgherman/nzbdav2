@@ -202,7 +202,7 @@ public class BufferedSegmentStream : Stream
                                 {
                                     if (activeAssignments.TryGetValue(victim, out var victimAssignment))
                                     {
-                                        Log.Warning("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration}s. Preempting Segment {Victim} to race.", nextNeeded, duration.TotalSeconds, victim);
+                                        Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration}s. Preempting Segment {Victim} to race.", nextNeeded, duration.TotalSeconds, victim);
                                         
                                         // Cancel victim to free up its worker
                                         victimAssignment.Cts.Cancel();
@@ -233,7 +233,7 @@ public class BufferedSegmentStream : Stream
                     // Reusable buffer for worker loop
                     while (!ct.IsCancellationRequested)
                     {
-                        (int index, string segmentId) job;
+                        (int index, string segmentId) job = default;
                         bool isUrgent = false;
 
                         try
@@ -277,6 +277,7 @@ public class BufferedSegmentStream : Stream
 
                             // Create job-specific CTS for preemption
                             using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            using var _scope = jobCts.Token.SetScopedContext(ct.GetContext<ConnectionUsageContext>());
                             var assignment = (DateTimeOffset.UtcNow, jobCts, workerId);
                             
                             // Track assignment
@@ -344,9 +345,14 @@ public class BufferedSegmentStream : Stream
                         }
                         catch (Exception ex)
                         {
-                            // Log and continue (FetchSegmentWithRetryAsync handles most errors, but just in case)
+                            // If an unrecoverable error occurs (like inability to zero-fill a missing segment),
+                            // we must abort the stream so the consumer doesn't hang waiting for this index.
                             if (!ct.IsCancellationRequested)
-                                Log.Error(ex, "[BufferedStream] Worker loop error");
+                            {
+                                Log.Error(ex, "[BufferedStream] Critical worker error for segment {Index}. Aborting stream.", job.index);
+                                _bufferChannel.Writer.TryComplete(ex);
+                                return; // Exit worker task
+                            }
                         }
                     }
                 })
@@ -497,10 +503,14 @@ public class BufferedSegmentStream : Stream
 
                 // Will retry on next iteration
             }
-            catch (UsenetArticleNotFoundException)
+            catch (UsenetArticleNotFoundException ex)
             {
                 // Don't retry for missing articles - this is permanent
-                throw;
+                // Treat as terminal failure and proceed to graceful degradation (zero-fill)
+                lastException = ex;
+                Log.Warning("[BufferedStream] PERMANENT FAILURE: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}): Article not found. Proceeding to zero-fill.",
+                    jobName, index, segmentIds.Length, segmentId);
+                break;
             }
             catch (OperationCanceledException)
             {
@@ -538,11 +548,13 @@ public class BufferedSegmentStream : Stream
                 try {
                     using var db = new DavDatabaseContext();
                     var item = await db.Items.FindAsync(davItemId);
-                    if (item != null && !item.IsCorrupted) {
+                    if (item != null) {
                         item.IsCorrupted = true;
                         item.CorruptionReason = reason;
+                        // Trigger immediate urgent health check (HEAD)
+                        item.NextHealthCheck = DateTimeOffset.MinValue;
                         await db.SaveChangesAsync();
-                        Log.Information("[BufferedStream] Marked item {ItemId} as corrupted in database due to terminal segment failure.", davItemId);
+                        Log.Information("[BufferedStream] Marked item {ItemId} as corrupted and scheduled urgent health check due to terminal segment failure.", davItemId);
                     }
                 } catch (Exception dbEx) {
                     Log.Error(dbEx, "[BufferedStream] Failed to mark item as corrupted in database.");
@@ -591,7 +603,7 @@ public class BufferedSegmentStream : Stream
 
                     if (waitWatch.ElapsedMilliseconds > 50)
                     {
-                        Log.Warning("[BufferedStream] Starvation: Waited {Duration}ms for next segment (Buffered: {Buffered}, Fetched: {Fetched}, Read: {Read})", 
+                        Log.Debug("[BufferedStream] Starvation: Waited {Duration}ms for next segment (Buffered: {Buffered}, Fetched: {Fetched}, Read: {Read})",
                             waitWatch.ElapsedMilliseconds, _bufferedCount, _totalFetchedCount, _totalReadCount);
                     }
 

@@ -1,9 +1,10 @@
 import type { Route } from "./+types/route";
 import styles from "./route.module.css"
 import { backendClient } from "~/clients/backend-client.server";
-import type { AnalysisItem, FileDetails } from "~/types/backend";
+import type { AnalysisItem, FileDetails, AnalysisHistoryItem } from "~/types/backend";
 import { HealthTable } from "./components/health-table/health-table";
 import { AnalysisTable } from "./components/analysis-table/analysis-table";
+import { AnalysisHistoryTable } from "./components/analysis-history-table/analysis-history-table";
 import { HealthStats } from "./components/health-stats/health-stats";
 import { FileDetailsModal } from "./components/file-details-modal/file-details-modal";
 import { useCallback, useEffect, useState } from "react";
@@ -31,11 +32,12 @@ const topicSubscriptions = {
 
 export async function loader() {
     const enabledKey = 'repair.enable';
-    const [queueData, historyData, config, analysisData] = await Promise.all([
+    const [queueData, historyData, config, analysisData, analysisHistoryData] = await Promise.all([
         backendClient.getHealthCheckQueue(30),
         backendClient.getHealthCheckHistory(),
         backendClient.getConfig([enabledKey]),
-        backendClient.getActiveAnalyses()
+        backendClient.getActiveAnalyses(),
+        backendClient.getAnalysisHistory()
     ]);
 
     return {
@@ -45,6 +47,7 @@ export async function loader() {
         historyStats: historyData.stats,
         historyItems: historyData.items,
         activeAnalyses: analysisData,
+        analysisHistory: analysisHistoryData,
         isEnabled: config
             .filter(x => x.configName === enabledKey)
             .filter(x => x.configValue.toLowerCase() === "true")
@@ -57,12 +60,20 @@ export default function Health({ loaderData }: Route.ComponentProps) {
     const [historyStats, setHistoryStats] = useState(loaderData.historyStats);
     const [queueItems, setQueueItems] = useState(loaderData.queueItems);
     const [analysisItems, setAnalysisItems] = useState<AnalysisItem[]>(loaderData.activeAnalyses);
+    const [analysisHistory, setAnalysisHistory] = useState<AnalysisHistoryItem[]>(loaderData.analysisHistory);
     const [uncheckedCount, setUncheckedCount] = useState(loaderData.uncheckedCount);
     const [pendingCount, setPendingCount] = useState(loaderData.pendingCount);
     const [page, setPage] = useState(0);
     const [search, setSearch] = useState("");
     const [showAll, setShowAll] = useState(false);
     const [showFailed, setShowFailed] = useState(false);
+    
+    // Analysis History State
+    const [ahPage, setAhPage] = useState(0);
+    const [ahSearch, setAhSearch] = useState("");
+    const [ahShowFailedOnly, setAhShowFailedOnly] = useState(false);
+    const [refreshHistoryTrigger, setRefreshHistoryTrigger] = useState(0);
+
     const [showDetailsModal, setShowDetailsModal] = useState(false);
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
     const [loadingFileDetails, setLoadingFileDetails] = useState(false);
@@ -81,6 +92,21 @@ export default function Health({ loaderData }: Route.ComponentProps) {
         };
         refetchData();
     }, [page, search, showAll, showFailed])
+
+    // Analysis History Effect
+    useEffect(() => {
+        const fetchHistory = async () => {
+            try {
+                const response = await fetch(`/api/analysis-history?page=${ahPage}&pageSize=100&search=${encodeURIComponent(ahSearch)}&showFailedOnly=${ahShowFailedOnly}`);
+                if (response.ok) {
+                    setAnalysisHistory(await response.json());
+                }
+            } catch (error) {
+                console.error("Failed to fetch analysis history", error);
+            }
+        };
+        fetchHistory();
+    }, [ahPage, ahSearch, ahShowFailedOnly, refreshHistoryTrigger]);
 
     // events
     const onHealthItemStatus = useCallback(async (message: string) => {
@@ -135,12 +161,10 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
     const onAnalysisItemProgress = useCallback((message: string) => {
         const [id, progress, name, jobName] = message.split('|');
-        if (progress === "done") {
+        if (progress === "done" || progress === "error") {
             setAnalysisItems(items => items.filter(x => x.id !== id));
-            return;
-        }
-        if (progress === "error") {
-            setAnalysisItems(items => items.filter(x => x.id !== id));
+            // Trigger history refresh
+            setRefreshHistoryTrigger(prev => prev + 1);
             return;
         }
         if (progress === "start") {
@@ -193,10 +217,10 @@ export default function Health({ loaderData }: Route.ComponentProps) {
             try {
                 const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
                 if (!response.ok) throw new Error(await response.text());
-                
+
                 // Refresh the queue locally to show "ASAP" or similar, although websocket updates should handle it
-                setQueueItems(items => items.map(item => 
-                    item.id === id 
+                setQueueItems(items => items.map(item =>
+                    item.id === id
                     ? { ...item, nextHealthCheck: new Date().toISOString() } // Temporarily show as now/ASAP
                     : item
                 ));
@@ -205,6 +229,25 @@ export default function Health({ loaderData }: Route.ComponentProps) {
                 addToast(`Failed to start health check: ${e}`, "danger", "Error");
             }
         }, [setQueueItems, addToast]);
+
+    const onRunHeadHealthCheck = useCallback(async (ids: string[]) => {
+        try {
+            // Run health checks for all selected items
+            await Promise.all(ids.map(id =>
+                fetch(`/api/health/check/${id}`, { method: 'POST' })
+            ));
+
+            // Update local state
+            setQueueItems(items => items.map(item =>
+                ids.includes(item.id)
+                ? { ...item, nextHealthCheck: new Date().toISOString(), operationType: 'HEAD' }
+                : item
+            ));
+            addToast(`${ids.length} HEAD health check(s) scheduled successfully`, "success", "Success");
+        } catch (e) {
+            addToast(`Failed to start health checks: ${e}`, "danger", "Error");
+        }
+    }, [setQueueItems, addToast]);
 
     const onItemClick = useCallback(async (davItemId: string) => {
         setShowDetailsModal(true);
@@ -277,6 +320,31 @@ export default function Health({ loaderData }: Route.ComponentProps) {
             addToast(`Repair queued successfully for ${ids.length} item(s)`, "success", "Repair Started");
         } catch (e) {
             addToast(`Failed to trigger repair: ${e}`, "danger", "Error");
+        }
+    }, [addToast]);
+
+    const onResetHealthStatus = useCallback(async (ids: string[]) => {
+        try {
+            const response = await fetch(`/api/health/reset`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            
+            const result = await response.json();
+            addToast(`Successfully reset health status for ${result.resetCount} item(s)`, "success", "Status Reset");
+            
+            // Trigger refresh by updating search or page (simplest way to re-fetch queue)
+            setPage(p => p); 
+            // Better: update queueItems locally
+            setQueueItems(items => items.map(item => 
+                ids.includes(item.id) 
+                ? { ...item, latestResult: null, lastHealthCheck: null, nextHealthCheck: null } 
+                : item
+            ));
+        } catch (e) {
+            addToast(`Failed to reset health status: ${e}`, "danger", "Error");
         }
     }, [addToast]);
 
@@ -376,6 +444,12 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
                                                 onRunHealthCheck={onRunHealthCheck}
 
+                                                onRunHeadHealthCheck={onRunHeadHealthCheck}
+
+                                                onRepair={onRepair}
+
+                                                onResetHealthStatus={onResetHealthStatus}
+
                                                 onItemClick={onItemClick}
 
                                             />
@@ -386,6 +460,19 @@ export default function Health({ loaderData }: Route.ComponentProps) {
 
                                             <AnalysisTable items={analysisItems} />
 
+                                        </Tab>
+
+                                        <Tab eventKey="analysis-history" title="Analysis History">
+                                            <AnalysisHistoryTable
+                                                items={analysisHistory}
+                                                page={ahPage}
+                                                search={ahSearch}
+                                                showFailedOnly={ahShowFailedOnly}
+                                                onPageChange={setAhPage}
+                                                onSearchChange={(s) => { setAhSearch(s); setAhPage(0); }}
+                                                onShowFailedOnlyChange={(val) => { setAhShowFailedOnly(val); setAhPage(0); }}
+                                                onAnalyze={onAnalyze}
+                                            />
                                         </Tab>
 
                                     </Tabs>

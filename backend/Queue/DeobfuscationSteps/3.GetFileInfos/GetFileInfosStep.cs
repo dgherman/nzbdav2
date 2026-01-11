@@ -43,6 +43,7 @@ public static class GetFileInfosStep
         MD5 md5
     )
     {
+        file.AnalyzeMagic();
         var fileDesc = GetMatchingFileDescriptor(file, hashToFiledescMap, md5);
         var subjectFileName = file.NzbFile.GetSubjectFileName();
         var headerFileName = file.Header?.FileName ?? "";

@@ -414,6 +414,14 @@ class BackendClient {
         return response.json();
     }
 
+    public async getAnalysisHistory(page: number = 0, pageSize: number = 100, search: string = ""): Promise<AnalysisHistoryItem[]> {
+        const url = process.env.BACKEND_URL + `/api/analysis-history?page=${page}&pageSize=${pageSize}&search=${encodeURIComponent(search)}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get analysis history: ${(await response.json()).error}`);
+        return response.json();
+    }
+
     public async getFileDetails(davItemId: string): Promise<FileDetails> {
         const url = process.env.BACKEND_URL + `/api/file-details/${davItemId}`;
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
@@ -433,7 +441,26 @@ class BackendClient {
         return response.json();
     }
 
+    public async resetHealthStatus(davItemIds: string[]): Promise<number> {
+        const url = process.env.BACKEND_URL + "/api/health/reset";
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, {
+            method: "POST",
+            headers: {
+                "x-api-key": apiKey,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({ davItemIds })
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to reset health status: ${(await response.json()).error}`);
+        }
+
+        const data = await response.json();
+        return data.resetCount;
     }
+}
 
     
 

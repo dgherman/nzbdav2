@@ -85,12 +85,14 @@ public class ConnectionPoolStats
             var connsJson = JsonSerializer.Serialize(activeConns.Select(c => new {
                 t = (int)c.UsageType,
                 d = c.Details,
+                jn = c.JobName,
                 b = c.IsBackup,
                 s = c.IsSecondary,
                 bc = c.DetailsObject?.BufferedCount,
                 ws = c.DetailsObject?.BufferWindowStart,
                 we = c.DetailsObject?.BufferWindowEnd,
-                ts = c.DetailsObject?.TotalSegments
+                ts = c.DetailsObject?.TotalSegments,
+                i = c.DetailsObject?.DavItemId
             }));
 
             var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}|{usageBreakdown}|{providerBreakdown}|{connsJson}";

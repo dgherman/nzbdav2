@@ -96,7 +96,7 @@ public class NzbAnalysisService(
             using var cts = new CancellationTokenSource();
             var usageContext = new ConnectionUsageContext(
                 ConnectionUsageType.Analysis,
-                new ConnectionUsageDetails { Text = davItem.Path }
+                new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, DavItemId = davItem.Id }
             );
             using var _ = cts.Token.SetScopedContext(usageContext);
 
@@ -133,16 +133,45 @@ public class NzbAnalysisService(
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|100");
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|done");
             Log.Information("[NzbAnalysisService] Finished analysis for file: {FileName} ({Id})", info.Name, fileId);
+            
+            await SaveAnalysisHistoryAsync(fileId, info.Name, info.JobName, "Success", "Analysis completed successfully").ConfigureAwait(false);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "[NzbAnalysisService] Failed to analyze file {Id}", fileId);
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|error");
+            await SaveAnalysisHistoryAsync(fileId, info.Name, info.JobName, "Failed", ex.Message).ConfigureAwait(false);
         }
         finally
         {
             _activeAnalyses.TryRemove(fileId, out _);
             _concurrencyLimiter.Release();
+        }
+    }
+
+    private async Task SaveAnalysisHistoryAsync(Guid davItemId, string fileName, string jobName, string result, string details)
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+            
+            var item = new AnalysisHistoryItem
+            {
+                DavItemId = davItemId,
+                FileName = fileName,
+                JobName = jobName,
+                Result = result,
+                Details = details,
+                CreatedAt = DateTimeOffset.UtcNow
+            };
+            
+            db.AnalysisHistoryItems.Add(item);
+            await db.SaveChangesAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[NzbAnalysisService] Failed to save analysis history for {FileName}", fileName);
         }
     }
 }

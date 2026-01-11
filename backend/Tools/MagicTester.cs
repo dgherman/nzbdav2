@@ -63,13 +63,19 @@ public class MagicTester
                     totalRead += read;
                 }
                 Console.WriteLine($"Read {totalRead} decoded bytes.");
-                PrintHex(yencBuffer, 128);
                 
                 byte[] rar4 = { 0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x00 };
                 byte[] rar5 = { 0x52, 0x61, 0x72, 0x21, 0x1a, 0x07, 0x01, 0x00 };
+                byte[] sevenZip = { 0x37, 0x7A, 0xBC, 0xAF, 0x27, 0x1C };
                 
-                Console.WriteLine($"RAR4 Magic found: {FindMagic(yencBuffer, totalRead, rar4) != -1}");
-                Console.WriteLine($"RAR5 Magic found: {FindMagic(yencBuffer, totalRead, rar5) != -1}");
+                Console.WriteLine("Scanning for magics...");
+                for (int i = 0; i <= totalRead - 8; i++) {
+                    if (IsMatch(yencBuffer, i, rar4)) Console.WriteLine($"- Found RAR4 at offset {i}");
+                    if (IsMatch(yencBuffer, i, rar5)) Console.WriteLine($"- Found RAR5 at offset {i}");
+                    if (i <= totalRead - 6 && IsMatch(yencBuffer, i, sevenZip)) Console.WriteLine($"- Found 7z at offset {i}");
+                }
+
+                PrintHex(yencBuffer, 128);
             } catch (Exception ex) {
                 Console.WriteLine($"yEnc Decoding Failed: {ex.Message}");
             }
@@ -78,6 +84,13 @@ public class MagicTester
             Console.WriteLine($"Error: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
         }
+    }
+
+    private static bool IsMatch(byte[] data, int offset, byte[] sequence) {
+        for (int i = 0; i < sequence.Length; i++) {
+            if (data[offset + i] != sequence[i]) return false;
+        }
+        return true;
     }
 
     private static void PrintHex(byte[] buffer, int length)

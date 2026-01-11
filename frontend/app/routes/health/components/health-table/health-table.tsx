@@ -1,8 +1,9 @@
-import { Table, Badge, Pagination, Form, InputGroup } from "react-bootstrap";
+import { Table, Badge, Pagination, Form, InputGroup, Button } from "react-bootstrap";
 import type { HealthCheckQueueItem } from "~/types/backend";
 import styles from "./health-table.module.css";
 import { Truncate } from "~/routes/queue/components/truncate/truncate";
 import { ProgressBadge } from "~/routes/queue/components/status-badge/status-badge";
+import { useState } from "react";
 
 export type HealthTableProps = {
     isEnabled: boolean,
@@ -18,6 +19,9 @@ export type HealthTableProps = {
     onShowAllChange: (showAll: boolean) => void,
     onShowFailedChange: (showFailed: boolean) => void,
     onRunHealthCheck: (id: string) => void,
+    onRunHeadHealthCheck?: (ids: string[]) => void,
+    onRepair?: (ids: string[]) => void,
+    onResetHealthStatus?: (ids: string[]) => void,
     onItemClick: (id: string) => void,
 }
 
@@ -35,10 +39,55 @@ export function HealthTable({
     onShowAllChange,
     onShowFailedChange,
     onRunHealthCheck,
+    onRunHeadHealthCheck,
+    onRepair,
+    onResetHealthStatus,
     onItemClick
 }: HealthTableProps) {
 
+    const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
     const totalPages = Math.ceil(totalCount / pageSize);
+
+    const toggleSelection = (id: string) => {
+        setSelectedIds(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(id)) {
+                newSet.delete(id);
+            } else {
+                newSet.add(id);
+            }
+            return newSet;
+        });
+    };
+
+    const toggleSelectAll = () => {
+        if (selectedIds.size === healthCheckItems.length) {
+            setSelectedIds(new Set());
+        } else {
+            setSelectedIds(new Set(healthCheckItems.map(item => item.id)));
+        }
+    };
+
+    const handleBulkRepair = () => {
+        if (onRepair && selectedIds.size > 0) {
+            onRepair(Array.from(selectedIds));
+            setSelectedIds(new Set());
+        }
+    };
+
+    const handleBulkHeadCheck = () => {
+        if (onRunHeadHealthCheck && selectedIds.size > 0) {
+            onRunHeadHealthCheck(Array.from(selectedIds));
+            setSelectedIds(new Set());
+        }
+    };
+
+    const handleBulkReset = () => {
+        if (onResetHealthStatus && selectedIds.size > 0) {
+            onResetHealthStatus(Array.from(selectedIds));
+            setSelectedIds(new Set());
+        }
+    };
 
     return (
         <div className={styles.container}>
@@ -62,15 +111,44 @@ export function HealthTable({
                         />
                     </InputGroup>
                 </div>
-                <div className={styles.filterContainer} style={{ display: 'flex', gap: '1rem' }}>
-                    <Form.Check 
+                <div className={styles.filterContainer} style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+                    {selectedIds.size > 0 && (
+                        <>
+                            <Badge bg="primary">{selectedIds.size} selected</Badge>
+                            <Button
+                                variant="danger"
+                                size="sm"
+                                onClick={handleBulkRepair}
+                                disabled={!onRepair}
+                            >
+                                🔧 Repair Selected
+                            </Button>
+                            <Button
+                                variant="warning"
+                                size="sm"
+                                onClick={handleBulkHeadCheck}
+                                disabled={!onRunHeadHealthCheck}
+                            >
+                                ⚡ HEAD Check Selected
+                            </Button>
+                            <Button
+                                variant="secondary"
+                                size="sm"
+                                onClick={handleBulkReset}
+                                disabled={!onResetHealthStatus}
+                            >
+                                🔄 Reset Status Selected
+                            </Button>
+                        </>
+                    )}
+                    <Form.Check
                         type="switch"
                         id="show-failed-switch"
                         label="Failed Only"
                         checked={showFailed}
                         onChange={(e) => onShowFailedChange(e.target.checked)}
                     />
-                    <Form.Check 
+                    <Form.Check
                         type="switch"
                         id="show-all-switch"
                         label="Show All Files"
@@ -108,9 +186,17 @@ export function HealthTable({
                         <Table className={styles.table} responsive>
                             <thead className={styles.desktop}>
                                 <tr>
+                                    <th style={{ width: '40px' }}>
+                                        <Form.Check
+                                            type="checkbox"
+                                            checked={selectedIds.size === healthCheckItems.length && healthCheckItems.length > 0}
+                                            onChange={toggleSelectAll}
+                                        />
+                                    </th>
                                     <th>Name</th>
                                     <th className={styles.desktop}>Created</th>
                                     <th className={styles.desktop}>Last Check</th>
+                                    <th className={styles.desktop}>Result</th>
                                     <th className={styles.desktop}>Next Check</th>
                                     <th>Actions</th>
                                 </tr>
@@ -123,6 +209,13 @@ export function HealthTable({
                                         onClick={() => onItemClick(item.id)}
                                         style={{ cursor: 'pointer' }}
                                     >
+                                        <td onClick={(e) => e.stopPropagation()} style={{ width: '40px' }}>
+                                            <Form.Check
+                                                type="checkbox"
+                                                checked={selectedIds.has(item.id)}
+                                                onChange={() => toggleSelection(item.id)}
+                                            />
+                                        </td>
                                         <td className={styles.nameCell}>
                                             <div className={styles.nameContainer}>
                                                 {item.jobName && (
@@ -142,6 +235,15 @@ export function HealthTable({
                                             {formatDateBadge(item.lastHealthCheck, 'Never', 'warning')}
                                         </td>
                                         <td className={`${styles.dateCell} ${styles.desktop}`}>
+                                            {item.latestResult ? (
+                                                <Badge bg={item.latestResult === 'Healthy' ? 'success' : 'danger'} className={styles.dateBadge}>
+                                                    {item.latestResult}
+                                                </Badge>
+                                            ) : (
+                                                <Badge bg="secondary" className={styles.dateBadge}>-</Badge>
+                                            )}
+                                        </td>
+                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
                                             <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
                                                 {item.progress > 0
                                                     ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
@@ -153,14 +255,25 @@ export function HealthTable({
                                             </div>
                                         </td>
                                         <td>
-                                            <div 
-                                                className={styles.actionButton} 
-                                                onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
-                                                title="Run Health Check Now"
-                                                role="button"
-                                                style={{ cursor: 'pointer', fontSize: '1.2rem' }}
-                                            >
-                                                ▶️
+                                            <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                                <div 
+                                                    className={styles.actionButton} 
+                                                    onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
+                                                    title="Run Health Check Now"
+                                                    role="button"
+                                                    style={{ cursor: 'pointer', fontSize: '1.2rem' }}
+                                                >
+                                                    ▶️
+                                                </div>
+                                                <div 
+                                                    className={styles.actionButton} 
+                                                    onClick={(e) => { e.stopPropagation(); onResetHealthStatus?.([item.id]); }}
+                                                    title="Reset Health Status"
+                                                    role="button"
+                                                    style={{ cursor: 'pointer', fontSize: '1.2rem' }}
+                                                >
+                                                    🔄
+                                                </div>
                                             </div>
                                         </td>
                                     </tr>
@@ -204,6 +317,18 @@ function DateDetailsTable({ item, onRunHealthCheck }: { item: HealthCheckQueueIt
                 </div>
             </div>
             <div className={styles.dateDetailsRow}>
+                <div className={styles.dateDetailsLabel}>Result</div>
+                <div className={styles.dateDetailsValue}>
+                    {item.latestResult ? (
+                        <Badge bg={item.latestResult === 'Healthy' ? 'success' : 'danger'} className={styles.dateBadge}>
+                            {item.latestResult}
+                        </Badge>
+                    ) : (
+                        <Badge bg="secondary" className={styles.dateBadge}>-</Badge>
+                    )}
+                </div>
+            </div>
+            <div className={styles.dateDetailsRow}>
                 <div className={styles.dateDetailsLabel}>Next Health Check</div>
                 <div className={styles.dateDetailsValue}>
                     <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
@@ -220,14 +345,25 @@ function DateDetailsTable({ item, onRunHealthCheck }: { item: HealthCheckQueueIt
             <div className={styles.dateDetailsRow}>
                 <div className={styles.dateDetailsLabel}>Actions</div>
                 <div className={styles.dateDetailsValue}>
-                    <div 
-                        className={styles.actionButton} 
-                        onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
-                        title="Run Health Check Now"
-                        role="button"
-                        style={{ cursor: 'pointer', fontSize: '1.2rem' }}
-                    >
-                        ▶️
+                    <div style={{ display: 'flex', gap: '0.5rem' }}>
+                        <div 
+                            className={styles.actionButton} 
+                            onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
+                            title="Run Health Check Now"
+                            role="button"
+                            style={{ cursor: 'pointer', fontSize: '1.2rem' }}
+                        >
+                            ▶️
+                        </div>
+                        <div 
+                            className={styles.actionButton} 
+                            onClick={(e) => { e.stopPropagation(); onResetHealthStatus?.([item.id]); }}
+                            title="Reset Health Status"
+                            role="button"
+                            style={{ cursor: 'pointer', fontSize: '1.2rem' }}
+                        >
+                            🔄
+                        </div>
                     </div>
                 </div>
             </div>

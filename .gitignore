@@ -26,4 +26,14 @@ nuget
 !UPSTREAM_ANALYSIS.md
 !OPTIMIZATIONS.md
 !DATABASE_OPTIMIZATION.md
-!CLAUDE.mdlocal_data/db.sqlite
+!CLAUDE.md
+
+#################
+# Project Files #
+#################
+
+local_data/
+*.nzb
+config/
+temp_config/
+backend/local_data/

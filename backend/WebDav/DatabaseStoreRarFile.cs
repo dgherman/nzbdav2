@@ -36,6 +36,8 @@ public class DatabaseStoreRarFile(
             new ConnectionUsageDetails 
             { 
                 Text = davRarFile.Path,
+                JobName = davRarFile.Name,
+                AffinityKey = Path.GetFileName(Path.GetDirectoryName(davRarFile.Path)),
                 DavItemId = davRarFile.Id,
                 FileDate = davRarFile.ReleaseDate
             }

@@ -162,7 +162,11 @@ public class QueueItemProcessor(
         var providerConfig = configManager.GetUsenetProviderConfig();
         var concurrency = configManager.GetMaxQueueConnections();
         Log.Information("[Queue] Processing '{JobName}': TotalConnections={TotalConnections}, MaxQueueConnections={MaxQueueConnections}", queueItem.JobName, providerConfig.TotalPooledConnections, concurrency);
-        using var _1 = ct.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Queue, queueItem.JobName));
+        
+        // Create a linked token for context propagation (more robust than setting on existing token)
+        using var queueCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        using var _1 = queueCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Queue, queueItem.JobName));
+        var queueCt = queueCts.Token;
 
         // read the nzb document
         Log.Debug("[QueueItemProcessor] Parsing NZB document for {JobName}. NZB size: {NzbSizeBytes} bytes",
@@ -199,13 +203,13 @@ public class QueueItemProcessor(
 
         Log.Debug("[QueueItemProcessor] Step 1a: Fetching first segments for {FileCount} files in {JobName}...", nzbFiles.Count, queueItem.JobName);
         var segments = await FetchFirstSegmentsStep.FetchFirstSegments(
-            nzbFiles, usenetClient, configManager, ct, part1Progress).ConfigureAwait(false);
+            nzbFiles, usenetClient, configManager, queueCt, part1Progress).ConfigureAwait(false);
         Log.Information("[QueueItemProcessor] Step 1a complete: Fetched {SegmentCount} first segments for {JobName}",
             segments.Count, queueItem.JobName);
 
         Log.Debug("[QueueItemProcessor] Step 1b: Extracting Par2 file descriptors for {JobName}...", queueItem.JobName);
         var par2FileDescriptors = await GetPar2FileDescriptorsStep.GetPar2FileDescriptors(
-            segments, usenetClient, ct).ConfigureAwait(false);
+            segments, usenetClient, queueCt).ConfigureAwait(false);
         Log.Information("[QueueItemProcessor] Step 1b complete: Found {Par2Count} Par2 file descriptors for {JobName}",
             par2FileDescriptors.Count, queueItem.JobName);
 
@@ -223,7 +227,7 @@ public class QueueItemProcessor(
             Log.Debug("[QueueItemProcessor] Step 1d: Fetching file sizes for {FileCount} files without Par2 descriptors in {JobName}...",
                 filesWithoutSize.Count, queueItem.JobName);
             var fileSizeStartTime = DateTime.UtcNow;
-            var fileSizes = await usenetClient.GetFileSizesBatchAsync(filesWithoutSize, concurrency, ct).ConfigureAwait(false);
+            var fileSizes = await usenetClient.GetFileSizesBatchAsync(filesWithoutSize, concurrency, queueCt).ConfigureAwait(false);
             var fileSizeElapsed = DateTime.UtcNow - fileSizeStartTime;
             Log.Information("[QueueItemProcessor] Step 1d complete: Fetched {FileCount} file sizes for {JobName}. Elapsed: {ElapsedSeconds}s",
                 fileSizes.Count, queueItem.JobName, fileSizeElapsed.TotalSeconds);
@@ -239,7 +243,7 @@ public class QueueItemProcessor(
         // step 2 -- perform file processing
         Log.Information("[QueueItemProcessor] Step 2: Creating file processors for {JobName}. FileInfos: {FileInfoCount}",
             queueItem.JobName, fileInfos.Count);
-        var fileProcessors = GetFileProcessors(fileInfos, archivePassword).ToList();
+        var fileProcessors = GetFileProcessors(fileInfos, archivePassword, queueCt).ToList();
         Log.Information("[QueueItemProcessor] Step 2: Created {ProcessorCount} file processors for {JobName} (progress 50-100%)",
             fileProcessors.Count, queueItem.JobName);
 
@@ -258,7 +262,7 @@ public class QueueItemProcessor(
         var fileProcessingResultsAll = await fileProcessors
             .Select(x => x!.ProcessAsync())
             .WithConcurrencyAsync(fileConcurrency)
-            .GetAllAsync(ct, part2Progress).ConfigureAwait(false);
+            .GetAllAsync(queueCt, part2Progress).ConfigureAwait(false);
         var fileProcessingResults = fileProcessingResultsAll
             .Where(x => x is not null)
             .Select(x => x!)
@@ -281,7 +285,7 @@ public class QueueItemProcessor(
             var part3Progress = progress
                 .Offset(100)
                 .ToPercentage(articlesToCheck.Count);
-            await usenetClient.CheckAllSegmentsAsync(articlesToCheck, concurrency, part3Progress, ct).ConfigureAwait(false);
+            await usenetClient.CheckAllSegmentsAsync(articlesToCheck, concurrency, part3Progress, queueCt).ConfigureAwait(false);
             var step3Elapsed = DateTime.UtcNow - step3StartTime;
             Log.Information("[QueueItemProcessor] Step 3 complete: Article existence check finished for {JobName}. Elapsed: {ElapsedSeconds}s",
                 queueItem.JobName, step3Elapsed.TotalSeconds);
@@ -342,7 +346,8 @@ public class QueueItemProcessor(
     private IEnumerable<BaseProcessor> GetFileProcessors
     (
         List<GetFileInfosStep.FileInfo> fileInfos,
-        string? archivePassword
+        string? archivePassword,
+        CancellationToken ct
     )
     {
         Log.Debug("[GetFileProcessors] Processing {FileInfoCount} file infos", fileInfos.Count);

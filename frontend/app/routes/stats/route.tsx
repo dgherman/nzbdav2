@@ -126,13 +126,14 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                     const transformedConns = rawConns.map(c => ({
                         usageType: c.t,
                         details: c.d,
-                        jobName: c.d, 
+                        jobName: c.jn, 
                         isBackup: c.b,
                         isSecondary: c.s,
                         bufferedCount: c.bc,
                         bufferWindowStart: c.ws,
                         bufferWindowEnd: c.we,
-                        totalSegments: c.ts
+                        totalSegments: c.ts,
+                        davItemId: c.i
                     } as ConnectionUsageContext));
 
                     setConnections(prev => ({
@@ -241,14 +242,29 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
         }
     }, [addToast]);
 
-    const onRunHealthCheck = useCallback(async (id: string) => {
-        if (!confirm("Run health check now?")) return;
-        try {
-            const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
-            if (!response.ok) throw new Error(await response.text());
-            addToast("Health check scheduled successfully", "success", "Success");
-        } catch (e) {
-            addToast(`Failed to start health check: ${e}`, "danger", "Error");
+    const onRunHealthCheck = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+        if (!confirm(`Run health check for ${ids.length} item(s) now?`)) return;
+        
+        let successCount = 0;
+        let failCount = 0;
+
+        for (const itemId of ids) {
+            try {
+                const response = await fetch(`/api/health/check/${itemId}`, { method: 'POST' });
+                if (!response.ok) throw new Error(await response.text());
+                successCount++;
+            } catch (e) {
+                console.error(`Failed to start health check for ${itemId}:`, e);
+                failCount++;
+            }
+        }
+
+        if (successCount > 0) {
+            addToast(`Health check scheduled successfully for ${successCount} item(s)`, "success", "Success");
+        }
+        if (failCount > 0) {
+            addToast(`Failed to start health check for ${failCount} item(s)`, "danger", "Error");
         }
     }, [addToast]);
 
@@ -370,6 +386,7 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                             onFileClick={onFileClick}
                             onAnalyze={onAnalyze}
                             onRepair={onRepair}
+                            onRunHealthCheck={onRunHealthCheck}
                         />
                     )}
                 </Tab>

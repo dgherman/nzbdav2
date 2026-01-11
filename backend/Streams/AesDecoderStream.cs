@@ -259,6 +259,16 @@ namespace NzbWebDAV.Streams
         {
             if (offset < 0 || offset > _mLimit) throw new ArgumentOutOfRangeException(nameof(offset));
 
+            // Optimization & Robustness: If seeking to the very end, we don't need to read IV or setup decryptor.
+            // The next ReadAsync call will see _mWritten == _mLimit and return 0 immediately.
+            // This fixes crashes when players probe the file size (Seek to EOF) on truncated underlying streams.
+            if (offset == _mLimit)
+            {
+                _mWritten = offset;
+                _plainStart = _plainEnd = 0;
+                return;
+            }
+
             long blockIndex = offset / BlockSize;
             int blockOffset = (int)(offset % BlockSize);
 
@@ -273,7 +283,13 @@ namespace NzbWebDAV.Streams
                 while (read < BlockSize)
                 {
                     int r = await _mStream.ReadAsync(iv, read, BlockSize - read, ct).ConfigureAwait(false);
-                    if (r == 0) throw new EndOfStreamException("Unable to read previous block for IV during seek.");
+                    if (r == 0)
+                    {
+                        // Resilient behavior: Pad IV with zeros if stream ends prematurely.
+                        // This prevents crashes on truncated files where the IV block is missing or partial.
+                        Array.Clear(iv, read, BlockSize - read);
+                        break; 
+                    }
                     read += r;
                 }
                 // after this read, stream at start of target block
@@ -302,7 +318,12 @@ namespace NzbWebDAV.Streams
                 while (read < BlockSize)
                 {
                     int r = await _mStream.ReadAsync(block, read, BlockSize - read, ct).ConfigureAwait(false);
-                    if (r == 0) throw new EndOfStreamException("Unable to read target block during seek.");
+                    if (r == 0) 
+                    {
+                         // Resilient behavior: Pad block with zeros if stream ends prematurely.
+                         Array.Clear(block, read, BlockSize - read);
+                         break;
+                    }
                     read += r;
                 }
 

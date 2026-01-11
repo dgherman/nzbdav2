@@ -37,6 +37,8 @@ public class DatabaseStoreNzbFile(
             new ConnectionUsageDetails 
             { 
                 Text = davNzbFile.Path,
+                JobName = davNzbFile.Name,
+                AffinityKey = Path.GetFileName(Path.GetDirectoryName(davNzbFile.Path)),
                 DavItemId = davNzbFile.Id,
                 FileDate = davNzbFile.ReleaseDate
             }

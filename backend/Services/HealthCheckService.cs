@@ -151,7 +151,7 @@ public class HealthCheckService
             var timeoutMinutes = 20;
             cts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes)); // Timeout after 20 minutes per file
             
-            using var contextScope = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check" }));
+            using var contextScope = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check", JobName = davItem.Name, DavItemId = davItem.Id }));
 
             // Determine if this is an urgent health check
             var isUrgentCheck = davItem.NextHealthCheck == DateTimeOffset.MinValue;
@@ -161,11 +161,14 @@ public class HealthCheckService
                 davItem.Name, davItem.Id, isUrgentCheck ? "Urgent (HEAD)" : "Routine (STAT)", timeoutMinutes);
             
             await PerformHealthCheck(davItem, dbClient, concurrency, cts.Token, useHead).ConfigureAwait(false);
-            
+
             // Success! Remove from timeout tracking
             _timeoutCounts.TryRemove(davItem.Id, out _);
-            
-            Log.Information("[HealthCheck] Finished item: {Name}", davItem.Name);
+
+            // Reload to get the latest state after health check
+            await dbClient.Ctx.Entry(davItem).ReloadAsync(cts.Token).ConfigureAwait(false);
+            var result = davItem.IsCorrupted ? "Unhealthy (Repair Attempted)" : "Healthy";
+            Log.Information("[HealthCheck] Finished item: {Name}. Result: {Result}", davItem.Name, result);
         }
         catch (OperationCanceledException) when (!_cancellationToken.IsCancellationRequested)
         {
@@ -235,14 +238,15 @@ public class HealthCheckService
             try
             {
                 await using var dbContext = new DavDatabaseContext();
-                
+
                 // Update the item to prevent immediate retry loop
-                var nextCheck = DateTimeOffset.UtcNow.AddDays(1);
+                var utcNow = DateTimeOffset.UtcNow;
+                var nextCheck = utcNow.AddDays(1);
                 await dbContext.Items
                     .Where(x => x.Id == itemId)
                     .ExecuteUpdateAsync(setters => setters
                         .SetProperty(p => p.NextHealthCheck, nextCheck)
-                        .SetProperty(p => p.LastHealthCheck, DateTimeOffset.UtcNow))
+                        .SetProperty(p => p.LastHealthCheck, utcNow))
                     .ConfigureAwait(false);
 
                 dbContext.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
@@ -343,7 +347,7 @@ public class HealthCheckService
             var progress = progressHook.ToPercentage(segments.Count);
             var isImported = OrganizedLinksUtil.GetLink(davItem, _configManager, allowScan: false) != null;
             using var healthCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Path, IsImported = isImported }));
+            using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, IsImported = isImported, DavItemId = davItem.Id }));
             var sizes = await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token, useHead).ConfigureAwait(false);
 
             // If we did a HEAD check, we now have the segment sizes. Cache them for faster seeking.
@@ -420,7 +424,7 @@ public class HealthCheckService
 
             // when usenet article is missing, perform repairs
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path }));
+            using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, DavItemId = davItem.Id }));
 
             // Set operation type based on the check method used
             var operation = useHead ? "HEAD" : "STAT";
@@ -522,7 +526,7 @@ public class HealthCheckService
 
         // when usenet article is missing, perform repairs
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        using var _ = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path }));
+        using var _ = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, DavItemId = davItem.Id }));
         await Repair(davItem, dbClient, cts.Token, "Manual repair triggered by user").ConfigureAwait(false);
     }
 

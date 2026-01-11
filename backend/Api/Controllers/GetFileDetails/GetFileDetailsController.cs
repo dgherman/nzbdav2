@@ -42,23 +42,77 @@ public class GetFileDetailsController(
 
         // JobName in NzbProviderStats is the full file path (davItem.Path)
         // JobName in QueueItems/HistoryItems is the directory name
+        // We need to check both because Queue downloads key by JobName, while Streaming keys by Path.
         var providerStatsJobName = davItem.Path;
         var queueJobName = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
 
-        // Get provider stats from database
+        Serilog.Log.Debug("[GetFileDetails] Fetching stats for Path='{Path}' and Job='{Job}'", providerStatsJobName, queueJobName);
+
+        // Get provider stats from database (check both keys)
         var dbProviderStats = await dbClient.Ctx.NzbProviderStats
             .AsNoTracking()
-            .Where(x => x.JobName == providerStatsJobName)
+            .Where(x => x.JobName == providerStatsJobName || (queueJobName != null && x.JobName == queueJobName))
             .ToListAsync()
             .ConfigureAwait(false);
 
-        // Get live stats from affinity service (important for active downloads)
+        // Get live stats from affinity service (check both keys)
         var liveProviderStats = affinityService.GetJobStats(providerStatsJobName);
+        if (queueJobName != null)
+        {
+            var jobStats = affinityService.GetJobStats(queueJobName);
+            // Serilog.Log.Information("[GetFileDetails] Live Stats - Path: {PathCount}, Job: {JobCount}", liveProviderStats.Count, jobStats.Count);
+            foreach (var kvp in jobStats)
+            {
+                if (!liveProviderStats.ContainsKey(kvp.Key))
+                {
+                    liveProviderStats[kvp.Key] = kvp.Value;
+                }
+                else
+                {
+                    // If we have stats for both, merge them (summing up counts/bytes)
+                    // Note: This is a simplification. Ideally we'd want weighted averages for speeds.
+                    // For now, let's trust the Path-specific stats (Streaming) over Job stats if both exist?
+                    // Actually, usually only one is active/populated significantly.
+                    // Let's just accumulate counts to show total activity.
+                    var existing = liveProviderStats[kvp.Key];
+                    var incoming = kvp.Value;
+                    existing.SuccessfulSegments += incoming.SuccessfulSegments;
+                    existing.FailedSegments += incoming.FailedSegments;
+                    existing.TotalBytes += incoming.TotalBytes;
+                    existing.TotalTimeMs += incoming.TotalTimeMs;
+                    // Keep the most recent LastUsed
+                    if (incoming.LastUsed > existing.LastUsed) existing.LastUsed = incoming.LastUsed;
+                    // Speed: Use the higher one? Or average? Let's use the one from the most recent activity.
+                    if (incoming.LastUsed > existing.LastUsed) existing.RecentAverageSpeedBps = incoming.RecentAverageSpeedBps;
+                }
+            }
+        }
 
         // Merge database and live stats (live stats take precedence)
         var mergedStats = new Dictionary<int, NzbProviderStats>();
-        foreach (var stat in dbProviderStats) mergedStats[stat.ProviderIndex] = stat;
+        
+        // First merge DB stats (accumulating if multiple entries for same provider exist due to different JobNames)
+        foreach (var stat in dbProviderStats) 
+        {
+            if (mergedStats.TryGetValue(stat.ProviderIndex, out var existing))
+            {
+                existing.SuccessfulSegments += stat.SuccessfulSegments;
+                existing.FailedSegments += stat.FailedSegments;
+                existing.TotalBytes += stat.TotalBytes;
+                existing.TotalTimeMs += stat.TotalTimeMs;
+                if (stat.LastUsed > existing.LastUsed) existing.LastUsed = stat.LastUsed;
+            }
+            else
+            {
+                mergedStats[stat.ProviderIndex] = stat;
+            }
+        }
+        
+        // Then overwrite/update with live stats
         foreach (var kvp in liveProviderStats) mergedStats[kvp.Key] = kvp.Value;
+
+        Serilog.Log.Debug("[GetFileDetails] Merged Stats Summary: {Count} providers. TotalBytes: {TotalBytes}",
+            mergedStats.Count, mergedStats.Values.Sum(s => s.TotalBytes));
 
         // Get provider configuration to map provider index to host
         var usenetConfig = configManager.GetUsenetProviderConfig();

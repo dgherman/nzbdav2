@@ -33,6 +33,7 @@ const defaultConfig = {
     "api.duplicate-nzb-behavior": "increment",
     "api.import-strategy": "symlinks",
     "api.completed-downloads-dir": "",
+    "api.history-retention-hours": "",
     "usenet.providers": "",
     "usenet.connections-per-stream": "5",
     "usenet.stream-buffer-size": "100",

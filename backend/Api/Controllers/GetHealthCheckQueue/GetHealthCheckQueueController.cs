@@ -57,20 +57,39 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
                 .ToList();
         }
 
+        // Get latest health check results for all items
+        var itemIds = pagedItems.Select(x => x.Id).ToList();
+        var latestResults = await dbClient.Ctx.HealthCheckResults
+            .AsNoTracking()
+            .Where(r => itemIds.Contains(r.DavItemId))
+            .GroupBy(r => r.DavItemId)
+            .Select(g => new
+            {
+                DavItemId = g.Key,
+                LatestResult = g.OrderByDescending(r => r.CreatedAt).First()
+            })
+            .ToDictionaryAsync(x => x.DavItemId, x => x.LatestResult).ConfigureAwait(false);
+
         return new GetHealthCheckQueueResponse()
         {
             UncheckedCount = totalCount,
             PendingCount = pendingCount,
-            Items = pagedItems.Select(x => new GetHealthCheckQueueResponse.HealthCheckQueueItem()
+            Items = pagedItems.Select(x =>
             {
-                Id = x.Id.ToString(),
-                Name = x.Name,
-                Path = x.Path,
-                JobName = Path.GetFileName(Path.GetDirectoryName(x.Path)),
-                ReleaseDate = x.ReleaseDate,
-                LastHealthCheck = x.LastHealthCheck,
-                NextHealthCheck = x.NextHealthCheck == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow : x.NextHealthCheck,
-                OperationType = x.NextHealthCheck == DateTimeOffset.MinValue ? "HEAD" : "STAT", // Urgent checks use HEAD, routine use STAT
+                latestResults.TryGetValue(x.Id, out var result);
+                return new GetHealthCheckQueueResponse.HealthCheckQueueItem()
+                {
+                    Id = x.Id.ToString(),
+                    Name = x.Name,
+                    Path = x.Path,
+                    JobName = Path.GetFileName(Path.GetDirectoryName(x.Path)),
+                    ReleaseDate = x.ReleaseDate,
+                    LastHealthCheck = x.LastHealthCheck,
+                    NextHealthCheck = x.NextHealthCheck == DateTimeOffset.MinValue ? DateTimeOffset.UtcNow : x.NextHealthCheck,
+                    OperationType = x.NextHealthCheck == DateTimeOffset.MinValue ? "HEAD" : "STAT", // Urgent checks use HEAD, routine use STAT
+                    Progress = 0, // Active progress is tracked via WebSocket during health checks
+                    LatestResult = result?.Result.ToString() ?? (x.IsCorrupted ? "Unhealthy" : null)
+                };
             }).ToList(),
         };
     }

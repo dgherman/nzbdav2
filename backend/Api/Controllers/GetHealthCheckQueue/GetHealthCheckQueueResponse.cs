@@ -16,5 +16,7 @@ public class GetHealthCheckQueueResponse : BaseApiResponse
         public required DateTimeOffset? LastHealthCheck { get; init; }
         public required DateTimeOffset? NextHealthCheck { get; init; }
         public required string OperationType { get; init; } // "STAT" or "HEAD"
+        public required int Progress { get; init; } // Active health check progress (0-100), updated via WebSocket
+        public string? LatestResult { get; init; } // Latest health check result: "Healthy", "Unhealthy", etc.
     }
 }

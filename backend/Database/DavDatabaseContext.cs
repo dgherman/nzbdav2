@@ -40,10 +40,29 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<BandwidthSample> BandwidthSamples { get; set; }
     public DbSet<LocalLink> LocalLinks { get; set; }
     public DbSet<NzbProviderStats> NzbProviderStats { get; set; }
+    public DbSet<AnalysisHistoryItem> AnalysisHistoryItems { get; set; }
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
     {
+        // AnalysisHistoryItem
+        b.Entity<AnalysisHistoryItem>(e =>
+        {
+            e.ToTable("AnalysisHistoryItems");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedOnAdd();
+            e.Property(i => i.CreatedAt)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+            e.Property(i => i.FileName).IsRequired();
+            e.Property(i => i.Result).IsRequired();
+            e.HasIndex(i => i.CreatedAt);
+            e.HasIndex(i => i.DavItemId);
+        });
+
         // LocalLink
         b.Entity<LocalLink>(e =>
         {

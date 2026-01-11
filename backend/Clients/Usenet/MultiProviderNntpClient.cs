@@ -194,12 +194,21 @@ public class MultiProviderNntpClient : INntpClient
                 // Record successful download for provider affinity
                 if (_affinityService != null && operationName == "BODY")
                 {
-                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
-                    if (!string.IsNullOrEmpty(jobName))
+                    var affinityKey = ctx.AffinityKey;
+                    if (!string.IsNullOrEmpty(affinityKey))
                     {
-                        // Estimate bytes from result if it's a stream
-                        long bytes = result is YencHeaderStream stream ? stream.Length : 0;
-                        _affinityService.RecordSuccess(jobName, provider.ProviderIndex, bytes, stopwatch.ElapsedMilliseconds);
+                        // Estimate bytes from result
+                        long bytes = 0;
+                        if (result is YencHeaderStream stream) bytes = stream.Length;
+                        else if (result is UsenetYencHeader header) bytes = header.PartSize;
+                        else if (result is long l) bytes = l;
+
+                        if (bytes == 0)
+                        {
+                            Log.Debug("[MultiProvider] Zero bytes recorded for BODY operation. ResultType={Type}, AffinityKey={Key}", result?.GetType().Name ?? "null", affinityKey);
+                        }
+
+                        _affinityService.RecordSuccess(affinityKey, provider.ProviderIndex, bytes, stopwatch.ElapsedMilliseconds);
                     }
                 }
 
@@ -217,10 +226,10 @@ public class MultiProviderNntpClient : INntpClient
                 // Record failure for provider affinity
                 if (_affinityService != null)
                 {
-                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
-                    if (!string.IsNullOrEmpty(jobName))
+                    var affinityKey = ctx.AffinityKey;
+                    if (!string.IsNullOrEmpty(affinityKey))
                     {
-                        _affinityService.RecordFailure(jobName, provider.ProviderIndex);
+                        _affinityService.RecordFailure(affinityKey, provider.ProviderIndex);
                     }
                 }
 
@@ -233,10 +242,10 @@ public class MultiProviderNntpClient : INntpClient
                 // Record failure for provider affinity
                 if (_affinityService != null)
                 {
-                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
-                    if (!string.IsNullOrEmpty(jobName))
+                    var affinityKey = ctx.AffinityKey;
+                    if (!string.IsNullOrEmpty(affinityKey))
                     {
-                        _affinityService.RecordFailure(jobName, provider.ProviderIndex);
+                        _affinityService.RecordFailure(affinityKey, provider.ProviderIndex);
                     }
                 }
 
@@ -249,10 +258,10 @@ public class MultiProviderNntpClient : INntpClient
                 // Record timeout/cancellation as failure for provider affinity (only if it's a real timeout, not parent cancellation)
                 if (_affinityService != null && !cancellationToken.IsCancellationRequested)
                 {
-                    var jobName = ctx.DetailsObject?.Text ?? ctx.Details;
-                    if (!string.IsNullOrEmpty(jobName))
+                    var affinityKey = ctx.AffinityKey;
+                    if (!string.IsNullOrEmpty(affinityKey))
                     {
-                        _affinityService.RecordFailure(jobName, provider.ProviderIndex);
+                        _affinityService.RecordFailure(affinityKey, provider.ProviderIndex);
                     }
                 }
 
@@ -297,13 +306,13 @@ public class MultiProviderNntpClient : INntpClient
         if (_affinityService != null)
         {
             var context = cancellationToken.GetContext<ConnectionUsageContext>();
-            var jobName = context.DetailsObject?.Text ?? context.Details;
+            var affinityKey = context.AffinityKey;
 
-            if (!string.IsNullOrEmpty(jobName))
+            if (!string.IsNullOrEmpty(affinityKey))
             {
                 // Only log affinity decisions for buffer streaming operations
                 var logDecision = context.UsageType == ConnectionUsageType.BufferedStreaming;
-                var preferredIndex = _affinityService.GetPreferredProvider(jobName, Providers.Count, logDecision);
+                var preferredIndex = _affinityService.GetPreferredProvider(affinityKey, Providers.Count, logDecision);
                 if (preferredIndex.HasValue && preferredIndex.Value >= 0 && preferredIndex.Value < Providers.Count)
                 {
                     affinityProvider = Providers[preferredIndex.Value];
@@ -335,13 +344,13 @@ public class MultiProviderNntpClient : INntpClient
         if (_affinityService != null)
         {
             var context = cancellationToken.GetContext<ConnectionUsageContext>();
-            var jobName = context.DetailsObject?.Text ?? context.Details;
+            var affinityKey = context.AffinityKey;
 
-            if (!string.IsNullOrEmpty(jobName))
+            if (!string.IsNullOrEmpty(affinityKey))
             {
                 // Log affinity decisions for buffer streaming
                 var logDecision = context.UsageType == ConnectionUsageType.BufferedStreaming;
-                var preferredIndex = _affinityService.GetPreferredProvider(jobName, Providers.Count, logDecision);
+                var preferredIndex = _affinityService.GetPreferredProvider(affinityKey, Providers.Count, logDecision);
                 if (preferredIndex.HasValue && preferredIndex.Value >= 0 && preferredIndex.Value < Providers.Count)
                 {
                     affinityProvider = Providers[preferredIndex.Value];

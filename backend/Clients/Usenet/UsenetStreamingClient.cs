@@ -335,6 +335,7 @@ public class UsenetStreamingClient
                 // This timeout is adaptive: avg * 4x, allowing all providers to be tried
                 using var absoluteCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 absoluteCts.CancelAfter(TimeSpan.FromSeconds(adaptiveTimeoutSeconds));
+                using var _scope = absoluteCts.Token.SetScopedContext(usageContext);
 
                 try
                 {
@@ -346,12 +347,22 @@ public class UsenetStreamingClient
                     // Adaptive timeout exceeded after trying providers
                     throw new TimeoutException($"GetFileSizeAsync timed out for file {file.FileName} after {adaptiveTimeoutSeconds}s (adaptive timeout: avg * 4x)");
                 }
+                catch (Exception ex)
+                {
+                    // If we can't get the file size (e.g. missing article), log warning but don't fail the whole batch.
+                    // The file processor will try again later or handle the missing file appropriately.
+                    Serilog.Log.Warning("[UsenetStreamingClient] Failed to get file size for {FileName}: {Message}", file.FileName, ex.Message);
+                    return (file, -1L);
+                }
             })
             .WithConcurrencyAsync(concurrentConnections);
 
         await foreach (var (file, size) in tasks.ConfigureAwait(false))
         {
-            results[file] = size;
+            if (size >= 0)
+            {
+                results[file] = size;
+            }
         }
 
         operationStartTime.Stop();

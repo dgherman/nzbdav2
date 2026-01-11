@@ -246,39 +246,44 @@ public class MultiConnectionNntpClient : INntpClient
                 // when the stream is disposed.
                 var wrappedStream = new DisposableCallbackStream(
                     stream,
-                    onDisposeAsync: async () =>
-                    {
-                        try
-                        {
-                            // Wait for connection to be ready before returning to pool
-                            // Use a short timeout (500ms) to allow quick draining of small/nearly-complete segments.
-                            // If it takes longer, we kill the connection to ensure UI responsiveness during seeking.
-                            using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
-                            timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(500));
-                            await connectionLock.Connection.WaitForReady(timeoutCts.Token).ConfigureAwait(false);
-                        }
-                        catch (OperationCanceledException)
-                        {
-                            _logger?.Warning("Connection cleanup timed out - forcing disposal to release resources.");
-                            connectionLock.Replace();
-                        }
-                        catch (ObjectDisposedException)
-                        {
-                            // Connection was disposed (likely due to timeout/error during stream usage), so we must replace it.
-                            connectionLock.Replace();
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger?.Warning(ex, "Error during connection cleanup");
-                            connectionLock.Replace();
-                        }
-                        finally
-                        {
-                            connectionLock.Dispose();
-                            globalPermit?.Dispose();
-                        }
-                    }
-                );
+                                            onDisposeAsync: async () =>
+                                        {
+                                            try
+                                            {
+                                                // Wait for connection to be ready before returning to pool
+                                                // Use a short timeout (500ms) to allow quick draining of small/nearly-complete segments.
+                                                // If it takes longer, we kill the connection to ensure UI responsiveness during seeking.
+                                                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(SigtermUtil.GetCancellationToken());
+                                                timeoutCts.CancelAfter(TimeSpan.FromMilliseconds(500));
+                                                await connectionLock.Connection.WaitForReady(timeoutCts.Token).ConfigureAwait(false);
+                                            }
+                                            catch (IOException ex)
+                                            {
+                                                // IOException during WaitForReady indicates a dirty connection (timeout or partial drain)
+                                                _logger?.Debug("Connection cleanup failed (IOException): {Message}. Connection will be discarded/replaced.", ex.Message);
+                                                connectionLock.Replace();
+                                            }
+                                            catch (OperationCanceledException)
+                                            {
+                                                _logger?.Debug("Connection cleanup timed out - forcing disposal to release resources.");
+                                                connectionLock.Replace();
+                                            }
+                                            catch (ObjectDisposedException)
+                                            {
+                                                // Connection was disposed (likely due to timeout/error during stream usage), so we must replace it.
+                                                connectionLock.Replace();
+                                            }
+                                            catch (Exception ex)
+                                            {
+                                                _logger?.Warning(ex, "An unexpected error occurred during connection cleanup");
+                                                connectionLock.Replace();
+                                            }
+                                            finally
+                                            {
+                                                connectionLock.Dispose();
+                                                globalPermit?.Dispose();
+                                            }
+                                        }                );
 
                 success = true;
                 // Return a new YencHeaderStream that wraps our callback stream, preserving headers
@@ -315,23 +320,30 @@ public class MultiConnectionNntpClient : INntpClient
             _logger?.Debug("[{Host}] Operation timed out after {ElapsedSeconds:F1}s (limit: {Timeout:F1}s). This usually indicates slow Usenet server response or connection lock contention.", _host, elapsedSeconds, currentTimeoutMs / 1000.0);
             throw new TimeoutException($"[{_host}] GetSegmentStream operation timed out after {elapsedSeconds:F1} seconds (limit: {currentTimeoutMs / 1000.0:F1}s)");
         }
-        finally
-        {
-            _lastActivity = DateTimeOffset.UtcNow;
-            timeoutContextScope?.Dispose(); // Dispose the scoped context if it was created
-            // If we failed to create the stream (success == false), we must cleanup here.
-            if (!success)
-            {
-                if (connectionLock != null)
-                {
-                    _ = connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken())
-                        .ContinueWith(_ => connectionLock.Dispose());
-                }
-            }
-            // Always dispose permit in finally block of the current recursive call
-            globalPermit?.Dispose();
-        }
-    }
+                    finally
+                    {
+                        _lastActivity = DateTimeOffset.UtcNow;
+                        timeoutContextScope?.Dispose(); // Dispose the scoped context if it was created
+                        // If we failed to create the stream (success == false), we must cleanup here.
+                        if (!success)
+                        {
+                            if (connectionLock != null)
+                            {
+                                _ = connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken())
+                                    .ContinueWith(t =>
+                                    {
+                                        if (t.IsFaulted)
+                                        {
+                                            _logger?.Debug("Background connection cleanup failed: {Message}", t.Exception?.InnerException?.Message);
+                                            connectionLock.Replace();
+                                        }
+                                        connectionLock.Dispose();
+                                    });
+                            }
+                        }
+                        // Always dispose permit in finally block of the current recursive call
+                        globalPermit?.Dispose();
+                    }    }
 
     private async Task<T> RunWithConnection<T>
     (
@@ -426,7 +438,15 @@ public class MultiConnectionNntpClient : INntpClient
                 // since we want the continuation to always run.
                 if (!isDisposed)
                     _ = connectionLock.Connection.WaitForReady(SigtermUtil.GetCancellationToken())
-                        .ContinueWith(_ => connectionLock.Dispose());
+                        .ContinueWith(t =>
+                        {
+                            if (t.IsFaulted)
+                            {
+                                _logger?.Debug("Background connection cleanup failed: {Message}", t.Exception?.InnerException?.Message);
+                                connectionLock.Replace();
+                            }
+                            connectionLock.Dispose();
+                        });
             }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && timeoutCts.IsCancellationRequested)

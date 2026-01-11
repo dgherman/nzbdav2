@@ -25,6 +25,8 @@ public sealed class BufferToEndStream : Stream
     // ───────────────────────────────────  pipeline & pump
     private readonly Pipe _pipe;
     private readonly Task _pumpTask;
+    public Task PumpTask => _pumpTask;
+    public bool IsFullyDrained { get; private set; }
 
     // ───────────────────────────────────  coordination primitives
     private readonly CancellationTokenSource _localCts = new();
@@ -70,7 +72,11 @@ public sealed class BufferToEndStream : Stream
             while (true)
             {
                 int read = await source.ReadAsync(scratch, 0, scratch.Length, token).ConfigureAwait(false);
-                if (read == 0) break;                        // EOF
+                if (read == 0)
+                {
+                    IsFullyDrained = true;
+                    break;                        // EOF
+                }
 
                 if (!_publiclyDisposed)                      // normal mode: write to Pipe
                 {

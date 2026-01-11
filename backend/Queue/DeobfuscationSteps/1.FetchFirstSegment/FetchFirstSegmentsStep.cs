@@ -242,25 +242,30 @@ public static class FetchFirstSegmentsStep
 
         public int MagicOffset { get; private set; } = -1;
 
-        public bool HasRar4Magic() 
+        public void AnalyzeMagic()
         {
-            var offset = FindMagic(Rar4Magic);
-            if (offset >= 0) MagicOffset = offset;
-            return offset >= 0;
+            var r4 = FindMagic(Rar4Magic);
+            var r5 = FindMagic(Rar5Magic);
+            var sz = FindMagic(SevenZipMagic);
+
+            var offsets = new[] { r4, r5, sz }.Where(x => x >= 0).ToList();
+            if (offsets.Count == 0)
+            {
+                MagicOffset = -1;
+                return;
+            }
+
+            MagicOffset = offsets.Min();
         }
 
-        public bool HasRar5Magic()
-        {
-            var offset = FindMagic(Rar5Magic);
-            if (offset >= 0) MagicOffset = offset;
-            return offset >= 0;
-        }
+        public bool HasRar4Magic() => MagicOffset >= 0 && IsMagicAtOffset(Rar4Magic, MagicOffset);
+        public bool HasRar5Magic() => MagicOffset >= 0 && IsMagicAtOffset(Rar5Magic, MagicOffset);
+        public bool HasSevenZipMagic() => MagicOffset >= 0 && IsMagicAtOffset(SevenZipMagic, MagicOffset);
 
-        public bool HasSevenZipMagic()
+        private bool IsMagicAtOffset(byte[] sequence, int offset)
         {
-            var offset = FindMagic(SevenZipMagic);
-            if (offset >= 0) MagicOffset = offset;
-            return offset >= 0;
+            if (First16KB == null || offset < 0 || offset > First16KB.Length - sequence.Length) return false;
+            return First16KB.AsSpan(offset, sequence.Length).SequenceEqual(sequence);
         }
 
         private int FindMagic(byte[] sequence)

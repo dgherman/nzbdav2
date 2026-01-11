@@ -20,6 +20,7 @@ public class ThreadSafeNntpClient : INntpClient
     private readonly BandwidthService? _bandwidthService;
     private readonly int _providerIndex;
     private string? _currentGroup;
+    private BufferToEndStream? _activeBufferStream;
 
     public ThreadSafeNntpClient(BandwidthService? bandwidthService = null, int providerIndex = -1)
     {
@@ -130,10 +131,12 @@ public class ThreadSafeNntpClient : INntpClient
             var yencHeader = await yencStream.GetYencHeadersAsync(cancellationToken).ConfigureAwait(false);
             if (yencHeader == null) throw new InvalidDataException("Missing yEnc headers");
 
+            _activeBufferStream = new BufferToEndStream(((Stream)yencStream).OnDispose(OnDispose));
+
             return new YencHeaderStream(
                 yencHeader,
                 articleHeaders,
-                new BufferToEndStream(((Stream)yencStream).OnDispose(OnDispose))
+                _activeBufferStream
             );
 
 
@@ -213,13 +216,38 @@ public class ThreadSafeNntpClient : INntpClient
     public async Task WaitForReady(CancellationToken cancellationToken)
     {
         await _semaphore.WaitAsync(cancellationToken).ConfigureAwait(false);
-        // Also wait for client lock? 
-        // ThreadSafeNntpClient wraps access, so semaphore is enough.
-        // But we should check if client is disposed.
-        
-        // UsenetSharp client doesn't expose IsDisposed directly but calling methods will throw.
-        // We can just release.
-        _semaphore.Release();
+        try
+        {
+            if (_activeBufferStream != null)
+            {
+                // Wait for background draining to finish
+                try
+                {
+                    await _activeBufferStream.PumpTask.WaitAsync(cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // If we timeout waiting for drain, the connection is dirty
+                    throw new IOException("Timeout or cancellation while waiting for connection to drain.");
+                }
+                catch (Exception ex)
+                {
+                    throw new IOException("Error while waiting for connection to drain.", ex);
+                }
+
+                if (!_activeBufferStream.IsFullyDrained)
+                {
+                    // If it finished but not due to EOF (e.g. error or early stop), the connection is dirty
+                    throw new IOException("Connection was not fully drained to EOF.");
+                }
+
+                _activeBufferStream = null;
+            }
+        }
+        finally
+        {
+            try { _semaphore.Release(); } catch (ObjectDisposedException) { }
+        }
     }
 
     public Task<UsenetGroupResponse> GroupAsync(string group, CancellationToken cancellationToken)

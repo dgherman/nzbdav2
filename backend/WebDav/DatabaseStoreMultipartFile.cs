@@ -36,6 +36,8 @@ public class DatabaseStoreMultipartFile(
             new ConnectionUsageDetails 
             { 
                 Text = davMultipartFile.Path,
+                JobName = davMultipartFile.Name,
+                AffinityKey = Path.GetFileName(Path.GetDirectoryName(davMultipartFile.Path)),
                 DavItemId = davMultipartFile.Id,
                 FileDate = davMultipartFile.ReleaseDate
             }

@@ -56,12 +56,11 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-09-CONNECTION-TIMEOUT-FIX");
-        Log.Warning("  FEATURE: Connection Timeout & Pooling Optimizations");
-        Log.Warning("  - Separate 60s timeout for connection creation (independent of 180s operation timeout)");
-        Log.Warning("  - Increased idle timeout from 30s to 120s (reduces reconnection overhead)");
-        Log.Warning("  - Improved health checks (60s idle threshold, 3s timeout)");
-        Log.Warning("  - Faster circuit breaker recovery (2s cooldown, was 5s)");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-11-AFFINITY-STATS-FIX");
+        Log.Warning("  FEATURE: Fix Provider Affinity Stats Tracking");
+        Log.Warning("  - Fixed AffinityKey propagation in BufferedStreaming mode");
+        Log.Warning("  - Stats now correctly accumulate under NZB directory name");
+        Log.Warning("  - Prevents stats fragmentation across daily affinity keys");
         Log.Warning("  - Enhanced diagnostic logging for connection lifecycle");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
