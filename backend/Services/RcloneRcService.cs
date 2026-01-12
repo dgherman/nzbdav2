@@ -12,10 +12,10 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
     private const string RefreshEndpoint = "vfs/refresh";
     private const string ForgetEndpoint = "vfs/forget";
 
-    public async Task RefreshAsync(string? dir = null)
+    public async Task<bool> RefreshAsync(string? dir = null)
     {
         var config = configManager.GetRcloneRcConfig();
-        if (!config.Enabled || string.IsNullOrEmpty(config.Url)) return;
+        if (!config.Enabled || string.IsNullOrEmpty(config.Url)) return false;
 
         var parameters = new Dictionary<string, object>
         {
@@ -27,25 +27,25 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
             parameters["dir"] = dir;
         }
 
-        await SendRequestAsync(config, RefreshEndpoint, parameters).ConfigureAwait(false);
+        return await SendRequestAsync(config, RefreshEndpoint, parameters).ConfigureAwait(false);
     }
 
-    public async Task ForgetAsync(string[] files)
+    public async Task<bool> ForgetAsync(string[] files)
     {
         var config = configManager.GetRcloneRcConfig();
-        if (!config.Enabled || string.IsNullOrEmpty(config.Url)) return;
+        if (!config.Enabled || string.IsNullOrEmpty(config.Url)) return false;
 
-        if (files.Length == 0) return;
+        if (files.Length == 0) return true;
 
         var parameters = new Dictionary<string, object>
         {
             ["files"] = files
         };
 
-        await SendRequestAsync(config, ForgetEndpoint, parameters).ConfigureAwait(false);
+        return await SendRequestAsync(config, ForgetEndpoint, parameters).ConfigureAwait(false);
     }
 
-    private async Task SendRequestAsync(RcloneRcConfig config, string command, Dictionary<string, object> parameters)
+    private async Task<bool> SendRequestAsync(RcloneRcConfig config, string command, Dictionary<string, object> parameters)
     {
         try
         {
@@ -72,15 +72,18 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
             if (response.IsSuccessStatusCode)
             {
                 Log.Debug("[RcloneRc] Command {Command} successful. Response: {Response}", command, responseBody);
+                return true;
             }
             else
             {
                 Log.Warning("[RcloneRc] Command {Command} failed with status {Status}. Response: {Response}", command, response.StatusCode, responseBody);
+                return false;
             }
         }
         catch (Exception ex)
         {
             Log.Error(ex, "[RcloneRc] Failed to send command {Command}", command);
+            return false;
         }
     }
 }

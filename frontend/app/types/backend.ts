@@ -99,6 +99,8 @@ export type FileDetails = {
     davItemId: string;
     name: string;
     path: string;
+    webdavPath: string;
+    idsPath?: string | null;
     mappedPath?: string | null;
     jobName?: string;
     downloadUrl: string;

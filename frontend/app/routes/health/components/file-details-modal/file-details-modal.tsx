@@ -18,6 +18,35 @@ export type FileDetailsModalProps = {
 export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetStats, onRunHealthCheck, onAnalyze, onRepair, onTestDownload }: FileDetailsModalProps) {
     const [testingDownload, setTestingDownload] = useState(false);
     const [repairingClassification, setRepairingClassification] = useState(false);
+    const [flushingCache, setFlushingCache] = useState(false);
+
+    const handleFlushRcloneCache = async () => {
+        if (!fileDetails) return;
+        
+        setFlushingCache(true);
+        try {
+            const paths = [fileDetails.webdavPath];
+            if (fileDetails.idsPath) paths.push(fileDetails.idsPath);
+
+            const response = await fetch(`/api/rclone/forget`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(paths)
+            });
+
+            if (response.ok) {
+                alert("Rclone cache flushed successfully for both content and IDs paths.");
+            } else {
+                const data = await response.json();
+                alert(`Error: ${data.error || "Failed to flush Rclone cache"}`);
+            }
+        } catch (err) {
+            console.error("Failed to flush Rclone cache:", err);
+            alert("An unexpected error occurred.");
+        } finally {
+            setFlushingCache(false);
+        }
+    };
 
     const handleTestDownload = async () => {
         if (!fileDetails || !onTestDownload) return;
@@ -155,6 +184,24 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
                                                         <>
                                                             <i className="bi bi-tools me-1"></i>
                                                             Repair Classification
+                                                        </>
+                                                    )}
+                                                </button>
+                                                <button
+                                                    className="btn btn-sm btn-outline-danger"
+                                                    onClick={handleFlushRcloneCache}
+                                                    disabled={flushingCache}
+                                                    title="Triggers Rclone vfs/forget for both the virtual file path and its .ids entry to force a cache refresh"
+                                                >
+                                                    {flushingCache ? (
+                                                        <>
+                                                            <Spinner animation="border" size="sm" className="me-1" />
+                                                            Flushing...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <i className="bi bi-trash3 me-1"></i>
+                                                            Flush Rclone Cache
                                                         </>
                                                     )}
                                                 </button>

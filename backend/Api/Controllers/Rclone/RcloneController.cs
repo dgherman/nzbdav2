@@ -10,14 +10,14 @@ public class RcloneController(RcloneRcService rcloneRcService) : ControllerBase
     [HttpPost("refresh")]
     public async Task<IActionResult> Refresh([FromQuery] string? path)
     {
-        await rcloneRcService.RefreshAsync(path);
-        return Ok();
+        var success = await rcloneRcService.RefreshAsync(path);
+        return success ? Ok() : NotFound(new { error = "Rclone RC command failed. Check logs." });
     }
 
     [HttpPost("forget")]
     public async Task<IActionResult> Forget([FromBody] string[] files)
     {
-        await rcloneRcService.ForgetAsync(files);
-        return Ok();
+        var success = await rcloneRcService.ForgetAsync(files);
+        return success ? Ok() : NotFound(new { error = "Rclone RC command failed. Check logs." });
     }
 }

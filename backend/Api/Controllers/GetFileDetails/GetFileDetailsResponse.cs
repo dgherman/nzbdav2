@@ -7,6 +7,8 @@ public class GetFileDetailsResponse
     public string DavItemId { get; set; } = null!;
     public string Name { get; set; } = null!;
     public string Path { get; set; } = null!;
+    public string WebdavPath { get; set; } = null!;
+    public string? IdsPath { get; set; }
     public string? MappedPath { get; set; }
     public string? JobName { get; set; }
     public string DownloadUrl { get; set; } = null!;

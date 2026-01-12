@@ -211,6 +211,8 @@ public class GetFileDetailsController(
             DavItemId = davItem.Id.ToString(),
             Name = davItem.Name,
             Path = davItem.Path,
+            WebdavPath = davItem.Path,
+            IdsPath = DavItem.SymlinkFolder.Path + "/" + davItem.Id,
             MappedPath = mappedLink?.LinkPath,
             JobName = queueJobName,
             DownloadUrl = downloadUrl,
