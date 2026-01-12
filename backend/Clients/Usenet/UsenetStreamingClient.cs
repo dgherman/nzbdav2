@@ -498,45 +498,35 @@ public class UsenetStreamingClient
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
-            Log.Debug("[CreateConnection] Creating new connection to {Host}:{Port} (SSL: {UseSsl})", host, port, useSsl);
-
             if (!await connection.ConnectAsync(host, port, useSsl, connectionToken).ConfigureAwait(false))
             {
-                Log.Warning("[CreateConnection] Failed to connect to {Host}:{Port} after {Elapsed:F1}s", host, port, sw.Elapsed.TotalSeconds);
                 throw new CouldNotConnectToUsenetException($"Could not connect to usenet host ({host}:{port}). Check connection settings.");
             }
 
-            Log.Debug("[CreateConnection] TCP+SSL connected to {Host}:{Port} in {Elapsed:F1}s, authenticating...", host, port, sw.Elapsed.TotalSeconds);
-
             if (!await connection.AuthenticateAsync(user, pass, connectionToken).ConfigureAwait(false))
             {
-                Log.Warning("[CreateConnection] Authentication failed for {Host}:{Port} after {Elapsed:F1}s", host, port, sw.Elapsed.TotalSeconds);
                 throw new CouldNotLoginToUsenetException($"Could not login to usenet host ({host}:{port}). Check username and password.");
             }
 
             sw.Stop();
-            Log.Debug("[CreateConnection] Successfully created and authenticated connection to {Host}:{Port} in {Elapsed:F1}s", host, port, sw.Elapsed.TotalSeconds);
             return connection;
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && connectionCts.IsCancellationRequested)
         {
             sw.Stop();
             connection.Dispose();
-            Log.Warning("[CreateConnection] Connection to {Host}:{Port} timed out after {Elapsed:F1}s (60s limit)", host, port, sw.Elapsed.TotalSeconds);
             throw new OperationCanceledException($"Connection to usenet host ({host}:{port}) timed out after {sw.Elapsed.TotalSeconds:F1}s.");
         }
         catch (OperationCanceledException)
         {
             sw.Stop();
             connection.Dispose();
-            Log.Debug("[CreateConnection] Connection to {Host}:{Port} was canceled after {Elapsed:F1}s", host, port, sw.Elapsed.TotalSeconds);
             throw new OperationCanceledException($"Connection to usenet host ({host}:{port}) was canceled.");
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             sw.Stop();
             connection.Dispose();
-            Log.Error(ex, "[CreateConnection] Failed to create connection to {Host}:{Port} after {Elapsed:F1}s: {Message}", host, port, sw.Elapsed.TotalSeconds, ex.Message);
             throw;
         }
     }
