@@ -194,6 +194,7 @@ Log.Warning("  FEATURE: Database PRAGMA Optimizations (5-10x faster migrations)"
 - Development/testing location: `/opt/docker_local/nzbdav/config/db.sqlite`
 - Managed by EF Core migrations
 - **IMPORTANT:** Run migrations before testing changes: `dotnet run -- --db-migration` (from backend directory)
+- **NEVER write to the database directly** - reads/queries are allowed for debugging, but all writes must go through the application code or API endpoints
 
 **Config Storage**
 - Settings stored in `ConfigItems` table
@@ -291,11 +292,7 @@ If experiencing slow download speeds (< 10 MB/s), check for these common issues:
   docker logs nzbdav 2>&1 | grep "after.*s \(Segment" | grep -oP 'after \K[0-9.]+' | sort -n | tail -10
   ```
 - **Solutions**:
-  - **Increase operation timeout** (default 60s for segments):
-    ```sql
-    INSERT OR REPLACE INTO ConfigItems (ConfigName, ConfigValue)
-    VALUES ('usenet.operation-timeout', '180');  -- 3 minutes
-    ```
+  - **Increase operation timeout** (default 60s for segments) via Settings > Usenet page
   - **Disable problematic provider** temporarily via Settings > Usenet page
   - **Reduce max connections** for slow providers (shifts capacity to faster providers)
   - **Reorder providers** to prioritize faster ones in the provider configuration

@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.Extensions.DependencyInjection;
@@ -31,19 +32,107 @@ public class FullNzbTester
     public static async Task RunAsync(string[] args)
     {
         var argIndex = args.ToList().IndexOf("--test-full-nzb");
-        if (args.Length <= argIndex + 1)
+        var useMockServer = args.Contains("--mock-server");
+
+        if (args.Length <= argIndex + 1 && !useMockServer)
         {
             Console.WriteLine("Usage: --test-full-nzb <nzbPath>");
+            Console.WriteLine("       --test-full-nzb --mock-server [--latency=MS] [--jitter=MS] [--size=MB]");
+            Console.WriteLine("");
+            Console.WriteLine("Options:");
+            Console.WriteLine("  --mock-server    Start built-in mock NNTP server and generate mock.nzb");
+            Console.WriteLine("  --latency=MS     Base latency in ms (default: 50)");
+            Console.WriteLine("  --jitter=MS      Latency jitter in ms (default: 10)");
+            Console.WriteLine("  --size=MB        Size of mock file in MB (default: 200)");
             return;
         }
-        
-        string nzbPath = args[argIndex + 1];
-        Console.WriteLine($"Processing NZB: {nzbPath}");
-        
+
         var services = new ServiceCollection();
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
-        
+
+        // Check for --mock-server option (built-in mock server)
+        MockNntpServer? mockServer = null;
+        string? nzbPath = null;
+
+        if (useMockServer)
+        {
+            var port = 1190;
+            var latencyMs = 50;
+            var jitterMs = 10;
+            var segmentSize = 700 * 1024;
+            var totalSizeMb = 200;
+
+            // Parse optional args
+            foreach (var arg in args)
+            {
+                if (arg.StartsWith("--latency=")) int.TryParse(arg.Substring(10), out latencyMs);
+                if (arg.StartsWith("--jitter=")) int.TryParse(arg.Substring(9), out jitterMs);
+                if (arg.StartsWith("--size=")) int.TryParse(arg.Substring(7), out totalSizeMb);
+            }
+
+            Console.WriteLine($"═══════════════════════════════════════════════════════════════");
+            Console.WriteLine($"  MOCK SERVER BENCHMARK");
+            Console.WriteLine($"  Latency: {latencyMs}ms, Jitter: {jitterMs}ms, File Size: {totalSizeMb}MB");
+            Console.WriteLine($"═══════════════════════════════════════════════════════════════");
+
+            // Disable smart analysis for mock server (segments are synthetic)
+            Environment.SetEnvironmentVariable("BENCHMARK", "true");
+
+            // Start mock server
+            Console.WriteLine($"Starting mock NNTP server on port {port}...");
+            mockServer = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, 0.0);
+            mockServer.Start();
+
+            // Generate mock NZB
+            nzbPath = "mock.nzb";
+            var totalSize = (long)totalSizeMb * 1024 * 1024;
+            Console.WriteLine($"Generating {nzbPath} ({totalSizeMb}MB)...");
+            await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize);
+
+            var mockConfig = new UsenetProviderConfig
+            {
+                Providers = new List<UsenetProviderConfig.ConnectionDetails>
+                {
+                    new()
+                    {
+                        Type = ProviderType.Pooled,
+                        Host = "127.0.0.1",
+                        Port = port,
+                        UseSsl = false,
+                        User = "mock",
+                        Pass = "mock",
+                        MaxConnections = 20
+                    }
+                }
+            };
+
+            configManager.UpdateValues(new List<ConfigItem>
+            {
+                new() { ConfigName = "usenet.providers", ConfigValue = JsonSerializer.Serialize(mockConfig) }
+            });
+        }
+        else
+        {
+            // Find NZB path (last non-option argument after --test-full-nzb)
+            for (int i = argIndex + 1; i < args.Length; i++)
+            {
+                if (!args[i].StartsWith("--"))
+                {
+                    nzbPath = args[i];
+                    break;
+                }
+            }
+
+            if (string.IsNullOrEmpty(nzbPath))
+            {
+                Console.WriteLine("Error: No NZB path provided.");
+                return;
+            }
+        }
+
+        Console.WriteLine($"Processing NZB: {nzbPath}");
+
         services.AddSingleton(configManager);
         services.AddSingleton<WebsocketManager>();
         services.AddSingleton<BandwidthService>();
@@ -51,10 +140,10 @@ public class FullNzbTester
         services.AddSingleton<NzbProviderAffinityService>();
         services.AddSingleton<UsenetStreamingClient>();
         services.AddDbContext<DavDatabaseContext>();
-        
+
         var sp = services.BuildServiceProvider();
         var client = sp.GetRequiredService<UsenetStreamingClient>();
-        
+
         try {
             // Load NZB
             using var fs = File.OpenRead(nzbPath);
@@ -279,6 +368,19 @@ public class FullNzbTester
 
                         Console.WriteLine();
                         Console.WriteLine("--- STEP 6: SCRUBBING/SEEKING SIMULATION ---");
+
+                        // Create a fresh stream for seeking tests (previous stream was consumed by ffprobe)
+                        Stream scrubStream = new DavMultipartFileStream(
+                            fileParts,
+                            client,
+                            configManager.GetConnectionsPerStream(),
+                            new ConnectionUsageContext(ConnectionUsageType.Streaming)
+                        );
+                        if (aesParams != null)
+                        {
+                            scrubStream = new AesDecoderStream(scrubStream, aesParams);
+                        }
+
                         var percentages = new[] { 0.1, 0.5, 0.9, 0.2 };
                         var buffer = new byte[1024];
                         var seekTimes = new System.Collections.Generic.List<(double Pct, long Ms)>();
@@ -286,28 +388,28 @@ public class FullNzbTester
 
                         foreach (var pct in percentages)
                         {
-                            try 
+                            try
                             {
-                                var targetPos = (long)(stream.Length * pct);
+                                var targetPos = (long)(scrubStream.Length * pct);
                                 Console.WriteLine($"Seeking to {pct:P0} ({targetPos} bytes)...");
-                                
+
                                 using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
                                 var seekWatch = Stopwatch.StartNew();
-                                stream.Seek(targetPos, SeekOrigin.Begin);
+                                scrubStream.Seek(targetPos, SeekOrigin.Begin);
                                 seekWatch.Stop();
-                                
+
                                 var readWatch = Stopwatch.StartNew();
-                                var read = await stream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
+                                var read = await scrubStream.ReadAsync(buffer, 0, buffer.Length, cts.Token);
                                 readWatch.Stop();
-                                
+
                                 // We count "Seek Time" as the full latency users perceive (Seek + first Read)
                                 var totalLatency = seekWatch.ElapsedMilliseconds + readWatch.ElapsedMilliseconds;
                                 seekTimes.Add((pct, totalLatency));
-                                
+
                                 Console.WriteLine($"  - Seek Time: {seekWatch.ElapsedMilliseconds}ms");
                                 Console.WriteLine($"  - Read Time: {readWatch.ElapsedMilliseconds}ms");
                                 Console.WriteLine($"  - Read Bytes: {read}");
-                                
+
                                 if (read == 0) Console.WriteLine("  WARNING: Read 0 bytes!");
                             }
                             catch (OperationCanceledException)
@@ -316,8 +418,9 @@ public class FullNzbTester
                                 seekTimes.Add((pct, -1)); // -1 indicates timeout
                             }
                         }
-                        
+
                         totalScrubWatch.Stop();
+                        await scrubStream.DisposeAsync();
                         Console.WriteLine($"Total Scrubbing Time: {totalScrubWatch.Elapsed.TotalSeconds:F2}s");
 
                         // Sequential Throughput Benchmark
@@ -468,6 +571,11 @@ public class FullNzbTester
         } catch (Exception ex) {
             Console.WriteLine($"Error: {ex.Message}");
             Console.WriteLine(ex.StackTrace);
+        }
+        finally
+        {
+            // Cleanup mock server if started
+            mockServer?.Dispose();
         }
     }
 }

@@ -16,7 +16,7 @@ public static class SevenZipUtil
         CancellationToken ct
     )
     {
-        await using var cancellableStream = new CancellableStream(stream, ct);
+        await using var cancellableStream = new CancellableStream(stream, ct, leaveOpen: true);
         return await Task.Run(() => GetSevenZipEntries(cancellableStream, password), ct).ConfigureAwait(false);
     }
 

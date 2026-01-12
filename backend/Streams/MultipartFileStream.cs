@@ -1,4 +1,4 @@
-﻿using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
@@ -41,6 +41,7 @@ public class MultipartFileStream : Stream
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
         if (count == 0) return 0;
         while (_position < Length && !cancellationToken.IsCancellationRequested)
         {
@@ -96,6 +97,7 @@ public class MultipartFileStream : Stream
 
     public override long Seek(long offset, SeekOrigin origin)
     {
+        ObjectDisposedException.ThrowIf(_isDisposed, this);
         var absoluteOffset = origin == SeekOrigin.Begin ? offset
             : origin == SeekOrigin.Current ? _position + offset
             : throw new InvalidOperationException("SeekOrigin must be Begin or Current.");

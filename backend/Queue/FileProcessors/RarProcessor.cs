@@ -90,9 +90,36 @@ public class RarProcessor(
         var partNumber = GetPartNumber(fileInfo.FileName);
         var offset = Math.Max(0, fileInfo.MagicOffset);
 
-        return headers
-            .Where(x => x.HeaderType == HeaderType.File)
-            .Select(x => new StoredFileSegment()
+        var results = new List<StoredFileSegment>();
+        foreach (var x in headers.Where(h => h.HeaderType == HeaderType.File))
+        {
+            byte[]? obfuscationKey = null;
+            
+            // If the file is "Stored" (uncompressed), check for obfuscation
+            if (x.GetCompressionMethod() == 0)
+            {
+                try
+                {
+                    // Seek to the start of file data
+                    stream.Position = x.GetDataStartPosition() + offset;
+                    var sigBuffer = new byte[4];
+                    var sigRead = await stream.ReadAsync(sigBuffer, 0, 4, ct).ConfigureAwait(false);
+
+                    if (sigRead == 4 && sigBuffer[0] == 0xAA && sigBuffer[1] == 0x04 && sigBuffer[2] == 0x1D && sigBuffer[3] == 0x6D)
+                    {
+                        // Use the standard obfuscation key (same as used by nzbget/unrar)
+                        obfuscationKey = new byte[] { 0xB0, 0x41, 0xC2, 0xCE };
+                        var internalName = x.GetFileName();
+                        Log.Information("[RarProcessor] Detected obfuscated Stored file: {InternalName}. Using standard XOR key", internalName);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "[RarProcessor] Failed to check for obfuscation signature at offset {Offset}", x.GetDataStartPosition() + offset);
+                }
+            }
+
+            results.Add(new StoredFileSegment()
             {
                 NzbFile = fileInfo.NzbFile,
                 PartSize = stream.Length,
@@ -104,8 +131,12 @@ public class RarProcessor(
                     x.GetAdditionalDataSize()
                 ),
                 AesParams = x.GetAesParams(password),
+                ObfuscationKey = obfuscationKey,
                 ReleaseDate = fileInfo.ReleaseDate,
-            }).ToList();
+            });
+        }
+
+        return results;
     }
 
     private string GetArchiveName(GetFileInfosStep.FileInfo fileInfo)
@@ -175,5 +206,6 @@ public class RarProcessor(
         public required string PathWithinArchive { get; init; }
         public required LongRange ByteRangeWithinPart { get; init; }
         public required AesParams? AesParams { get; init; }
+        public byte[]? ObfuscationKey { get; init; }
     }
 }

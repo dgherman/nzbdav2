@@ -1,4 +1,4 @@
-﻿using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Models;
@@ -84,6 +84,7 @@ public class NzbFileStream : Stream
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         _totalReadCount++;
 
         if (_innerStream == null)
@@ -112,6 +113,7 @@ public class NzbFileStream : Stream
 
     public override long Seek(long offset, SeekOrigin origin)
     {
+        ObjectDisposedException.ThrowIf(_disposed, this);
         _totalSeekCount++;
         var absoluteOffset = origin == SeekOrigin.Begin ? offset
             : origin == SeekOrigin.Current ? _position + offset

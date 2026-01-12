@@ -236,7 +236,7 @@ export function HealthTable({
                                         </td>
                                         <td className={`${styles.dateCell} ${styles.desktop}`}>
                                             {item.latestResult ? (
-                                                <Badge bg={item.latestResult === 'Healthy' ? 'success' : 'danger'} className={styles.dateBadge}>
+                                                <Badge bg={item.latestResult === 'Healthy' ? 'success' : item.latestResult === 'Skipped' ? 'info' : 'danger'} className={styles.dateBadge}>
                                                     {item.latestResult}
                                                 </Badge>
                                             ) : (
@@ -320,7 +320,7 @@ function DateDetailsTable({ item, onRunHealthCheck }: { item: HealthCheckQueueIt
                 <div className={styles.dateDetailsLabel}>Result</div>
                 <div className={styles.dateDetailsValue}>
                     {item.latestResult ? (
-                        <Badge bg={item.latestResult === 'Healthy' ? 'success' : 'danger'} className={styles.dateBadge}>
+                        <Badge bg={item.latestResult === 'Healthy' ? 'success' : item.latestResult === 'Skipped' ? 'info' : 'danger'} className={styles.dateBadge}>
                             {item.latestResult}
                         </Badge>
                     ) : (

@@ -15,6 +15,7 @@ import { isAuthenticated } from "~/auth/authentication.server";
 import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
 import type { FileDetails } from "~/types/backend";
 import { useToast } from "~/context/ToastContext";
+import { useConfirm } from "~/context/ConfirmContext";
 import { receiveMessage } from "~/utils/websocket-util";
 
 export function meta({}: Route.MetaArgs) {
@@ -112,6 +113,7 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
     const [loadingFileDetails, setLoadingFileDetails] = useState(false);
     const { addToast } = useToast();
+    const { confirm } = useConfirm();
 
     const activeTab = searchParams.get("tab") || "stats";
 
@@ -244,8 +246,16 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
 
     const onRunHealthCheck = useCallback(async (id: string | string[]) => {
         const ids = Array.isArray(id) ? id : [id];
-        if (!confirm(`Run health check for ${ids.length} item(s) now?`)) return;
-        
+
+        const confirmed = await confirm({
+            title: "Run Health Check",
+            message: `Run health check for ${ids.length} item(s) now?`,
+            confirmText: "Run",
+            variant: "primary"
+        });
+
+        if (!confirmed) return;
+
         let successCount = 0;
         let failCount = 0;
 
@@ -266,7 +276,7 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
         if (failCount > 0) {
             addToast(`Failed to start health check for ${failCount} item(s)`, "danger", "Error");
         }
-    }, [addToast]);
+    }, [addToast, confirm]);
 
     const onAnalyze = useCallback(async (id: string | string[]) => {
         const ids = Array.isArray(id) ? id : [id];

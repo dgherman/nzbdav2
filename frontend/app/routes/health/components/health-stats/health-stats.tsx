@@ -8,6 +8,7 @@ export type HealthStatsProps = {
 enum HealthResult {
     Healthy = 0,
     Unhealthy = 1,
+    Skipped = 2,
 }
 
 enum RepairAction {

@@ -19,6 +19,7 @@ import { PageLayout } from "./routes/_index/components/page-layout/page-layout";
 import { Loading } from "./routes/_index/components/loading/loading";
 import { backendClient } from "~/clients/backend-client.server";
 import { ToastProvider } from "./context/ToastContext";
+import { ConfirmProvider } from "./context/ConfirmContext";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -82,22 +83,26 @@ export default function App({ loaderData }: Route.ComponentProps) {
   if (useLayout) {
     return (
       <ToastProvider>
-        <PageLayout
-          topNavComponent={TopNavigation}
-          bodyChild={showLoading ? <Loading /> : <Outlet />}
-          leftNavChild={
-            <LeftNavigation
-              version={version}
-              isFrontendAuthDisabled={isFrontendAuthDisabled}
-              statsEnabled={statsEnabled} />
-          } />
+        <ConfirmProvider>
+          <PageLayout
+            topNavComponent={TopNavigation}
+            bodyChild={showLoading ? <Loading /> : <Outlet />}
+            leftNavChild={
+              <LeftNavigation
+                version={version}
+                isFrontendAuthDisabled={isFrontendAuthDisabled}
+                statsEnabled={statsEnabled} />
+            } />
+        </ConfirmProvider>
       </ToastProvider>
     );
   }
 
   return (
     <ToastProvider>
-      <Outlet />
+      <ConfirmProvider>
+        <Outlet />
+      </ConfirmProvider>
     </ToastProvider>
   );
 }

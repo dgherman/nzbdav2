@@ -1,6 +1,6 @@
-﻿namespace NzbWebDAV.Streams;
+namespace NzbWebDAV.Streams;
 
-public class CancellableStream(Stream innerStream, CancellationToken token) : Stream
+public class CancellableStream(Stream innerStream, CancellationToken token, bool leaveOpen = false) : Stream
 {
     private readonly Stream _innerStream = innerStream ?? throw new ArgumentNullException(nameof(innerStream));
     private bool _disposed;
@@ -91,7 +91,10 @@ public class CancellableStream(Stream innerStream, CancellationToken token) : St
         if (_disposed) return;
         if (!disposing) return;
         _disposed = true;
-        _innerStream.Dispose();
+        if (!leaveOpen)
+        {
+            _innerStream.Dispose();
+        }
         base.Dispose();
     }
 }

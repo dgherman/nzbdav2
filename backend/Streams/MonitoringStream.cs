@@ -4,11 +4,13 @@ public class MonitoringStream : Stream
 {
     private readonly Stream _inner;
     private readonly Action<int> _onRead;
+    private readonly bool _leaveOpen;
 
-    public MonitoringStream(Stream inner, Action<int> onRead)
+    public MonitoringStream(Stream inner, Action<int> onRead, bool leaveOpen = false)
     {
         _inner = inner;
         _onRead = onRead;
+        _leaveOpen = leaveOpen;
     }
 
     public override bool CanRead => _inner.CanRead;
@@ -50,13 +52,16 @@ public class MonitoringStream : Stream
 
     public override async ValueTask DisposeAsync()
     {
-        await _inner.DisposeAsync().ConfigureAwait(false);
+        if (!_leaveOpen)
+        {
+            await _inner.DisposeAsync().ConfigureAwait(false);
+        }
         GC.SuppressFinalize(this);
     }
     
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        if (disposing && !_leaveOpen)
         {
             _inner.Dispose();
         }

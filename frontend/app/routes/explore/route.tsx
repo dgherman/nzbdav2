@@ -12,6 +12,7 @@ import { formatFileSize } from "~/utils/file-size";
 import type { FileDetails } from "~/types/file-details";
 import { FileDetailsModal } from "../health/components/file-details-modal/file-details-modal";
 import { useToast } from "~/context/ToastContext";
+import { useConfirm } from "~/context/ConfirmContext";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -85,6 +86,7 @@ function Body(props: ExplorePageData) {
     const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
     const [loadingFileDetails, setLoadingFileDetails] = useState(false);
     const { addToast } = useToast();
+    const { confirm } = useConfirm();
 
     const items = props.items;
     const parentDirectories = isNavigating
@@ -171,7 +173,15 @@ function Body(props: ExplorePageData) {
     }, [addToast]);
 
     const onRunHealthCheck = useCallback(async (id: string) => {
-        if (!confirm("Run health check now?")) return;
+        const confirmed = await confirm({
+            title: "Run Health Check",
+            message: "Run health check now?",
+            confirmText: "Run",
+            variant: "primary"
+        });
+
+        if (!confirmed) return;
+
         try {
             const response = await fetch(`/api/health/check/${id}`, { method: 'POST' });
             if (!response.ok) throw new Error(await response.text());
@@ -179,39 +189,57 @@ function Body(props: ExplorePageData) {
         } catch (e) {
             addToast(`Failed to start health check: ${e}`, "danger", "Error");
         }
-    }, [addToast]);
+    }, [addToast, confirm]);
 
-        const onAnalyze = useCallback(async (id: string | string[]) => {
-            const ids = Array.isArray(id) ? id : [id];
-            if (!confirm(`Run detailed analysis (segment check + ffprobe verification) for ${ids.length} item(s)?`)) return;
-            try {
-                const response = await fetch(`/api/maintenance/analyze`, { 
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ davItemIds: ids })
-                });
-                if (!response.ok) throw new Error(await response.text());
-                addToast(`Analysis queued for ${ids.length} item(s). Check 'Active Analyses' tab for progress.`, "success", "Analysis Started");
-            } catch (e) {
-                addToast(`Failed to start analysis: ${e}`, "danger", "Error");
-            }
-        }, [addToast]);
+    const onAnalyze = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+
+        const confirmed = await confirm({
+            title: "Run Analysis",
+            message: `Run detailed analysis (segment check + ffprobe verification) for ${ids.length} item(s)?`,
+            confirmText: "Analyze",
+            variant: "primary"
+        });
+
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/maintenance/analyze`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Analysis queued for ${ids.length} item(s). Check 'Active Analyses' tab for progress.`, "success", "Analysis Started");
+        } catch (e) {
+            addToast(`Failed to start analysis: ${e}`, "danger", "Error");
+        }
+    }, [addToast, confirm]);
     
-        const onRepair = useCallback(async (id: string | string[]) => {
-            const ids = Array.isArray(id) ? id : [id];
-            if (!confirm(`This will delete ${ids.length} file(s) from NzbDav and trigger a re-search in Sonarr/Radarr. Are you sure?`)) return;
-            try {
-                const response = await fetch(`/api/stats/repair`, { 
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ davItemIds: ids })
-                });
-                if (!response.ok) throw new Error(await response.text());
-                addToast(`Repair queued successfully for ${ids.length} item(s)`, "success", "Repair Started");
-            } catch (e) {
-                addToast(`Failed to trigger repair: ${e}`, "danger", "Error");
-            }
-        }, [addToast]);
+    const onRepair = useCallback(async (id: string | string[]) => {
+        const ids = Array.isArray(id) ? id : [id];
+
+        const confirmed = await confirm({
+            title: "Repair Files",
+            message: `This will delete ${ids.length} file(s) from NzbDav and trigger a re-search in Sonarr/Radarr. Are you sure?`,
+            confirmText: "Repair",
+            variant: "danger"
+        });
+
+        if (!confirmed) return;
+
+        try {
+            const response = await fetch(`/api/stats/repair`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ davItemIds: ids })
+            });
+            if (!response.ok) throw new Error(await response.text());
+            addToast(`Repair queued successfully for ${ids.length} item(s)`, "success", "Repair Started");
+        } catch (e) {
+            addToast(`Failed to trigger repair: ${e}`, "danger", "Error");
+        }
+    }, [addToast, confirm]);
 
     const onTestDownload = useCallback(async (id: string) => {
         try {

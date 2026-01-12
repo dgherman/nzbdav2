@@ -31,7 +31,7 @@ public class HealthCheckService
 
     private readonly ConcurrentDictionary<string, byte> _missingSegmentIds = new();
     private readonly ConcurrentDictionary<Guid, int> _timeoutCounts = new();
-    private readonly SemaphoreSlim _concurrencyLimiter = new(3);
+    private readonly SemaphoreSlim _concurrencyLimiter = new(1);
     private readonly ConcurrentDictionary<Guid, byte> _processingIds = new();
 
     public HealthCheckService
@@ -148,8 +148,8 @@ public class HealthCheckService
 
             // set connection usage context
             using var cts = CancellationTokenSource.CreateLinkedTokenSource(_cancellationToken);
-            var timeoutMinutes = 20;
-            cts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes)); // Timeout after 20 minutes per file
+            var timeoutMinutes = 30;
+            cts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes)); // Timeout after 30 minutes per file
             
             using var contextScope = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check", JobName = davItem.Name, DavItemId = davItem.Id }));
 
@@ -322,9 +322,58 @@ public class HealthCheckService
         List<string> segments = [];
         try
         {
+            // Check if item is mapped (exists in LocalLinks table)
+            var isMapped = await dbClient.Ctx.LocalLinks.AnyAsync(x => x.DavItemId == davItem.Id, ct).ConfigureAwait(false);
+            if (!isMapped)
+            {
+                Log.Warning("[HealthCheck] Item {Name} ({Id}) is not mapped (not found in LocalLinks). Skipping health check.", davItem.Name, davItem.Id);
+
+                davItem.LastHealthCheck = DateTimeOffset.UtcNow;
+                davItem.NextHealthCheck = davItem.LastHealthCheck.Value.AddDays(7);
+                davItem.IsCorrupted = false;
+                davItem.CorruptionReason = null;
+
+                dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+                {
+                    Id = Guid.NewGuid(),
+                    DavItemId = davItem.Id,
+                    Path = davItem.Path,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    Result = HealthCheckResult.HealthResult.Skipped,
+                    RepairStatus = HealthCheckResult.RepairAction.None,
+                    Message = "Not mapped"
+                }));
+                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                return;
+            }
+
             // update the release date, if null
             segments = await GetAllSegments(davItem, dbClient, ct).ConfigureAwait(false);
             Log.Debug($"[HealthCheck] Fetched {segments.Count} segments for {davItem.Name}");
+
+            if (segments.Count == 0)
+            {
+                Log.Warning("[HealthCheck] Item {Name} ({Id}) has no segments found. Skipping health check.", davItem.Name, davItem.Id);
+
+                davItem.LastHealthCheck = DateTimeOffset.UtcNow;
+                davItem.NextHealthCheck = davItem.LastHealthCheck.Value.AddDays(7);
+                davItem.IsCorrupted = false;
+                davItem.CorruptionReason = null;
+
+                dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
+                {
+                    Id = Guid.NewGuid(),
+                    DavItemId = davItem.Id,
+                    Path = davItem.Path,
+                    CreatedAt = DateTimeOffset.UtcNow,
+                    Result = HealthCheckResult.HealthResult.Skipped,
+                    RepairStatus = HealthCheckResult.RepairAction.None,
+                    Message = "No segments found"
+                }));
+                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                return;
+            }
+
             if (davItem.ReleaseDate == null) await UpdateReleaseDate(davItem, segments, ct).ConfigureAwait(false);
 
             // Trigger analysis if media info is missing (ffprobe check)

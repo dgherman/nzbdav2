@@ -57,6 +57,6 @@ public class DatabaseStoreMultipartFile(
             ? new AesDecoderStream(packedStream, multipartFile.Metadata.AesParams)
             : packedStream;
             
-        return new RarDeobfuscationStream(finalStream);
+        return new RarDeobfuscationStream(finalStream, multipartFile.Metadata.ObfuscationKey);
     }
 }

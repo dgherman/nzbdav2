@@ -2,6 +2,8 @@ import { useState } from "react";
 import { Modal, Table, Badge, Spinner, OverlayTrigger, Tooltip } from "react-bootstrap";
 import type { FileDetails } from "~/types/backend";
 import styles from "./file-details-modal.module.css";
+import { useToast } from "~/context/ToastContext";
+import { useConfirm } from "~/context/ConfirmContext";
 
 export type FileDetailsModalProps = {
     show: boolean;
@@ -19,6 +21,8 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
     const [testingDownload, setTestingDownload] = useState(false);
     const [repairingClassification, setRepairingClassification] = useState(false);
     const [flushingCache, setFlushingCache] = useState(false);
+    const { addToast } = useToast();
+    const { confirm } = useConfirm();
 
     const handleFlushRcloneCache = async () => {
         if (!fileDetails) return;
@@ -35,14 +39,14 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
             });
 
             if (response.ok) {
-                alert("Rclone cache flushed successfully for both content and IDs paths.");
+                addToast("Rclone cache flushed successfully for both content and IDs paths.", "success", "Cache Flushed");
             } else {
                 const data = await response.json();
-                alert(`Error: ${data.error || "Failed to flush Rclone cache"}`);
+                addToast(data.error || "Failed to flush Rclone cache", "danger", "Error");
             }
         } catch (err) {
             console.error("Failed to flush Rclone cache:", err);
-            alert("An unexpected error occurred.");
+            addToast("An unexpected error occurred while flushing cache.", "danger", "Error");
         } finally {
             setFlushingCache(false);
         }
@@ -60,9 +64,15 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
 
     const handleRepairClassification = async () => {
         if (!fileDetails) return;
-        if (!confirm(`This will delete the current item from your library and re-add the original NZB to the queue to re-run deobfuscation logic. \n\nAre you sure you want to repair classification for "${fileDetails.name}"?`)) {
-            return;
-        }
+
+        const confirmed = await confirm({
+            title: "Repair Classification",
+            message: `This will delete the current item from your library and re-add the original NZB to the queue to re-run deobfuscation logic.\n\nAre you sure you want to repair classification for "${fileDetails.name}"?`,
+            confirmText: "Repair",
+            variant: "warning"
+        });
+
+        if (!confirmed) return;
 
         setRepairingClassification(true);
         try {
@@ -71,14 +81,14 @@ export function FileDetailsModal({ show, onHide, fileDetails, loading, onResetSt
             });
             const data = await response.json();
             if (response.ok) {
-                alert(data.message || "Item re-queued successfully.");
+                addToast(data.message || "Item re-queued successfully.", "success", "Classification Repair");
                 onHide();
             } else {
-                alert(`Error: ${data.error || "Failed to repair classification"}`);
+                addToast(data.error || "Failed to repair classification", "danger", "Error");
             }
         } catch (err) {
             console.error("Failed to repair classification:", err);
-            alert("An unexpected error occurred.");
+            addToast("An unexpected error occurred.", "danger", "Error");
         } finally {
             setRepairingClassification(false);
         }

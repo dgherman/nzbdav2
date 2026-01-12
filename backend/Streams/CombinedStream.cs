@@ -129,6 +129,7 @@ public class CombinedStream : Stream
             // Current stream is exhausted - dispose and try next part
             Serilog.Log.Debug("[CombinedStream] Part {PartIndex} exhausted. Moving to next.", _currentPartIndex);
             await _currentStream.DisposeAsync().ConfigureAwait(false);
+            _parts[_currentPartIndex].ResetStreamTask(); // Allow recreation if seeking back
             _currentStream = null;
         }
 
@@ -436,6 +437,8 @@ public class CombinedStream : Stream
         if (_maxCachedStreams <= 0)
         {
             stream.Dispose();
+            // Reset the stream task so a new stream can be created on next access
+            _parts[partIndex].ResetStreamTask();
             return;
         }
 
@@ -503,6 +506,15 @@ public class CombinedStream : Stream
         }
 
         public bool IsTaskCreated => _streamTask != null;
+
+        /// <summary>
+        /// Reset the stream task so a new stream will be created on next GetStreamTask() call.
+        /// This is needed when streams are disposed without caching (maxCachedStreams=0).
+        /// </summary>
+        public void ResetStreamTask()
+        {
+            _streamTask = null;
+        }
 
         public long Length { get; }
         public int Index { get; }

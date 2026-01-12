@@ -19,9 +19,9 @@ public static class RarUtil
         // Wrap in a limit stream to prevent scanning the entire file if headers are missing
         // 100MB limit for multi-volume RAR files which can have headers at ~95MB+
         var maxBytes = 100 * 1024 * 1024;
-        var limitedStream = new MaxBytesReadStream(stream, maxBytes);
+        var limitedStream = new MaxBytesReadStream(stream, maxBytes, leaveOpen: true);
 
-        await using var cancellableStream = new CancellableStream(limitedStream, ct);
+        await using var cancellableStream = new CancellableStream(limitedStream, ct, leaveOpen: true);
         return await Task.Run(() => GetRarHeaders(cancellableStream, password), ct).WaitAsync(ct).ConfigureAwait(false);
     }
 

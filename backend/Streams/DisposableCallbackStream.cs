@@ -1,4 +1,4 @@
-﻿namespace NzbWebDAV.Streams;
+namespace NzbWebDAV.Streams;
 
 /// <summary>
 /// A wrapper stream that delegates all operations to an inner stream and
@@ -11,14 +11,16 @@ public class DisposableCallbackStream : Stream
     private readonly Stream _inner;
     private readonly Action? _onDispose;
     private readonly Func<ValueTask>? _onDisposeAsync;
+    private readonly bool _leaveOpen;
     private bool _disposed;
 
     // ReSharper disable once ConvertToPrimaryConstructor
-    public DisposableCallbackStream(Stream inner, Action? onDispose = null, Func<ValueTask>? onDisposeAsync = null)
+    public DisposableCallbackStream(Stream inner, Action? onDispose = null, Func<ValueTask>? onDisposeAsync = null, bool leaveOpen = false)
     {
         _inner = inner ?? throw new ArgumentNullException(nameof(inner));
         _onDispose = onDispose;
         _onDisposeAsync = onDisposeAsync;
+        _leaveOpen = leaveOpen;
     }
 
     protected override void Dispose(bool disposing)
@@ -27,7 +29,10 @@ public class DisposableCallbackStream : Stream
 
         if (disposing)
         {
-            _inner.Dispose();
+            if (!_leaveOpen)
+            {
+                _inner.Dispose();
+            }
             _onDispose?.Invoke();
             
             // Fallback: If only async callback is provided but we are disposing synchronously,
@@ -56,7 +61,10 @@ public class DisposableCallbackStream : Stream
     {
         if (_disposed) return;
 
-        await _inner.DisposeAsync().ConfigureAwait(false);
+        if (!_leaveOpen)
+        {
+            await _inner.DisposeAsync().ConfigureAwait(false);
+        }
 
         if (_onDisposeAsync != null)
             await _onDisposeAsync().ConfigureAwait(false);

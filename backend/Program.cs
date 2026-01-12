@@ -56,12 +56,11 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-11-AFFINITY-STATS-FIX");
-        Log.Warning("  FEATURE: Fix Provider Affinity Stats Tracking");
-        Log.Warning("  - Fixed AffinityKey propagation in BufferedStreaming mode");
-        Log.Warning("  - Stats now correctly accumulate under NZB directory name");
-        Log.Warning("  - Prevents stats fragmentation across daily affinity keys");
-        Log.Warning("  - Enhanced diagnostic logging for connection lifecycle");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-AUTO-DEOBFUSCATION");
+        Log.Warning("  FEATURE: Auto-detect non-standard XOR obfuscation keys");
+        Log.Warning("  - Checks for standard obfuscation signature (AA 04 1D 6D)");
+        Log.Warning("  - Discovers custom XOR keys by analyzing MKV header pattern");
+        Log.Warning("  - Supports any 4-byte repeating XOR key automatically");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

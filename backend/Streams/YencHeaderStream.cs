@@ -1,9 +1,9 @@
-﻿using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Clients.Usenet.Models;
 using UsenetSharp.Models;
 
 namespace NzbWebDAV.Streams;
 
-public class YencHeaderStream(UsenetYencHeader header, UsenetArticleHeaders? articleHeaders, Stream stream) : Stream
+public class YencHeaderStream(UsenetYencHeader header, UsenetArticleHeaders? articleHeaders, Stream stream, bool leaveOpen = false) : Stream
 {
     public UsenetYencHeader Header => header;
     public UsenetArticleHeaders? ArticleHeaders => articleHeaders;
@@ -36,14 +36,20 @@ public class YencHeaderStream(UsenetYencHeader header, UsenetArticleHeaders? art
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
-        stream.Dispose();
+        if (!leaveOpen)
+        {
+            stream.Dispose();
+        }
         _disposed = true;
     }
 
     public override async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        await stream.DisposeAsync().ConfigureAwait(false);
+        if (!leaveOpen)
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
         _disposed = true;
         GC.SuppressFinalize(this);
     }

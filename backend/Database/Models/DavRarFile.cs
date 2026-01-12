@@ -16,12 +16,17 @@ public class DavRarFile
         public long PartSize { get; set; }
         public long Offset { get; set; }
         public long ByteCount { get; set; }
+        public byte[]? ObfuscationKey { get; set; }
     }
+
+    [System.ComponentModel.DataAnnotations.Schema.NotMapped]
+    public byte[]? ObfuscationKey => RarParts.FirstOrDefault(x => x.ObfuscationKey != null)?.ObfuscationKey;
 
     public DavMultipartFile.Meta ToDavMultipartFileMeta()
     {
         return new DavMultipartFile.Meta
         {
+            ObfuscationKey = ObfuscationKey,
             FileParts = RarParts.Select(x => new DavMultipartFile.FilePart()
             {
                 SegmentIds = x.SegmentIds,

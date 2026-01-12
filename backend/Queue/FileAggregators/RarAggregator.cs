@@ -39,6 +39,7 @@ public class RarAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, b
             var pathWithinArchive = archiveFile.Key;
             var fileParts = archiveFile.Value.ToArray();
             var aesParams = fileParts.Select(x => x.AesParams).FirstOrDefault(x => x != null);
+            var obfuscationKey = fileParts.Select(x => x.ObfuscationKey).FirstOrDefault(x => x != null);
             var fileSize = aesParams?.DecodedSize ?? fileParts.Sum(x => x.ByteRangeWithinPart.Count);
             var parentDirectory = EnsureExtractPath(pathWithinArchive);
             var name = Path.GetFileName(pathWithinArchive);
@@ -64,6 +65,7 @@ public class RarAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, b
                 Metadata = new DavMultipartFile.Meta()
                 {
                     AesParams = aesParams,
+                    ObfuscationKey = obfuscationKey,
                     FileParts = fileParts.Select(x => new DavMultipartFile.FilePart()
                     {
                         SegmentIds = x.NzbFile.GetSegmentIds(),

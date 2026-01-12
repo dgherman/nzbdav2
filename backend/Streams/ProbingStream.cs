@@ -1,4 +1,4 @@
-﻿namespace NzbWebDAV.Streams;
+namespace NzbWebDAV.Streams;
 
 /// <summary>
 /// This class wraps an underlying stream and exposes a method to
@@ -7,7 +7,7 @@
 /// and buffering it in memory to relay during future Read requests.
 /// </summary>
 /// <param name="stream">The underlying stream to probe.</param>
-public class ProbingStream(Stream stream) : Stream
+public class ProbingStream(Stream stream, bool leaveOpen = false) : Stream
 {
     private bool? _isEmpty;
     private byte? _probeByte;
@@ -118,14 +118,20 @@ public class ProbingStream(Stream stream) : Stream
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
-        stream.Dispose();
+        if (!leaveOpen)
+        {
+            stream.Dispose();
+        }
         _disposed = true;
     }
 
     public override async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        await stream.DisposeAsync().ConfigureAwait(false);
+        if (!leaveOpen)
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
         _disposed = true;
         GC.SuppressFinalize(this);
     }

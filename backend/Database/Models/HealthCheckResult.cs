@@ -15,6 +15,7 @@ public class HealthCheckResult
     {
         Healthy = 0,
         Unhealthy = 1,
+        Skipped = 2,
     }
 
     public enum RepairAction

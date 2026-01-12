@@ -1,6 +1,6 @@
 namespace NzbWebDAV.Streams;
 
-public class MaxBytesReadStream(Stream stream, long maxBytes) : Stream
+public class MaxBytesReadStream(Stream stream, long maxBytes, bool leaveOpen = false) : Stream
 {
     private long _totalBytesRead = 0;
     private readonly long _maxPosition = maxBytes; // Limit seek position to prevent hanging on far seeks
@@ -67,13 +67,16 @@ public class MaxBytesReadStream(Stream stream, long maxBytes) : Stream
 
     public override async ValueTask DisposeAsync()
     {
-        await stream.DisposeAsync().ConfigureAwait(false);
+        if (!leaveOpen)
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
         GC.SuppressFinalize(this);
     }
 
     protected override void Dispose(bool disposing)
     {
-        if (disposing)
+        if (disposing && !leaveOpen)
         {
             stream.Dispose();
         }

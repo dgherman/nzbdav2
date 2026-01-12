@@ -40,6 +40,7 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
         var allSuccess = true;
         foreach (var file in files)
         {
+            Log.Information("[RcloneRc] Flushing cache for file: {FilePath}", file);
             var parameters = new Dictionary<string, object>
             {
                 ["file"] = file
@@ -73,14 +74,14 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
             var json = JsonSerializer.Serialize(parameters);
             request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            Log.Debug("[RcloneRc] Sending command {Command} to {Url} with parameters: {Json}", command, url, json);
+            Log.Information("[RcloneRc] Sending command {Command} to {Url} with parameters: {Json}", command, url, json);
 
             var response = await client.SendAsync(request).ConfigureAwait(false);
             var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
             {
-                Log.Debug("[RcloneRc] Command {Command} successful. Response: {Response}", command, responseBody);
+                Log.Information("[RcloneRc] Command {Command} successful. Response: {Response}", command, responseBody);
                 return true;
             }
             else

@@ -1,8 +1,8 @@
-﻿using NzbWebDAV.Utils;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
-public class LimitedLengthStream(Stream stream, long length) : Stream
+public class LimitedLengthStream(Stream stream, long length, bool leaveOpen = false) : Stream
 {
     private bool _disposed;
     private long _position = 0;
@@ -54,14 +54,20 @@ public class LimitedLengthStream(Stream stream, long length) : Stream
     protected override void Dispose(bool disposing)
     {
         if (_disposed) return;
-        stream.Dispose();
+        if (!leaveOpen)
+        {
+            stream.Dispose();
+        }
         _disposed = true;
     }
 
     public override async ValueTask DisposeAsync()
     {
         if (_disposed) return;
-        await stream.DisposeAsync().ConfigureAwait(false);
+        if (!leaveOpen)
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
         _disposed = true;
         GC.SuppressFinalize(this);
     }
