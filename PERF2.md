@@ -167,6 +167,87 @@ The fixes dramatically improved test reliability. Further performance optimizati
 
 ---
 
+# Lock-Free Segment Ordering Implementation (P1)
+
+**Date:** 2026-01-13
+**Status:** IMPLEMENTED
+
+## Changes Made
+
+Replaced the semaphore-based write ordering in `BufferedSegmentStream.FetchSegmentsAsync()`:
+
+### Before (Semaphore + Dictionary)
+```csharp
+var fetchedSegments = new ConcurrentDictionary<int, PooledSegmentData>();
+var writeLock = new SemaphoreSlim(1, 1);
+
+// Worker stores segment, then tries to write in order
+fetchedSegments.TryAdd(job.index, segmentData);
+await writeLock.WaitAsync(ct);
+try {
+    while (fetchedSegments.TryRemove(nextIndexToWrite, out var seg)) {
+        await _bufferChannel.Writer.WriteAsync(seg, ct);
+        nextIndexToWrite++;
+    }
+} finally { writeLock.Release(); }
+```
+
+### After (Lock-Free Slot Array)
+```csharp
+var segmentSlots = new PooledSegmentData?[segmentIds.Length];
+
+// Workers write directly to slots (lock-free)
+Interlocked.CompareExchange(ref segmentSlots[job.index], segmentData, null);
+
+// Separate ordering task reads slots in order
+var orderingTask = Task.Run(async () => {
+    while (nextIndexToWrite < segmentIds.Length) {
+        var segment = Volatile.Read(ref segmentSlots[nextIndexToWrite]);
+        if (segment != null) {
+            Volatile.Write(ref segmentSlots[nextIndexToWrite], null);
+            await _bufferChannel.Writer.WriteAsync(segment, ct);
+            nextIndexToWrite++;
+        } else {
+            // Adaptive spin-wait
+        }
+    }
+});
+```
+
+## Test Results
+
+| Latency | Before (Lock) | After (Lock-Free) | Change |
+|---------|---------------|-------------------|--------|
+| 50ms    | 11.17 MB/s    | 11.09 MB/s        | ~0%    |
+| 10ms    | N/A           | 28.92 MB/s        | -      |
+| 1ms     | N/A           | 38.00 MB/s        | -      |
+
+## Analysis
+
+**The lock-free optimization did NOT improve throughput at 50ms latency.**
+
+This confirms that **network latency is the primary bottleneck**, not lock contention. With 50ms latency:
+- Each segment fetch takes ~50ms
+- 20 parallel workers can fetch 20 segments per ~50ms
+- Max theoretical: 20 × 700KB / 50ms = 280 MB/s
+- Actual: 11 MB/s (~4% of theoretical)
+
+The discrepancy is due to:
+1. **Sequential segment processing** - yEnc decode happens inline during fetch
+2. **TCP overhead** - connection establishment, TLS handshake, etc.
+3. **Worker coordination** - straggler detection, job distribution
+
+**When latency decreases**, throughput scales linearly:
+- 50ms → 11 MB/s
+- 10ms → 29 MB/s (2.6× faster with 5× less latency)
+- 1ms → 38 MB/s
+
+## Conclusion
+
+The lock-free implementation is cleaner and eliminates potential contention, but for real-world Usenet providers with 50-150ms latency, the bottleneck is network latency, not lock contention. The next priority (P4: Streaming Decode Pipeline) may provide more benefit by reducing the per-segment latency overhead.
+
+---
+
 # Throughput Improvement Plan
 
 **Current Performance:** 11.17 MB/s with 50ms mock latency

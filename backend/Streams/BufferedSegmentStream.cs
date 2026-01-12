@@ -223,9 +223,56 @@ public class BufferedSegmentStream : Stream
                 catch { /* Ignore cancellation */ }
             }, ct);
 
-            var fetchedSegments = new ConcurrentDictionary<int, PooledSegmentData>();
+            // Lock-free segment ordering: workers write to slots, ordering task reads in order
+            var segmentSlots = new PooledSegmentData?[segmentIds.Length];
             var nextIndexToWrite = 0;
-            var writeLock = new SemaphoreSlim(1, 1);
+
+            // Ordering task: reads slots in order and writes to buffer channel
+            var orderingTask = Task.Run(async () =>
+            {
+                try
+                {
+                    var spinCount = 0;
+                    while (nextIndexToWrite < segmentIds.Length && !ct.IsCancellationRequested)
+                    {
+                        var segment = Volatile.Read(ref segmentSlots[nextIndexToWrite]);
+                        if (segment != null)
+                        {
+                            // Clear slot and write to channel
+                            Volatile.Write(ref segmentSlots[nextIndexToWrite], null);
+                            await _bufferChannel.Writer.WriteAsync(segment, ct).ConfigureAwait(false);
+                            nextIndexToWrite++;
+                            spinCount = 0; // Reset spin count on success
+                        }
+                        else
+                        {
+                            // Slot not ready yet - use adaptive waiting
+                            spinCount++;
+                            if (spinCount < 10)
+                            {
+                                // Fast spin for first few iterations
+                                Thread.SpinWait(100);
+                            }
+                            else if (spinCount < 100)
+                            {
+                                // Yield to other threads
+                                await Task.Yield();
+                            }
+                            else
+                            {
+                                // Longer wait when truly idle
+                                await Task.Delay(1, ct).ConfigureAwait(false);
+                                spinCount = 50; // Reset to middle value
+                            }
+                        }
+                    }
+                }
+                catch (OperationCanceledException) { }
+                catch (Exception ex)
+                {
+                    Log.Error(ex, "[BufferedStream] Error in ordering task");
+                }
+            }, ct);
 
             // Consumers
             var workers = Enumerable.Range(0, concurrentConnections)
@@ -274,7 +321,7 @@ public class BufferedSegmentStream : Stream
                             }
 
                             // Skip if already fetched (race condition handling)
-                            if (fetchedSegments.ContainsKey(job.index)) continue;
+                            if (Volatile.Read(ref segmentSlots[job.index]) != null) continue;
 
                             // Create job-specific CTS for preemption
                             using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -290,31 +337,22 @@ public class BufferedSegmentStream : Stream
                             {
                                 var segmentData = await FetchSegmentWithRetryAsync(job.index, job.segmentId, segmentIds, client, jobCts.Token).ConfigureAwait(false);
 
-                                // Store result (first write wins)
-                                if (fetchedSegments.TryAdd(job.index, segmentData))
+                                // Store result directly to slot (lock-free, first write wins)
+                                var existingSlot = Interlocked.CompareExchange(ref segmentSlots[job.index], segmentData, null);
+                                if (existingSlot == null)
                                 {
-                                    // Update max fetched
-                                    lock (this) { if (job.index > _maxFetchedIndex) _maxFetchedIndex = job.index; }
+                                    // We won the race - update stats
+                                    // Update max fetched using lock-free compare-exchange
+                                    int currentMax;
+                                    do
+                                    {
+                                        currentMax = _maxFetchedIndex;
+                                        if (job.index <= currentMax) break;
+                                    } while (Interlocked.CompareExchange(ref _maxFetchedIndex, job.index, currentMax) != currentMax);
+
                                     Interlocked.Increment(ref _bufferedCount);
                                     Interlocked.Increment(ref _totalFetchedCount);
-
-                                    // Check write lock
-                                    if (job.index == nextIndexToWrite || fetchedSegments.ContainsKey(nextIndexToWrite))
-                                    {
-                                        await writeLock.WaitAsync(ct).ConfigureAwait(false);
-                                        try
-                                        {
-                                            while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
-                                            {
-                                                await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
-                                                nextIndexToWrite++;
-                                            }
-                                        }
-                                        finally
-                                        {
-                                            writeLock.Release();
-                                        }
-                                    }
+                                    // Ordering task will pick up from slot and write to channel
                                 }
                                 else
                                 {
@@ -360,25 +398,24 @@ public class BufferedSegmentStream : Stream
                 .ToList();
 
             await Task.WhenAll(workers).ConfigureAwait(false);
-            
-            // Clean up
-            await writeLock.WaitAsync(ct).ConfigureAwait(false);
+
+            // Wait for ordering task to finish writing all segments to channel
+            // Give it a reasonable timeout in case something went wrong
             try
             {
-                // Flush remaining
-                while (fetchedSegments.TryRemove(nextIndexToWrite, out var orderedSegment))
-                {
-                    await _bufferChannel.Writer.WriteAsync(orderedSegment, ct).ConfigureAwait(false);
-                    nextIndexToWrite++;
-                }
+                await orderingTask.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
             }
-            finally
+            catch (TimeoutException)
             {
-                writeLock.Release();
-                writeLock.Dispose();
+                Log.Warning("[BufferedStream] Ordering task timed out. NextIndexToWrite={NextIndex}, TotalSegments={Total}",
+                    nextIndexToWrite, segmentIds.Length);
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when stream is disposed early
             }
 
-            _bufferChannel.Writer.Complete();
+            _bufferChannel.Writer.TryComplete(); // Use TryComplete to avoid exception if already closed
         }
         catch (OperationCanceledException)
         {
