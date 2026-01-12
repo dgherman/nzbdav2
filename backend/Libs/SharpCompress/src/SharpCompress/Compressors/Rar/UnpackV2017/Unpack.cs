@@ -97,7 +97,6 @@ internal partial class Unpack : IRarUnpack
 
     public void DoUnpack()
     {
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] DoUnpack called. IsStored: {fileHeader.IsStored}, Algo: {fileHeader.CompressionAlgorithm}, Solid: {fileHeader.IsSolid}");
         if (fileHeader.IsStored)
         {
             UnstoreFile();
@@ -112,7 +111,6 @@ internal partial class Unpack : IRarUnpack
         System.Threading.CancellationToken cancellationToken = default
     )
     {
-        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] DoUnpackAsync called. IsStored: {fileHeader.IsStored}, Algo: {fileHeader.CompressionAlgorithm}, Solid: {fileHeader.IsSolid}");
         if (fileHeader.IsStored)
         {
             await UnstoreFileAsync(cancellationToken).ConfigureAwait(false);
@@ -141,23 +139,11 @@ internal partial class Unpack : IRarUnpack
                 break;
             }
 
-            if (DestUnpSize == fileHeader.UncompressedSize)
+            if (DestUnpSize == fileHeader.UncompressedSize && n >= 4)
             {
-                if (n >= 4)
+                if (b[0] == 0xAA && b[1] == 0x04 && b[2] == 0x1D && b[3] == 0x6D)
                 {
-                    if (b[0] == 0xAA && b[1] == 0x04 && b[2] == 0x1D && b[3] == 0x6D)
-                    {
-                        _isObfuscated = true;
-                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] Obfuscation DETECTED for Stored file. Sig: {b[0]:X2} {b[1]:X2} {b[2]:X2} {b[3]:X2}");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] Standard Stored file. Sig: {b[0]:X2} {b[1]:X2} {b[2]:X2} {b[3]:X2}");
-                    }
-                }
-                else if (n > 0)
-                {
-                     Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] Short read at start of Stored file. Bytes: {n}. Data: {BitConverter.ToString(b.Slice(0, n).ToArray())}");
+                    _isObfuscated = true;
                 }
             }
 
@@ -190,23 +176,11 @@ internal partial class Unpack : IRarUnpack
                 break;
             }
 
-            if (DestUnpSize == fileHeader.UncompressedSize)
+            if (DestUnpSize == fileHeader.UncompressedSize && n >= 4)
             {
-                if (n >= 4)
+                if (buffer[0] == 0xAA && buffer[1] == 0x04 && buffer[2] == 0x1D && buffer[3] == 0x6D)
                 {
-                    if (buffer[0] == 0xAA && buffer[1] == 0x04 && buffer[2] == 0x1D && buffer[3] == 0x6D)
-                    {
-                        _isObfuscated = true;
-                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] Obfuscation DETECTED for Stored file. Sig: {buffer[0]:X2} {buffer[1]:X2} {buffer[2]:X2} {buffer[3]:X2}");
-                    }
-                    else
-                    {
-                        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] Standard Stored file. Sig: {buffer[0]:X2} {buffer[1]:X2} {buffer[2]:X2} {buffer[3]:X2}");
-                    }
-                }
-                else if (n > 0)
-                {
-                     Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] Short read at start of Stored file. Bytes: {n}. Data: {BitConverter.ToString(buffer, 0, n)}");
+                    _isObfuscated = true;
                 }
             }
 
