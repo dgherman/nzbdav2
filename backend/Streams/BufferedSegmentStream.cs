@@ -42,8 +42,9 @@ public class BufferedSegmentStream : Stream
     public int BufferedCount => _bufferedCount;
 
     // Track corrupted segments for health check triggering
-    private readonly ConcurrentBag<(int Index, string SegmentId)> _corruptedSegments = new();
     private readonly long[]? _segmentSizes;
+    private readonly List<(int Index, string SegmentId)> _corruptedSegments = new();
+    private int _lastSuccessfulSegmentSize = 0;
 
     public BufferedSegmentStream(
         string[] segmentIds,
@@ -485,6 +486,16 @@ public class BufferedSegmentStream : Stream
                     }
 
                     // Success! Return the segment
+                    if (totalRead > _lastSuccessfulSegmentSize)
+                    {
+                        // Use loop for thread-safe max update
+                        int initial, computed;
+                        do
+                        {
+                            initial = _lastSuccessfulSegmentSize;
+                            computed = Math.Max(initial, totalRead);
+                        } while (initial != computed && Interlocked.CompareExchange(ref _lastSuccessfulSegmentSize, computed, initial) != initial);
+                    }
                     return new PooledSegmentData(segmentId, buffer, totalRead);
                 }
                 catch
@@ -567,6 +578,15 @@ public class BufferedSegmentStream : Stream
         if (_segmentSizes != null && index < _segmentSizes.Length)
         {
             zeroBufferSize = (int)_segmentSizes[index];
+        }
+        else if (_lastSuccessfulSegmentSize > 0 && index < segmentIds.Length - 1)
+        {
+            // Fallback: If not the last segment, assume it is the same size as the largest successful segment seen so far.
+            // This is a safe bet for 99.9% of Usenet posts where segments are uniform size.
+            // For the last segment, we cannot guess safely, so we still fail.
+            zeroBufferSize = _lastSuccessfulSegmentSize;
+            Log.Warning("[BufferedStream] Estimating segment size {Size} for segment {Index}/{Total} based on max observed segment size to allow graceful degradation.", 
+                zeroBufferSize, index, segmentIds.Length);
         }
         else
         {
