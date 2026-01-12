@@ -97,6 +97,7 @@ internal partial class Unpack : IRarUnpack
 
     public void DoUnpack()
     {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] DoUnpack called. IsStored: {fileHeader.IsStored}, Algo: {fileHeader.CompressionAlgorithm}, Solid: {fileHeader.IsSolid}");
         if (fileHeader.IsStored)
         {
             UnstoreFile();
@@ -111,6 +112,7 @@ internal partial class Unpack : IRarUnpack
         System.Threading.CancellationToken cancellationToken = default
     )
     {
+        Console.WriteLine($"[{DateTime.Now:HH:mm:ss} INF] [SharpCompress] DoUnpackAsync called. IsStored: {fileHeader.IsStored}, Algo: {fileHeader.CompressionAlgorithm}, Solid: {fileHeader.IsSolid}");
         if (fileHeader.IsStored)
         {
             await UnstoreFileAsync(cancellationToken).ConfigureAwait(false);
