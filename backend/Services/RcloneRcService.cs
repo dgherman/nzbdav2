@@ -37,12 +37,21 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
 
         if (files.Length == 0) return true;
 
-        var parameters = new Dictionary<string, object>
+        var allSuccess = true;
+        foreach (var file in files)
         {
-            ["files"] = files
-        };
+            var parameters = new Dictionary<string, object>
+            {
+                ["file"] = file
+            };
 
-        return await SendRequestAsync(config, ForgetEndpoint, parameters).ConfigureAwait(false);
+            if (!await SendRequestAsync(config, ForgetEndpoint, parameters).ConfigureAwait(false))
+            {
+                allSuccess = false;
+            }
+        }
+
+        return allSuccess;
     }
 
     private async Task<bool> SendRequestAsync(RcloneRcConfig config, string command, Dictionary<string, object> parameters)
