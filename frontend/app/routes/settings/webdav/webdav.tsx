@@ -9,7 +9,21 @@ type SabnzbdSettingsProps = {
     setNewConfig: Dispatch<SetStateAction<Record<string, string>>>
 };
 
+type RcloneRcConfig = {
+    Url?: string;
+    Username?: string;
+    Password?: string;
+    Enabled: boolean;
+};
+
 export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
+    const rcloneRcConfig: RcloneRcConfig = JSON.parse(config["rclone.rc"] || "{}");
+
+    const updateRcloneConfig = (newRcConfig: Partial<RcloneRcConfig>) => {
+        const updated = { ...rcloneRcConfig, ...newRcConfig };
+        setNewConfig({ ...config, "rclone.rc": JSON.stringify(updated) });
+    };
+
     return (
         <div className={styles.container}>
             <Form.Group>
@@ -112,6 +126,50 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                     When enabled, par2 files will be rendered as text files on the Dav Explorer page, displaying all File-Descriptor entries.
                 </Form.Text>
             </Form.Group>
+            <hr />
+            <h4>Rclone Remote Control (RC)</h4>
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
+                    id="rclone-rc-enabled"
+                    label={`Enable Rclone RC Integration`}
+                    checked={rcloneRcConfig.Enabled ?? false}
+                    onChange={e => updateRcloneConfig({ Enabled: e.target.checked })} />
+            </Form.Group>
+            {rcloneRcConfig.Enabled && (
+                <>
+                    <Form.Group>
+                        <Form.Label htmlFor="rclone-rc-url">RC URL</Form.Label>
+                        <Form.Control
+                            className={styles.input}
+                            type="text"
+                            id="rclone-rc-url"
+                            placeholder="http://localhost:5572"
+                            value={rcloneRcConfig.Url || ""}
+                            onChange={e => updateRcloneConfig({ Url: e.target.value })} />
+                    </Form.Group>
+                    <Form.Group>
+                        <Form.Label htmlFor="rclone-rc-user">RC Username</Form.Label>
+                        <Form.Control
+                            className={styles.input}
+                            type="text"
+                            id="rclone-rc-user"
+                            placeholder="admin"
+                            value={rcloneRcConfig.Username || ""}
+                            onChange={e => updateRcloneConfig({ Username: e.target.value })} />
+                    </Form.Group>
+                    <Form.Group>
+                        <Form.Label htmlFor="rclone-rc-pass">RC Password</Form.Label>
+                        <Form.Control
+                            className={styles.input}
+                            type="password"
+                            id="rclone-rc-pass"
+                            value={rcloneRcConfig.Password || ""}
+                            onChange={e => updateRcloneConfig({ Password: e.target.value })} />
+                    </Form.Group>
+                </>
+            )}
         </div>
     );
 }
@@ -124,6 +182,7 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
         || config["webdav.show-hidden-files"] !== newConfig["webdav.show-hidden-files"]
         || config["webdav.enforce-readonly"] !== newConfig["webdav.enforce-readonly"]
         || config["webdav.preview-par2-files"] !== newConfig["webdav.preview-par2-files"]
+        || config["rclone.rc"] !== newConfig["rclone.rc"]
 }
 
 export function isWebdavSettingsValid(newConfig: Record<string, string>) {
