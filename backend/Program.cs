@@ -188,6 +188,7 @@ class Program
         builder.Host.UseSerilog();
         builder.Services.AddControllers();
         builder.Services.AddHealthChecks();
+        builder.Services.AddHttpClient("RcloneRc");
         builder.Services
             .AddWebdavBasicAuthentication(configManager)
             .AddSingleton(configManager)
@@ -201,6 +202,7 @@ class Program
             .AddSingleton<HealthCheckService>()
             .AddSingleton<NzbAnalysisService>()
             .AddSingleton<MediaAnalysisService>()
+            .AddSingleton<RcloneRcService>()
             .AddHostedService<DatabaseMaintenanceService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()

@@ -32,6 +32,7 @@ public class QueueItemProcessor(
     ConfigManager configManager,
     WebsocketManager websocketManager,
     HealthCheckService healthCheckService,
+    RcloneRcService rcloneRcService,
     IProgress<int> progress,
     CancellationToken ct
 )
@@ -580,6 +581,21 @@ public class QueueItemProcessor(
         await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         Log.Information("[QueueItemProcessor] Successfully moved queue item {JobName} ({Id}) to history. Status: {Status}, CompletedAt: {CompletedAt}",
             queueItem.JobName, historyItem.Id, historyItem.DownloadStatus, historyItem.CompletedAt);
+
+        // Notify Rclone to refresh the cache for the new item's path (parent directory)
+        if (mountFolder != null)
+        {
+            try
+            {
+                var path = $"{queueItem.Category}/{queueItem.JobName}";
+                Log.Debug("[QueueItemProcessor] Triggering Rclone VFS refresh for {Path}", path);
+                await rcloneRcService.RefreshAsync(path).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "[QueueItemProcessor] Failed to trigger Rclone refresh");
+            }
+        }
 
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemRemoved, queueItem.Id.ToString());
         _ = websocketManager.SendMessage(WebsocketTopic.HistoryItemAdded, historySlot.ToJson());

@@ -353,6 +353,12 @@ public class ConfigManager
         return GetConfigValue("general.base-url") ?? "http://localhost:3000";
     }
 
+    public RcloneRcConfig GetRcloneRcConfig()
+    {
+        var defaultValue = new RcloneRcConfig();
+        return GetConfigValue<RcloneRcConfig>("rclone.rc") ?? defaultValue;
+    }
+
     public class ConfigEventArgs : EventArgs
     {
         public Dictionary<string, string> ChangedConfig { get; set; } = new();
