@@ -53,8 +53,10 @@ public class DatabaseStoreMultipartFile(
             configManager.GetConnectionsPerStream(),
             usageContext
         );
-        return multipartFile.Metadata.AesParams != null
+        Stream finalStream = multipartFile.Metadata.AesParams != null
             ? new AesDecoderStream(packedStream, multipartFile.Metadata.AesParams)
             : packedStream;
+            
+        return new RarDeobfuscationStream(finalStream);
     }
 }
