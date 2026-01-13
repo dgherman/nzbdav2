@@ -58,7 +58,7 @@ public class FullNzbTester
         if (useMockServer)
         {
             var port = 1190;
-            var latencyMs = 50;
+            var latencyMs = 150;
             var jitterMs = 10;
             var segmentSize = 700 * 1024;
             var totalSizeMb = 200;
