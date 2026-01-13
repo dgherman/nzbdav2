@@ -333,28 +333,37 @@ public class BufferedSegmentStream : Stream
                         {
                             var duration = DateTimeOffset.UtcNow - assignment.StartTime;
                             
-                            // If running > 1.5s (Original threshold) and not already racing
+                            // If running > 1.5s and not already racing
                             if (duration.TotalSeconds > 1.5 && !racingIndices.ContainsKey(nextNeeded))
                             {
                                 // Find a victim to preempt (highest index currently running)
                                 var victim = activeAssignments.Keys.DefaultIfEmpty(-1).Max();
-                                
+
                                 if (victim > nextNeeded)
                                 {
                                     if (activeAssignments.TryGetValue(victim, out var victimAssignment))
                                     {
                                         Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration}s. Preempting Segment {Victim} to race.", nextNeeded, duration.TotalSeconds, victim);
-                                        
+
                                         // Cancel victim to free up its worker
                                         victimAssignment.Cts.Cancel();
-                                        
+
                                         // Re-queue victim (high priority to avoid starvation)
                                         _ = urgentChannel.Writer.WriteAsync((victim, segmentIds[victim]), ct);
-                                        
+
                                         // Race the needed segment
                                         _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
                                         racingIndices.TryAdd(nextNeeded, true);
                                     }
+                                }
+                                else
+                                {
+                                    // No victim available (stalled segment is highest index)
+                                    // Cancel the stalled worker itself to free its connection
+                                    Log.Debug("[BufferedStream] STRAGGLER SELF-CANCEL: Segment {Index} running for {Duration}s. Cancelling stalled worker and queueing for retry.", nextNeeded, duration.TotalSeconds);
+                                    assignment.Cts.Cancel();
+                                    _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
+                                    racingIndices.TryAdd(nextNeeded, true);
                                 }
                             }
                         }
@@ -492,8 +501,9 @@ public class BufferedSegmentStream : Stream
                             // Skip if already fetched (race condition handling)
                             if (Volatile.Read(ref segmentSlots[job.index]) != null) continue;
 
-                            // Create job-specific CTS for preemption
+                            // Create job-specific CTS for preemption with hard timeout (5s max per segment)
                             using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+                            jobCts.CancelAfter(TimeSpan.FromSeconds(5)); // Hard timeout for stuck network reads
                             using var _scope = jobCts.Token.SetScopedContext(ct.GetContext<ConnectionUsageContext>());
                             var assignment = (DateTimeOffset.UtcNow, jobCts, workerId);
                             

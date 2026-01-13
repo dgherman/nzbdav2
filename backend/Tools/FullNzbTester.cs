@@ -65,18 +65,20 @@ public class FullNzbTester
 
             // Parse optional args
             var connectionsPerStream = 20; // Higher default for benchmark
+            var stallRate = 0.0; // Percentage of requests that stall (0.01 = 1%)
             foreach (var arg in args)
             {
                 if (arg.StartsWith("--latency=")) int.TryParse(arg.Substring(10), out latencyMs);
                 if (arg.StartsWith("--jitter=")) int.TryParse(arg.Substring(9), out jitterMs);
                 if (arg.StartsWith("--size=")) int.TryParse(arg.Substring(7), out totalSizeMb);
                 if (arg.StartsWith("--connections=")) int.TryParse(arg.Substring(14), out connectionsPerStream);
+                if (arg.StartsWith("--stall=")) double.TryParse(arg.Substring(8), out stallRate);
             }
 
             Console.WriteLine($"═══════════════════════════════════════════════════════════════");
             Console.WriteLine($"  MOCK SERVER BENCHMARK");
             Console.WriteLine($"  Latency: {latencyMs}ms, Jitter: {jitterMs}ms, File Size: {totalSizeMb}MB");
-            Console.WriteLine($"  Connections per stream: {connectionsPerStream}");
+            Console.WriteLine($"  Connections per stream: {connectionsPerStream}, Stall rate: {stallRate:P1}");
             Console.WriteLine($"═══════════════════════════════════════════════════════════════");
 
             // Disable smart analysis for mock server (segments are synthetic)
@@ -88,7 +90,7 @@ public class FullNzbTester
 
             // Start mock server
             Console.WriteLine($"Starting mock NNTP server on port {port}...");
-            mockServer = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, 0.0);
+            mockServer = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, stallRate);
             mockServer.Start();
 
             // Generate mock NZB

@@ -81,10 +81,11 @@ public class MockNntpServer : IDisposable
                     await Task.Delay(delay);
                 }
 
-                // 2. Simulate Timeout / Stall (Mocking a lost packet or server hang)
-                if (_timeoutRate > 0 && Random.Shared.NextDouble() < _timeoutRate)
+                // 2. Simulate Timeout / Stall only for BODY/ARTICLE commands (not auth)
+                var isDataCommand = cmd == "BODY" || cmd == "ARTICLE";
+                if (isDataCommand && _timeoutRate > 0 && Random.Shared.NextDouble() < _timeoutRate)
                 {
-                    // Stall for 10 seconds then disconnect
+                    // Stall for 10 seconds then disconnect (simulates slow/stuck provider)
                     await Task.Delay(10000);
                     client.Close();
                     return;
