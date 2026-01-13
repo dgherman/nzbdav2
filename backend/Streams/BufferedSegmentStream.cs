@@ -18,6 +18,66 @@ namespace NzbWebDAV.Streams;
 /// </summary>
 public class BufferedSegmentStream : Stream
 {
+    // Enable detailed timing for benchmarks
+    public static bool EnableDetailedTiming { get; set; } = false;
+
+    // Global timing accumulators (reset when EnableDetailedTiming is set to true)
+    private static long s_totalFetchTimeMs;
+    private static long s_totalChannelWriteTimeMs;
+    private static long s_totalChannelReadWaitMs;
+    private static long s_orderingSpinCount;
+    private static long s_orderingYieldCount;
+    private static long s_orderingDelayCount;
+    private static int s_peakActiveWorkers;
+    private static int s_totalSegmentsFetched;
+    private static int s_totalSegmentsRead;
+    private static int s_streamCount;
+
+    // Granular fetch timing
+    private static long s_connectionAcquireTimeMs;
+    private static long s_networkReadTimeMs;
+    private static long s_bufferCopyTimeMs;
+
+    /// <summary>
+    /// Reset global timing accumulators
+    /// </summary>
+    public static void ResetGlobalTimingStats()
+    {
+        s_totalFetchTimeMs = 0;
+        s_totalChannelWriteTimeMs = 0;
+        s_totalChannelReadWaitMs = 0;
+        s_orderingSpinCount = 0;
+        s_orderingYieldCount = 0;
+        s_orderingDelayCount = 0;
+        s_peakActiveWorkers = 0;
+        s_totalSegmentsFetched = 0;
+        s_totalSegmentsRead = 0;
+        s_streamCount = 0;
+        s_connectionAcquireTimeMs = 0;
+        s_networkReadTimeMs = 0;
+        s_bufferCopyTimeMs = 0;
+    }
+
+    /// <summary>
+    /// Get global timing statistics (aggregated across all streams)
+    /// </summary>
+    public static StreamTimingStats GetGlobalTimingStats() => new()
+    {
+        TotalFetchTimeMs = s_totalFetchTimeMs,
+        TotalChannelWriteTimeMs = s_totalChannelWriteTimeMs,
+        TotalChannelReadWaitMs = s_totalChannelReadWaitMs,
+        OrderingSpinCount = s_orderingSpinCount,
+        OrderingYieldCount = s_orderingYieldCount,
+        OrderingDelayCount = s_orderingDelayCount,
+        PeakActiveWorkers = s_peakActiveWorkers,
+        TotalSegmentsFetched = s_totalSegmentsFetched,
+        TotalSegmentsRead = s_totalSegmentsRead,
+        StreamLifetimeMs = 0, // Not applicable for global stats
+        ConnectionAcquireTimeMs = s_connectionAcquireTimeMs,
+        NetworkReadTimeMs = s_networkReadTimeMs,
+        BufferCopyTimeMs = s_bufferCopyTimeMs
+    };
+
     private readonly Channel<PooledSegmentData> _bufferChannel;
     private readonly Task _fetchTask;
     private readonly CancellationTokenSource _cts = new();
@@ -30,16 +90,96 @@ public class BufferedSegmentStream : Stream
     private int _currentSegmentPosition;
     private long _position;
     private bool _disposed;
-    
+
     private int _totalFetchedCount;
     private int _totalReadCount;
     private int _bufferedCount; // Number of segments currently in memory buffer
-    
+
     private int _nextIndexToRead = 0;
     private int _maxFetchedIndex = -1;
     private readonly int _totalSegments;
 
     public int BufferedCount => _bufferedCount;
+
+    // Detailed timing metrics (only collected when EnableDetailedTiming = true)
+    private long _totalFetchTimeMs;
+    private long _totalDecodeTimeMs;
+    private long _totalChannelWriteTimeMs;
+    private long _totalChannelReadWaitMs;
+    private long _orderingSpinCount;
+    private long _orderingYieldCount;
+    private long _orderingDelayCount;
+    private int _peakActiveWorkers;
+    private int _activeWorkers;
+    private readonly Stopwatch _streamLifetime = Stopwatch.StartNew();
+
+    /// <summary>
+    /// Get timing statistics (only meaningful when EnableDetailedTiming = true)
+    /// </summary>
+    public StreamTimingStats GetTimingStats() => new()
+    {
+        TotalFetchTimeMs = _totalFetchTimeMs,
+        TotalDecodeTimeMs = _totalDecodeTimeMs,
+        TotalChannelWriteTimeMs = _totalChannelWriteTimeMs,
+        TotalChannelReadWaitMs = _totalChannelReadWaitMs,
+        OrderingSpinCount = _orderingSpinCount,
+        OrderingYieldCount = _orderingYieldCount,
+        OrderingDelayCount = _orderingDelayCount,
+        PeakActiveWorkers = _peakActiveWorkers,
+        TotalSegmentsFetched = _totalFetchedCount,
+        TotalSegmentsRead = _totalReadCount,
+        StreamLifetimeMs = _streamLifetime.ElapsedMilliseconds
+    };
+
+    public class StreamTimingStats
+    {
+        public long TotalFetchTimeMs { get; init; }
+        public long TotalDecodeTimeMs { get; init; }
+        public long TotalChannelWriteTimeMs { get; init; }
+        public long TotalChannelReadWaitMs { get; init; }
+        public long OrderingSpinCount { get; init; }
+        public long OrderingYieldCount { get; init; }
+        public long OrderingDelayCount { get; init; }
+        public long ConnectionAcquireTimeMs { get; init; }
+        public long NetworkReadTimeMs { get; init; }
+        public long BufferCopyTimeMs { get; init; }
+        public int PeakActiveWorkers { get; init; }
+        public int TotalSegmentsFetched { get; init; }
+        public int TotalSegmentsRead { get; init; }
+        public long StreamLifetimeMs { get; init; }
+
+        public void Print()
+        {
+            Console.WriteLine("\n══════════════════════════════════════════════════════════════");
+            Console.WriteLine("  BUFFERED STREAM TIMING BREAKDOWN");
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+            Console.WriteLine($"  Stream Lifetime:        {StreamLifetimeMs,8} ms");
+            Console.WriteLine($"  Segments Fetched:       {TotalSegmentsFetched,8}");
+            Console.WriteLine($"  Segments Read:          {TotalSegmentsRead,8}");
+            Console.WriteLine("──────────────────────────────────────────────────────────────");
+            Console.WriteLine("  FETCH PHASE (cumulative across all workers):");
+            Console.WriteLine($"    Total Fetch Time:     {TotalFetchTimeMs,8} ms");
+            Console.WriteLine($"    Avg per Segment:      {(TotalSegmentsFetched > 0 ? TotalFetchTimeMs / TotalSegmentsFetched : 0),8} ms");
+            Console.WriteLine("  FETCH BREAKDOWN:");
+            Console.WriteLine($"    Connection Acquire:   {ConnectionAcquireTimeMs,8} ms ({(TotalFetchTimeMs > 0 ? ConnectionAcquireTimeMs * 100 / TotalFetchTimeMs : 0)}%)");
+            Console.WriteLine($"    Network Read:         {NetworkReadTimeMs,8} ms ({(TotalFetchTimeMs > 0 ? NetworkReadTimeMs * 100 / TotalFetchTimeMs : 0)}%)");
+            Console.WriteLine($"    Buffer Copy:          {BufferCopyTimeMs,8} ms ({(TotalFetchTimeMs > 0 ? BufferCopyTimeMs * 100 / TotalFetchTimeMs : 0)}%)");
+            var unaccounted = TotalFetchTimeMs - ConnectionAcquireTimeMs - NetworkReadTimeMs - BufferCopyTimeMs;
+            Console.WriteLine($"    Other/Overhead:       {unaccounted,8} ms ({(TotalFetchTimeMs > 0 ? unaccounted * 100 / TotalFetchTimeMs : 0)}%)");
+            Console.WriteLine("──────────────────────────────────────────────────────────────");
+            Console.WriteLine("  ORDERING PHASE:");
+            Console.WriteLine($"    Channel Write Time:   {TotalChannelWriteTimeMs,8} ms");
+            Console.WriteLine($"    Spin Waits:           {OrderingSpinCount,8}");
+            Console.WriteLine($"    Yield Waits:          {OrderingYieldCount,8}");
+            Console.WriteLine($"    Delay Waits:          {OrderingDelayCount,8}");
+            Console.WriteLine("──────────────────────────────────────────────────────────────");
+            Console.WriteLine("  CONSUMER PHASE:");
+            Console.WriteLine($"    Channel Read Wait:    {TotalChannelReadWaitMs,8} ms");
+            Console.WriteLine("──────────────────────────────────────────────────────────────");
+            Console.WriteLine($"  Peak Active Workers:    {PeakActiveWorkers,8}");
+            Console.WriteLine("══════════════════════════════════════════════════════════════");
+        }
+    }
 
     // Track corrupted segments for health check triggering
     private readonly long[]? _segmentSizes;
@@ -240,7 +380,21 @@ public class BufferedSegmentStream : Stream
                         {
                             // Clear slot and write to channel
                             Volatile.Write(ref segmentSlots[nextIndexToWrite], null);
+
+                            Stopwatch? writeWatch = null;
+                            if (EnableDetailedTiming)
+                            {
+                                writeWatch = Stopwatch.StartNew();
+                            }
+
                             await _bufferChannel.Writer.WriteAsync(segment, ct).ConfigureAwait(false);
+
+                            if (EnableDetailedTiming && writeWatch != null)
+                            {
+                                Interlocked.Add(ref _totalChannelWriteTimeMs, writeWatch.ElapsedMilliseconds);
+                                Interlocked.Add(ref s_totalChannelWriteTimeMs, writeWatch.ElapsedMilliseconds);
+                            }
+
                             nextIndexToWrite++;
                             spinCount = 0; // Reset spin count on success
                         }
@@ -252,16 +406,31 @@ public class BufferedSegmentStream : Stream
                             {
                                 // Fast spin for first few iterations
                                 Thread.SpinWait(100);
+                                if (EnableDetailedTiming)
+                                {
+                                    Interlocked.Increment(ref _orderingSpinCount);
+                                    Interlocked.Increment(ref s_orderingSpinCount);
+                                }
                             }
                             else if (spinCount < 100)
                             {
                                 // Yield to other threads
                                 await Task.Yield();
+                                if (EnableDetailedTiming)
+                                {
+                                    Interlocked.Increment(ref _orderingYieldCount);
+                                    Interlocked.Increment(ref s_orderingYieldCount);
+                                }
                             }
                             else
                             {
                                 // Longer wait when truly idle
                                 await Task.Delay(1, ct).ConfigureAwait(false);
+                                if (EnableDetailedTiming)
+                                {
+                                    Interlocked.Increment(ref _orderingDelayCount);
+                                    Interlocked.Increment(ref s_orderingDelayCount);
+                                }
                                 spinCount = 50; // Reset to middle value
                             }
                         }
@@ -333,9 +502,36 @@ public class BufferedSegmentStream : Stream
                             // We mainly care about having *at least one* active.
                             activeAssignments[job.index] = assignment;
 
+                            // Track active workers for timing
+                            if (EnableDetailedTiming)
+                            {
+                                var current = Interlocked.Increment(ref _activeWorkers);
+                                int peak;
+                                do
+                                {
+                                    peak = _peakActiveWorkers;
+                                    if (current <= peak) break;
+                                } while (Interlocked.CompareExchange(ref _peakActiveWorkers, current, peak) != peak);
+                                // Also update global peak
+                                do
+                                {
+                                    peak = s_peakActiveWorkers;
+                                    if (current <= peak) break;
+                                } while (Interlocked.CompareExchange(ref s_peakActiveWorkers, current, peak) != peak);
+                            }
+
                             try
                             {
+                                Stopwatch? fetchWatch = null;
+                                if (EnableDetailedTiming) fetchWatch = Stopwatch.StartNew();
+
                                 var segmentData = await FetchSegmentWithRetryAsync(job.index, job.segmentId, segmentIds, client, jobCts.Token).ConfigureAwait(false);
+
+                                if (EnableDetailedTiming && fetchWatch != null)
+                                {
+                                    Interlocked.Add(ref _totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
+                                    Interlocked.Add(ref s_totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
+                                }
 
                                 // Store result directly to slot (lock-free, first write wins)
                                 var existingSlot = Interlocked.CompareExchange(ref segmentSlots[job.index], segmentData, null);
@@ -352,6 +548,7 @@ public class BufferedSegmentStream : Stream
 
                                     Interlocked.Increment(ref _bufferedCount);
                                     Interlocked.Increment(ref _totalFetchedCount);
+                                    if (EnableDetailedTiming) Interlocked.Increment(ref s_totalSegmentsFetched);
                                     // Ordering task will pick up from slot and write to channel
                                 }
                                 else
@@ -380,6 +577,7 @@ public class BufferedSegmentStream : Stream
                             {
                                 activeAssignments.TryRemove(job.index, out _);
                                 racingIndices.TryRemove(job.index, out _);
+                                if (EnableDetailedTiming) Interlocked.Decrement(ref _activeWorkers);
                             }
                         }
                         catch (Exception ex)
@@ -457,6 +655,10 @@ public class BufferedSegmentStream : Stream
             Stream? stream = null;
             try
             {
+                // Time connection acquisition
+                Stopwatch? acquireWatch = null;
+                if (EnableDetailedTiming) acquireWatch = Stopwatch.StartNew();
+
                 var fetchHeaders = index == 0;
                 var multiClient = GetMultiProviderClient(client);
                 if (multiClient != null)
@@ -466,6 +668,12 @@ public class BufferedSegmentStream : Stream
                 else
                 {
                     stream = await client.GetSegmentStreamAsync(segmentId, fetchHeaders, ct).ConfigureAwait(false);
+                }
+
+                if (EnableDetailedTiming && acquireWatch != null)
+                {
+                    acquireWatch.Stop();
+                    Interlocked.Add(ref s_connectionAcquireTimeMs, acquireWatch.ElapsedMilliseconds);
                 }
 
                 if (fetchHeaders && stream is YencHeaderStream yencStream && yencStream.ArticleHeaders != null)
@@ -480,6 +688,10 @@ public class BufferedSegmentStream : Stream
                 // Rent a buffer and read the segment into it
                 var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
                 var totalRead = 0;
+
+                // Time network read
+                Stopwatch? readWatch = null;
+                if (EnableDetailedTiming) readWatch = Stopwatch.StartNew();
 
                 try
                 {
@@ -497,6 +709,12 @@ public class BufferedSegmentStream : Stream
                         var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
                         if (read == 0) break;
                         totalRead += read;
+                    }
+
+                    if (EnableDetailedTiming && readWatch != null)
+                    {
+                        readWatch.Stop();
+                        Interlocked.Add(ref s_networkReadTimeMs, readWatch.ElapsedMilliseconds);
                     }
 
                     // Validate segment size against YENC header
@@ -658,6 +876,12 @@ public class BufferedSegmentStream : Stream
                     var hasData = await _bufferChannel.Reader.WaitToReadAsync(cancellationToken).ConfigureAwait(false);
                     waitWatch.Stop();
 
+                    if (EnableDetailedTiming)
+                    {
+                        Interlocked.Add(ref _totalChannelReadWaitMs, waitWatch.ElapsedMilliseconds);
+                        Interlocked.Add(ref s_totalChannelReadWaitMs, waitWatch.ElapsedMilliseconds);
+                    }
+
                     if (waitWatch.ElapsedMilliseconds > 50)
                     {
                         Log.Debug("[BufferedStream] Starvation: Waited {Duration}ms for next segment (Buffered: {Buffered}, Fetched: {Fetched}, Read: {Read})",
@@ -701,6 +925,7 @@ public class BufferedSegmentStream : Stream
                 _currentSegment = null;
                 Interlocked.Decrement(ref _bufferedCount);
                 Interlocked.Increment(ref _totalReadCount);
+                if (EnableDetailedTiming) Interlocked.Increment(ref s_totalSegmentsRead);
                 Interlocked.Increment(ref _nextIndexToRead);
             }
         }

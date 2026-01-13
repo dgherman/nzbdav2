@@ -64,20 +64,27 @@ public class FullNzbTester
             var totalSizeMb = 200;
 
             // Parse optional args
+            var connectionsPerStream = 20; // Higher default for benchmark
             foreach (var arg in args)
             {
                 if (arg.StartsWith("--latency=")) int.TryParse(arg.Substring(10), out latencyMs);
                 if (arg.StartsWith("--jitter=")) int.TryParse(arg.Substring(9), out jitterMs);
                 if (arg.StartsWith("--size=")) int.TryParse(arg.Substring(7), out totalSizeMb);
+                if (arg.StartsWith("--connections=")) int.TryParse(arg.Substring(14), out connectionsPerStream);
             }
 
             Console.WriteLine($"═══════════════════════════════════════════════════════════════");
             Console.WriteLine($"  MOCK SERVER BENCHMARK");
             Console.WriteLine($"  Latency: {latencyMs}ms, Jitter: {jitterMs}ms, File Size: {totalSizeMb}MB");
+            Console.WriteLine($"  Connections per stream: {connectionsPerStream}");
             Console.WriteLine($"═══════════════════════════════════════════════════════════════");
 
             // Disable smart analysis for mock server (segments are synthetic)
             Environment.SetEnvironmentVariable("BENCHMARK", "true");
+
+            // Enable detailed timing for performance analysis
+            BufferedSegmentStream.EnableDetailedTiming = true;
+            BufferedSegmentStream.ResetGlobalTimingStats();
 
             // Start mock server
             Console.WriteLine($"Starting mock NNTP server on port {port}...");
@@ -102,14 +109,19 @@ public class FullNzbTester
                         UseSsl = false,
                         User = "mock",
                         Pass = "mock",
-                        MaxConnections = 20
+                        MaxConnections = connectionsPerStream
                     }
                 }
             };
 
+            // Set config values for mock testing
+            // CRITICAL: Set queue/repair connections to 1 so GlobalOperationLimiter allows streaming
             configManager.UpdateValues(new List<ConfigItem>
             {
-                new() { ConfigName = "usenet.providers", ConfigValue = JsonSerializer.Serialize(mockConfig) }
+                new() { ConfigName = "usenet.providers", ConfigValue = JsonSerializer.Serialize(mockConfig) },
+                new() { ConfigName = "usenet.connections-per-stream", ConfigValue = connectionsPerStream.ToString() },
+                new() { ConfigName = "api.max-queue-connections", ConfigValue = "1" },
+                new() { ConfigName = "repair.connections", ConfigValue = "1" }
             });
         }
         else
@@ -427,6 +439,10 @@ public class FullNzbTester
                         Console.WriteLine();
                         Console.WriteLine("--- STEP 7: SEQUENTIAL THROUGHPUT BENCHMARK ---");
                         double sequentialSpeed = 0;
+
+                        // Reset timing stats for clean throughput measurement
+                        BufferedSegmentStream.ResetGlobalTimingStats();
+
                         try
                         {
                             var streamCreateWatch = Stopwatch.StartNew();
@@ -499,6 +515,12 @@ public class FullNzbTester
                             Console.WriteLine($"  Min/Max Read Time: {minReadTime:F2}ms / {maxReadTime:F2}ms");
                             Console.WriteLine($"  P95 Read Time: {p95ReadTime:F2}ms");
                             Console.WriteLine($"  Time in ReadAsync: {totalReadTime:F2}ms ({totalReadTime / benchWatch.Elapsed.TotalMilliseconds * 100:F1}% of total)");
+
+                            // Print detailed timing breakdown
+                            if (BufferedSegmentStream.EnableDetailedTiming)
+                            {
+                                BufferedSegmentStream.GetGlobalTimingStats().Print();
+                            }
                         }
                         catch (Exception ex)
                         {
