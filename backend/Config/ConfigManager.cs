@@ -165,7 +165,7 @@ public class ConfigManager
     {
         return int.Parse(
             StringUtil.EmptyToNull(GetConfigValue("api.max-queue-connections"))
-            ?? GetUsenetProviderConfig().TotalPooledConnections.ToString()
+            ?? "1" // Default to 1 to maximize streaming connections
         );
     }
 
@@ -220,7 +220,7 @@ public class ConfigManager
     {
         return int.Parse(
             StringUtil.EmptyToNull(GetConfigValue("repair.connections"))
-            ?? GetUsenetProviderConfig().TotalPooledConnections.ToString()
+            ?? "1" // Default to 1 to maximize streaming connections
         );
     }
 
