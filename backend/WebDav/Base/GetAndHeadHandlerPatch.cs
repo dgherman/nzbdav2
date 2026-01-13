@@ -167,8 +167,8 @@ public class GetAndHeadHandlerPatch : IRequestHandler
         // Determine the number of bytes to read
         var bytesToRead = end - start + 1 ?? long.MaxValue;
 
-        // Read in 64KB blocks
-        var buffer = new byte[64 * 1024];
+        // Read in 256KB blocks for optimal throughput
+        var buffer = new byte[256 * 1024];
 
         // Copy, until we don't get any data anymore
         while (bytesToRead > 0)

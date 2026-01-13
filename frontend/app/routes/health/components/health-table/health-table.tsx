@@ -194,11 +194,9 @@ export function HealthTable({
                                         />
                                     </th>
                                     <th>Name</th>
-                                    <th className={styles.desktop}>Created</th>
-                                    <th className={styles.desktop}>Last Check</th>
-                                    <th className={styles.desktop}>Result</th>
-                                    <th className={styles.desktop}>Next Check</th>
-                                    <th>Actions</th>
+                                    <th className={styles.desktop}>Status</th>
+                                    <th className={styles.desktop}>Next</th>
+                                    <th style={{ width: '70px' }}></th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -222,55 +220,55 @@ export function HealthTable({
                                                     <div className={styles.jobName}><Truncate>{item.jobName}</Truncate></div>
                                                 )}
                                                 <div className={item.jobName ? styles.fileNameSmall : styles.name}><Truncate>{item.name}</Truncate></div>
-                                                <div className={styles.path}><Truncate>{item.path}</Truncate></div>
+                                                <div className={styles.metaRow}>
+                                                    <span className={styles.path}><Truncate>{item.path}</Truncate></span>
+                                                    <span className={styles.createdDate}>Added {formatDate(item.releaseDate, 'Unknown')}</span>
+                                                </div>
                                                 <div className={styles.mobile}>
-                                                    <DateDetailsTable item={item} onRunHealthCheck={onRunHealthCheck} />
+                                                    <DateDetailsTable item={item} onRunHealthCheck={onRunHealthCheck} onResetHealthStatus={onResetHealthStatus} />
                                                 </div>
                                             </div>
                                         </td>
-                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                            {formatDateBadge(item.releaseDate, 'Unknown', 'info')}
+                                        <td className={`${styles.statusCell} ${styles.desktop}`}>
+                                            <div className={styles.statusContainer}>
+                                                {item.latestResult ? (
+                                                    <Badge bg={item.latestResult === 'Healthy' ? 'success' : item.latestResult === 'Skipped' ? 'info' : 'danger'} className={styles.resultBadge}>
+                                                        {item.latestResult}
+                                                    </Badge>
+                                                ) : (
+                                                    <Badge bg="secondary" className={styles.resultBadge}>Pending</Badge>
+                                                )}
+                                                <span className={styles.lastCheckTime}>
+                                                    {item.lastHealthCheck ? formatDate(item.lastHealthCheck, 'Never') : 'Never checked'}
+                                                </span>
+                                            </div>
                                         </td>
-                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                            {formatDateBadge(item.lastHealthCheck, 'Never', 'warning')}
-                                        </td>
-                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                            {item.latestResult ? (
-                                                <Badge bg={item.latestResult === 'Healthy' ? 'success' : item.latestResult === 'Skipped' ? 'info' : 'danger'} className={styles.dateBadge}>
-                                                    {item.latestResult}
-                                                </Badge>
-                                            ) : (
-                                                <Badge bg="secondary" className={styles.dateBadge}>-</Badge>
-                                            )}
-                                        </td>
-                                        <td className={`${styles.dateCell} ${styles.desktop}`}>
-                                            <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+                                        <td className={`${styles.nextCell} ${styles.desktop}`}>
+                                            <div className={styles.nextContainer}>
                                                 {item.progress > 0
-                                                    ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
-                                                    : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
+                                                    ? <ProgressBadge className={styles.progressBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
+                                                    : <span className={styles.nextTime}>{formatDate(item.nextHealthCheck, 'ASAP')}</span>
                                                 }
                                                 <Badge bg={item.operationType === 'HEAD' ? 'danger' : 'secondary'} className={styles.operationBadge}>
                                                     {item.operationType}
                                                 </Badge>
                                             </div>
                                         </td>
-                                        <td>
-                                            <div style={{ display: 'flex', gap: '0.5rem' }}>
-                                                <div 
-                                                    className={styles.actionButton} 
+                                        <td className={styles.actionsCell}>
+                                            <div className={styles.actionButtons}>
+                                                <div
+                                                    className={styles.actionButton}
                                                     onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
                                                     title="Run Health Check Now"
                                                     role="button"
-                                                    style={{ cursor: 'pointer', fontSize: '1.2rem' }}
                                                 >
                                                     ▶️
                                                 </div>
-                                                <div 
-                                                    className={styles.actionButton} 
+                                                <div
+                                                    className={styles.actionButton}
                                                     onClick={(e) => { e.stopPropagation(); onResetHealthStatus?.([item.id]); }}
                                                     title="Reset Health Status"
                                                     role="button"
-                                                    style={{ cursor: 'pointer', fontSize: '1.2rem' }}
                                                 >
                                                     🔄
                                                 </div>
@@ -301,40 +299,37 @@ export function HealthTable({
     );
 }
 
-function DateDetailsTable({ item, onRunHealthCheck }: { item: HealthCheckQueueItem, onRunHealthCheck: (id: string) => void }) {
+function DateDetailsTable({ item, onRunHealthCheck, onResetHealthStatus }: {
+    item: HealthCheckQueueItem,
+    onRunHealthCheck: (id: string) => void,
+    onResetHealthStatus?: (ids: string[]) => void
+}) {
     return (
         <div className={styles.dateDetailsTable}>
             <div className={styles.dateDetailsRow}>
-                <div className={styles.dateDetailsLabel}>Created</div>
+                <div className={styles.dateDetailsLabel}>Status</div>
                 <div className={styles.dateDetailsValue}>
-                    {formatDateBadge(item.releaseDate, 'Unknown', 'info')}
+                    <div className={styles.mobileStatusRow}>
+                        {item.latestResult ? (
+                            <Badge bg={item.latestResult === 'Healthy' ? 'success' : item.latestResult === 'Skipped' ? 'info' : 'danger'} className={styles.resultBadge}>
+                                {item.latestResult}
+                            </Badge>
+                        ) : (
+                            <Badge bg="secondary" className={styles.resultBadge}>Pending</Badge>
+                        )}
+                        <span className={styles.mobileCheckTime}>
+                            {item.lastHealthCheck ? formatDate(item.lastHealthCheck, 'Never') : 'Never'}
+                        </span>
+                    </div>
                 </div>
             </div>
             <div className={styles.dateDetailsRow}>
-                <div className={styles.dateDetailsLabel}>Last Health Check</div>
+                <div className={styles.dateDetailsLabel}>Next</div>
                 <div className={styles.dateDetailsValue}>
-                    {formatDateBadge(item.lastHealthCheck, 'Never', 'warning')}
-                </div>
-            </div>
-            <div className={styles.dateDetailsRow}>
-                <div className={styles.dateDetailsLabel}>Result</div>
-                <div className={styles.dateDetailsValue}>
-                    {item.latestResult ? (
-                        <Badge bg={item.latestResult === 'Healthy' ? 'success' : item.latestResult === 'Skipped' ? 'info' : 'danger'} className={styles.dateBadge}>
-                            {item.latestResult}
-                        </Badge>
-                    ) : (
-                        <Badge bg="secondary" className={styles.dateBadge}>-</Badge>
-                    )}
-                </div>
-            </div>
-            <div className={styles.dateDetailsRow}>
-                <div className={styles.dateDetailsLabel}>Next Health Check</div>
-                <div className={styles.dateDetailsValue}>
-                    <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
+                    <div className={styles.mobileNextRow}>
                         {item.progress > 0
-                            ? <ProgressBadge className={styles.dateBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
-                            : formatDateBadge(item.nextHealthCheck, 'ASAP', 'success')
+                            ? <ProgressBadge className={styles.progressBadge} color={"#333"} percentNum={100 + item.progress}>{item.progress}%</ProgressBadge>
+                            : <span>{formatDate(item.nextHealthCheck, 'ASAP')}</span>
                         }
                         <Badge bg={item.operationType === 'HEAD' ? 'danger' : 'secondary'} className={styles.operationBadge}>
                             {item.operationType}
@@ -345,22 +340,20 @@ function DateDetailsTable({ item, onRunHealthCheck }: { item: HealthCheckQueueIt
             <div className={styles.dateDetailsRow}>
                 <div className={styles.dateDetailsLabel}>Actions</div>
                 <div className={styles.dateDetailsValue}>
-                    <div style={{ display: 'flex', gap: '0.5rem' }}>
-                        <div 
-                            className={styles.actionButton} 
+                    <div className={styles.actionButtons}>
+                        <div
+                            className={styles.actionButton}
                             onClick={(e) => { e.stopPropagation(); onRunHealthCheck(item.id); }}
                             title="Run Health Check Now"
                             role="button"
-                            style={{ cursor: 'pointer', fontSize: '1.2rem' }}
                         >
                             ▶️
                         </div>
-                        <div 
-                            className={styles.actionButton} 
+                        <div
+                            className={styles.actionButton}
                             onClick={(e) => { e.stopPropagation(); onResetHealthStatus?.([item.id]); }}
                             title="Reset Health Status"
                             role="button"
-                            style={{ cursor: 'pointer', fontSize: '1.2rem' }}
                         >
                             🔄
                         </div>

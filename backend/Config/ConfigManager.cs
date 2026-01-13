@@ -78,6 +78,55 @@ public class ConfigManager
                ?? throw new InvalidOperationException("The `api.strm-key` config does not exist.");
     }
 
+    /// <summary>
+    /// Gets the static download key for WebDAV /view/ downloads.
+    /// Auto-generates one if not present.
+    /// </summary>
+    public string GetStaticDownloadKey()
+    {
+        var key = GetConfigValue("webdav.static-download-key");
+        if (!string.IsNullOrEmpty(key)) return key;
+
+        // Auto-generate a new key
+        key = GenerateNewDownloadKey();
+        _ = SaveStaticDownloadKeyAsync(key);
+        return key;
+    }
+
+    /// <summary>
+    /// Regenerates the static download key
+    /// </summary>
+    public async Task<string> RegenerateStaticDownloadKeyAsync()
+    {
+        var newKey = GenerateNewDownloadKey();
+        await SaveStaticDownloadKeyAsync(newKey).ConfigureAwait(false);
+        return newKey;
+    }
+
+    private static string GenerateNewDownloadKey()
+    {
+        var bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(32);
+        return Convert.ToHexStringLower(bytes);
+    }
+
+    private async Task SaveStaticDownloadKeyAsync(string key)
+    {
+        await using var db = new DavDatabaseContext();
+        var existing = await db.ConfigItems.FirstOrDefaultAsync(c => c.ConfigName == "webdav.static-download-key").ConfigureAwait(false);
+        if (existing != null)
+        {
+            existing.ConfigValue = key;
+        }
+        else
+        {
+            db.ConfigItems.Add(new ConfigItem { ConfigName = "webdav.static-download-key", ConfigValue = key });
+        }
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        // Update in-memory cache
+        UpdateValues([new ConfigItem { ConfigName = "webdav.static-download-key", ConfigValue = key }]);
+    }
+
     public string GetApiCategories()
     {
         return StringUtil.EmptyToNull(GetConfigValue("api.categories"))

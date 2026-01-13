@@ -66,7 +66,7 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
             HttpContext.Items["configManager"] = configManager;
             var request = new GetWebdavItemRequest(HttpContext);
             await using var response = await GetWebdavItem(request).ConfigureAwait(false);
-            await response.CopyToAsync(Response.Body, bufferSize: 1024, HttpContext.RequestAborted).ConfigureAwait(false);
+            await response.CopyToAsync(Response.Body, bufferSize: 256 * 1024, HttpContext.RequestAborted).ConfigureAwait(false);
         }
         catch (UnauthorizedAccessException)
         {

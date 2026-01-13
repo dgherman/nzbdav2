@@ -50,9 +50,76 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
             {
                 allSuccess = false;
             }
+
+            // Also delete from disk cache if configured
+            DeleteFromDiskCache(config.CachePath, file);
         }
 
         return allSuccess;
+    }
+
+    /// <summary>
+    /// Deletes a file from the rclone VFS disk cache.
+    /// Rclone VFS cache uses a nested directory structure based on the first 5 characters of the filename.
+    /// e.g., .ids/4e5b250e-30ae-484c-ab9e-573beb7eb6a6 becomes:
+    /// {CachePath}/vfs/{remote}/.ids/4/e/5/b/2/4e5b250e-30ae-484c-ab9e-573beb7eb6a6
+    /// </summary>
+    private void DeleteFromDiskCache(string? cachePath, string file)
+    {
+        if (string.IsNullOrEmpty(cachePath)) return;
+
+        try
+        {
+            // Extract the guid from the file path (e.g., ".ids/4e5b250e-30ae-484c-ab9e-573beb7eb6a6")
+            var fileName = Path.GetFileName(file);
+            if (string.IsNullOrEmpty(fileName) || fileName.Length < 5) return;
+
+            // Build the nested cache path structure (first 5 chars split into directories)
+            var nestedPath = string.Join(Path.DirectorySeparatorChar.ToString(),
+                fileName[0].ToString(),
+                fileName[1].ToString(),
+                fileName[2].ToString(),
+                fileName[3].ToString(),
+                fileName[4].ToString(),
+                fileName);
+
+            // Get the parent directory from the original file path
+            var parentDir = Path.GetDirectoryName(file)?.Replace('/', Path.DirectorySeparatorChar) ?? "";
+
+            // Search for matching files in the cache directory
+            var cacheDir = cachePath.TrimEnd(Path.DirectorySeparatorChar);
+
+            // Look for vfs subdirectory
+            var vfsPath = Path.Combine(cacheDir, "vfs");
+            if (!Directory.Exists(vfsPath))
+            {
+                Log.Debug("[RcloneRc] VFS cache directory not found: {Path}", vfsPath);
+                return;
+            }
+
+            // Search all remote directories under vfs
+            foreach (var remoteDir in Directory.GetDirectories(vfsPath))
+            {
+                var fullCachePath = Path.Combine(remoteDir, parentDir, nestedPath);
+                if (File.Exists(fullCachePath))
+                {
+                    Log.Information("[RcloneRc] Deleting cached file: {Path}", fullCachePath);
+                    File.Delete(fullCachePath);
+                }
+
+                // Also check vfsMeta for metadata files
+                var vfsMetaPath = Path.Combine(cacheDir, "vfsMeta", Path.GetFileName(remoteDir), parentDir, nestedPath);
+                if (File.Exists(vfsMetaPath))
+                {
+                    Log.Information("[RcloneRc] Deleting cached metadata: {Path}", vfsMetaPath);
+                    File.Delete(vfsMetaPath);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Warning(ex, "[RcloneRc] Failed to delete cache file for: {File}", file);
+        }
     }
 
     private async Task<bool> SendRequestAsync(RcloneRcConfig config, string command, Dictionary<string, object> parameters)

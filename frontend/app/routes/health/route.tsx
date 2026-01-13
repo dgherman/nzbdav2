@@ -472,6 +472,7 @@ export default function Health({ loaderData }: Route.ComponentProps) {
                                                 onSearchChange={(s) => { setAhSearch(s); setAhPage(0); }}
                                                 onShowFailedOnlyChange={(val) => { setAhShowFailedOnly(val); setAhPage(0); }}
                                                 onAnalyze={onAnalyze}
+                                                onItemClick={onItemClick}
                                             />
                                         </Tab>
 

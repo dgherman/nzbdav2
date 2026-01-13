@@ -11,9 +11,10 @@ interface Props {
     onSearchChange: (search: string) => void;
     onShowFailedOnlyChange: (showFailedOnly: boolean) => void;
     onAnalyze: (id: string) => void;
+    onItemClick: (davItemId: string) => void;
 }
 
-export function AnalysisHistoryTable({ items, page, search, showFailedOnly, onPageChange, onSearchChange, onShowFailedOnlyChange, onAnalyze }: Props) {
+export function AnalysisHistoryTable({ items, page, search, showFailedOnly, onPageChange, onSearchChange, onShowFailedOnlyChange, onAnalyze, onItemClick }: Props) {
     return (
         <div>
             <div className="d-flex justify-content-between align-items-center mb-3">
@@ -71,7 +72,11 @@ export function AnalysisHistoryTable({ items, page, search, showFailedOnly, onPa
                         </tr>
                     ) : (
                         items.map((item) => (
-                            <tr key={item.id}>
+                            <tr
+                                key={item.id}
+                                onClick={() => onItemClick(item.davItemId)}
+                                style={{ cursor: "pointer" }}
+                            >
                                 <td style={{ whiteSpace: "nowrap" }}>
                                     {formatDistanceToNow(new Date(item.createdAt), { addSuffix: true })}
                                 </td>
@@ -90,10 +95,10 @@ export function AnalysisHistoryTable({ items, page, search, showFailedOnly, onPa
                                     {item.details || "-"}
                                 </td>
                                 <td>
-                                    <Button 
-                                        variant="outline-primary" 
+                                    <Button
+                                        variant="outline-primary"
                                         size="sm"
-                                        onClick={() => onAnalyze(item.davItemId)}
+                                        onClick={(e) => { e.stopPropagation(); onAnalyze(item.davItemId); }}
                                     >
                                         Re-Analyze
                                     </Button>

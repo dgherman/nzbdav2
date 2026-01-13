@@ -56,11 +56,11 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-AUTO-DEOBFUSCATION");
-        Log.Warning("  FEATURE: Auto-detect non-standard XOR obfuscation keys");
-        Log.Warning("  - Checks for standard obfuscation signature (AA 04 1D 6D)");
-        Log.Warning("  - Discovers custom XOR keys by analyzing MKV header pattern");
-        Log.Warning("  - Supports any 4-byte repeating XOR key automatically");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-STATIC-DL-KEY");
+        Log.Warning("  FEATURES:");
+        Log.Warning("  - Static download key for /view/ endpoint (Settings > WebDAV)");
+        Log.Warning("  - WebDAV buffer optimization (1KB -> 256KB, 256x speedup)");
+        Log.Warning("  - Disabled compression for streaming paths");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -102,6 +102,20 @@ class Program
         if (args.Contains("--mock-benchmark"))
         {
             await MockBenchmark.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
+        // Run WebDAV performance tester
+        if (args.Contains("--test-webdav"))
+        {
+            await WebDavTester.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
+        // Run database NZB performance tester
+        if (args.Contains("--test-db-nzb"))
+        {
+            await NzbFromDbTester.RunAsync(args).ConfigureAwait(false);
             return;
         }
 

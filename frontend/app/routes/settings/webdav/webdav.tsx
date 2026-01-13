@@ -1,6 +1,6 @@
-import { Form } from "react-bootstrap";
+import { Button, Form, InputGroup, Spinner } from "react-bootstrap";
 import styles from "./webdav.module.css"
-import { type Dispatch, type SetStateAction } from "react";
+import { type Dispatch, type SetStateAction, useState, useEffect, useCallback } from "react";
 import { className } from "~/utils/styling";
 import { isPositiveInteger } from "../usenet/usenet";
 
@@ -14,10 +14,62 @@ type RcloneRcConfig = {
     Username?: string;
     Password?: string;
     Enabled: boolean;
+    CachePath?: string;
 };
 
 export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
     const rcloneRcConfig: RcloneRcConfig = JSON.parse(config["rclone.rc"] || "{}");
+    const [downloadKey, setDownloadKey] = useState<string>("");
+    const [isLoadingKey, setIsLoadingKey] = useState(false);
+    const [isRegenerating, setIsRegenerating] = useState(false);
+    const [copied, setCopied] = useState(false);
+
+    const fetchDownloadKey = useCallback(async () => {
+        setIsLoadingKey(true);
+        try {
+            const response = await fetch('/api/download-key?action=get');
+            const data = await response.json();
+            if (data.status && data.downloadKey) {
+                setDownloadKey(data.downloadKey);
+            }
+        } catch (error) {
+            console.error('Failed to fetch download key:', error);
+        } finally {
+            setIsLoadingKey(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchDownloadKey();
+    }, [fetchDownloadKey]);
+
+    const handleRegenerateKey = async () => {
+        if (!confirm('Are you sure you want to regenerate the download key? All existing download links will stop working.')) {
+            return;
+        }
+        setIsRegenerating(true);
+        try {
+            const response = await fetch('/api/download-key?action=regenerate');
+            const data = await response.json();
+            if (data.status && data.downloadKey) {
+                setDownloadKey(data.downloadKey);
+            }
+        } catch (error) {
+            console.error('Failed to regenerate download key:', error);
+        } finally {
+            setIsRegenerating(false);
+        }
+    };
+
+    const handleCopyKey = async () => {
+        try {
+            await navigator.clipboard.writeText(downloadKey);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+        } catch (error) {
+            console.error('Failed to copy:', error);
+        }
+    };
 
     const updateRcloneConfig = (newRcConfig: Partial<RcloneRcConfig>) => {
         const updated = { ...rcloneRcConfig, ...newRcConfig };
@@ -168,8 +220,55 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                             value={rcloneRcConfig.Password || ""}
                             onChange={e => updateRcloneConfig({ Password: e.target.value })} />
                     </Form.Group>
+                    <Form.Group>
+                        <Form.Label htmlFor="rclone-cache-path">VFS Cache Path</Form.Label>
+                        <Form.Control
+                            className={styles.input}
+                            type="text"
+                            id="rclone-cache-path"
+                            placeholder="/mnt/nzbdav-cache"
+                            value={rcloneRcConfig.CachePath || ""}
+                            onChange={e => updateRcloneConfig({ CachePath: e.target.value })} />
+                        <Form.Text muted>
+                            Optional: Path to rclone VFS cache directory. When flushing cache via RC, files will also be deleted from this path.
+                            The structure should be: <code>{"{CachePath}"}/vfs/{"{remote}"}/.ids/...</code>
+                        </Form.Text>
+                    </Form.Group>
                 </>
             )}
+            <hr />
+            <h4>Static Download Key</h4>
+            <Form.Group>
+                <Form.Label htmlFor="download-key-input">Download Key</Form.Label>
+                <InputGroup>
+                    <Form.Control
+                        className={styles.input}
+                        type="text"
+                        id="download-key-input"
+                        readOnly
+                        value={isLoadingKey ? "Loading..." : downloadKey}
+                        style={{ fontFamily: 'monospace', fontSize: '0.85em' }}
+                    />
+                    <Button
+                        variant="outline-secondary"
+                        onClick={handleCopyKey}
+                        disabled={isLoadingKey || !downloadKey}
+                    >
+                        {copied ? "Copied!" : "Copy"}
+                    </Button>
+                    <Button
+                        variant="outline-danger"
+                        onClick={handleRegenerateKey}
+                        disabled={isLoadingKey || isRegenerating}
+                    >
+                        {isRegenerating ? <Spinner size="sm" /> : "Regenerate"}
+                    </Button>
+                </InputGroup>
+                <Form.Text id="download-key-help" muted>
+                    This key allows direct downloads from the /view/ endpoint without per-path authentication.
+                    Use it with: <code>?downloadKey=YOUR_KEY</code>. Regenerating will invalidate all existing links.
+                </Form.Text>
+            </Form.Group>
         </div>
     );
 }

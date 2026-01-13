@@ -85,9 +85,18 @@ public class RarProcessor(
         headerCts.CancelAfter(TimeSpan.FromSeconds(60));
 
         var headers = await RarUtil.GetRarHeadersAsync(stream, password, headerCts.Token).ConfigureAwait(false);
-        
+
         var archiveName = GetArchiveName(fileInfo);
-        var partNumber = GetPartNumber(fileInfo.FileName);
+
+        // Try to get volume number from RAR headers (more reliable than filename parsing)
+        var volumeNumber = GetVolumeNumberFromHeaders(headers);
+        var partNumber = volumeNumber ?? GetPartNumber(fileInfo.FileName);
+
+        if (volumeNumber.HasValue)
+        {
+            Log.Debug("[RarProcessor] Using RAR header volume number {VolumeNumber} for {FileName}", volumeNumber.Value, fileInfo.FileName);
+        }
+
         var offset = Math.Max(0, fileInfo.MagicOffset);
 
         var results = new List<StoredFileSegment>();
@@ -156,12 +165,57 @@ public class RarProcessor(
 
         // handle the `.rar` format.
         if (filename.EndsWith(".rar", StringComparison.OrdinalIgnoreCase)) return -1;
-        
+
         // handle `.001` etc
         var numericMatch = Regex.Match(filename, @"\.(\d+)$", RegexOptions.IgnoreCase);
         if (numericMatch.Success) return int.Parse(numericMatch.Groups[1].Value);
 
         return 0;
+    }
+
+    /// <summary>
+    /// Extracts the volume number from RAR headers.
+    /// Checks EndArchiveHeader first (RAR4), then ArchiveHeader (RAR5).
+    /// </summary>
+    private static int? GetVolumeNumberFromHeaders(List<IRarHeader> headers)
+    {
+        // Try EndArchiveHeader first (has VolumeNumber for RAR4 multi-volume)
+        var endArchiveHeader = headers.FirstOrDefault(h => h.HeaderType == HeaderType.EndArchive);
+        if (endArchiveHeader != null)
+        {
+            var volumeNum = endArchiveHeader.GetVolumeNumber();
+            if (volumeNum.HasValue)
+            {
+                return volumeNum.Value;
+            }
+        }
+
+        // Try ArchiveHeader (RAR5 has VolumeNumber in archive header)
+        var archiveHeader = headers.FirstOrDefault(h => h.HeaderType == HeaderType.Archive);
+        if (archiveHeader != null)
+        {
+            var volumeNum = archiveHeader.GetVolumeNumber();
+            if (volumeNum.HasValue)
+            {
+                return volumeNum.Value;
+            }
+
+            // For RAR4, check if this is the first volume using IsFirstVolume flag
+            try
+            {
+                var isFirst = archiveHeader.GetIsFirstVolume();
+                if (isFirst)
+                {
+                    return 0; // First volume
+                }
+            }
+            catch
+            {
+                // IsFirstVolume may not be available for all header types
+            }
+        }
+
+        return null;
     }
 
     private async Task<NzbFileStream> GetFastNzbFileStream(GetFileInfosStep.FileInfo fileInfo)

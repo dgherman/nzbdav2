@@ -37,6 +37,14 @@ public class GetWebdavItemRequest
 
     private static bool VerifyDownloadKey(string? downloadKey, string path, ConfigManager configManager)
     {
+        if (string.IsNullOrEmpty(downloadKey))
+            return false;
+
+        // Check static download key first (works for all paths)
+        var staticKey = configManager.GetStaticDownloadKey();
+        if (downloadKey == staticKey)
+            return true;
+
         if (path.StartsWith(".ids"))
         {
             // strm streams link items by id and use a different download key
@@ -46,6 +54,7 @@ public class GetWebdavItemRequest
                 return true;
         }
 
+        // Per-path download key using frontend API key
         var apiKey = EnvironmentUtil.GetVariable("FRONTEND_BACKEND_API_KEY");
         return downloadKey == GenerateDownloadKey(apiKey, path);
     }
