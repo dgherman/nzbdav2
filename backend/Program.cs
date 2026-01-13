@@ -56,11 +56,10 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-STATIC-DL-KEY");
-        Log.Warning("  FEATURES:");
-        Log.Warning("  - Static download key for /view/ endpoint (Settings > WebDAV)");
-        Log.Warning("  - WebDAV buffer optimization (1KB -> 256KB, 256x speedup)");
-        Log.Warning("  - Disabled compression for streaming paths");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-RAR-VOLUME-FIX");
+        Log.Warning("  FEATURE: Fix RAR multi-volume ordering for obfuscated NZBs");
+        Log.Warning("  - Read VolumeNumber from RAR headers instead of filenames");
+        Log.Warning("  - Fixes files showing as garbage/encrypted when parts misordered");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
