@@ -176,7 +176,10 @@ public class QueueItemProcessor(
         var documentBytes = Encoding.UTF8.GetBytes(queueNzbContents.NzbContents);
         using var stream = new MemoryStream(documentBytes);
         var nzb = await NzbDocument.LoadAsync(stream).ConfigureAwait(false);
-        var archivePassword = nzb.MetaData.GetValueOrDefault("password")?.FirstOrDefault();
+        // Check filename for password first (e.g., "Movie.Name{{password}}.nzb" or "Movie.Name password=secret.nzb")
+        // Fall back to NZB metadata if not found in filename
+        var archivePassword = FilenameUtil.GetNzbPassword(queueItem.FileName)
+            ?? nzb.MetaData.GetValueOrDefault("password")?.FirstOrDefault();
         var nzbFiles = nzb.Files.Where(x => x.Segments.Count > 0).ToList();
         var parseElapsed = DateTime.UtcNow - parseStartTime;
         Log.Information("[QueueItemProcessor] Successfully parsed NZB for {JobName}. Files: {FileCount}, Total segments: {SegmentCount}, Elapsed: {ElapsedMs}ms",

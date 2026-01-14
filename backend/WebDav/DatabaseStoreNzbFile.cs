@@ -57,10 +57,12 @@ public class DatabaseStoreNzbFile(
 
         Serilog.Log.Debug("[DatabaseStoreNzbFile] Opening stream for {FileName} ({Id})", Name, id);
 
+        // Use total streaming connections for worker count - the global semaphore limits actual concurrent fetches
+        // This ensures a single stream can utilize the full connection pool
         return usenetClient.GetFileStream(
             file.SegmentIds,
             FileSize,
-            configManager.GetConnectionsPerStream(),
+            configManager.GetTotalStreamingConnections(),
             usageContext,
             configManager.UseBufferedStreaming(),
             configManager.GetStreamBufferSize(),

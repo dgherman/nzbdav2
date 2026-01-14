@@ -56,11 +56,11 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-FFPROBE-FIX");
-        Log.Warning("  FEATURE: ffprobe compatibility via non-buffered cached streams");
-        Log.Warning("  - Caches NzbFile streams across HTTP Range requests (5min expiry)");
-        Log.Warning("  - Uses lazy loading (not prefetch) for cached streams");
-        Log.Warning("  - Fixes ffprobe streaming whole file on seeks");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-14-GLOBAL-STREAM-POOL");
+        Log.Warning("  FEATURE: Global streaming connection pool shared across streams");
+        Log.Warning("  - All streams now use total-streaming-connections for workers");
+        Log.Warning("  - Single stream uses all connections, multiple streams share");
+        Log.Warning("  - Fixed: Workers limited to 10 instead of configured value");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -216,6 +216,7 @@ class Program
             .AddSingleton<NzbAnalysisService>()
             .AddSingleton<MediaAnalysisService>()
             .AddSingleton<RcloneRcService>()
+            .AddSingleton<StreamingConnectionLimiter>()
             .AddHostedService<DatabaseMaintenanceService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()

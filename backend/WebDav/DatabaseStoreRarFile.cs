@@ -52,7 +52,7 @@ public class DatabaseStoreRarFile(
         (
             rarFile.ToDavMultipartFileMeta().FileParts,
             usenetClient,
-            configManager.GetConnectionsPerStream(),
+            configManager.GetTotalStreamingConnections(),
             usageContext
         );
         return new RarDeobfuscationStream(stream, rarFile.ObfuscationKey);

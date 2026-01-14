@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Mvc;
 using NzbWebDAV.Api.SabControllers.GetQueue;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
+using NzbWebDAV.Utils;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Queue;
@@ -34,7 +35,7 @@ public class AddFileController(
             Id = Guid.NewGuid(),
             CreatedAt = DateTime.Now,
             FileName = request.FileName,
-            JobName = Path.GetFileNameWithoutExtension(request.FileName),
+            JobName = FilenameUtil.GetJobName(request.FileName),
             NzbFileSize = documentBytes.Length,
             TotalSegmentBytes = document.Files.SelectMany(x => x.Segments).Select(x => x.Size).Sum(),
             Category = request.Category,

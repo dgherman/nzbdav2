@@ -145,7 +145,20 @@ public class ConfigManager
         return int.Parse(
             StringUtil.EmptyToNull(GetConfigValue("usenet.connections-per-stream"))
             ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("CONNECTIONS_PER_STREAM"))
-            ?? "10"
+            ?? "20"  // Increased default - this is now workers per stream (not global limit)
+        );
+    }
+
+    /// <summary>
+    /// Gets the total number of streaming connections shared across all active streams.
+    /// With 1 stream active, it gets all connections. With 2 streams, each gets half, etc.
+    /// </summary>
+    public int GetTotalStreamingConnections()
+    {
+        return int.Parse(
+            StringUtil.EmptyToNull(GetConfigValue("usenet.total-streaming-connections"))
+            ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("TOTAL_STREAMING_CONNECTIONS"))
+            ?? "20"
         );
     }
 

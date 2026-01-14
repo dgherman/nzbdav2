@@ -1,8 +1,20 @@
-import { Button, Form, InputGroup, Spinner } from "react-bootstrap";
+import { Button, Form, InputGroup, Spinner, Alert } from "react-bootstrap";
 import styles from "./webdav.module.css"
-import { type Dispatch, type SetStateAction, useState, useEffect, useCallback } from "react";
+import { type Dispatch, type SetStateAction, useState, useEffect, useCallback, useMemo } from "react";
 import { className } from "~/utils/styling";
 import { isPositiveInteger } from "../usenet/usenet";
+
+type ProviderConfig = {
+    Providers: Array<{ MaxConnections: number; Type: number }>;
+};
+
+// Provider types from usenet settings
+const ProviderType = {
+    Disabled: 0,
+    Pooled: 1,        // Primary - connections go into the main pool
+    BackupAndStats: 2, // Backup - not counted in main pool
+    BackupOnly: 3,     // Backup - not counted in main pool
+};
 
 type SabnzbdSettingsProps = {
     config: Record<string, string>
@@ -108,18 +120,19 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
             </Form.Group>
             <hr />
             <Form.Group>
-                <Form.Label htmlFor="connections-per-stream-input">Connections Per Stream</Form.Label>
+                <Form.Label htmlFor="total-streaming-connections-input">Total Streaming Connections</Form.Label>
                 <Form.Control
-                    {...className([styles.input, !isValidConnectionsPerStream(config["usenet.connections-per-stream"]) && styles.error])}
+                    {...className([styles.input, !isValidConnectionsPerStream(config["usenet.total-streaming-connections"]) && styles.error])}
                     type="text"
-                    id="connections-per-stream-input"
-                    aria-describedby="connections-per-stream-help"
-                    placeholder="5"
-                    value={config["usenet.connections-per-stream"]}
-                    onChange={e => setNewConfig({ ...config, "usenet.connections-per-stream": e.target.value })} />
-                <Form.Text id="connections-per-stream-help" muted>
-                    When a file is requested from the webdav, how many usenet connections should be used to stream that file?
+                    id="total-streaming-connections-input"
+                    aria-describedby="total-streaming-connections-help"
+                    placeholder="20"
+                    value={config["usenet.total-streaming-connections"]}
+                    onChange={e => setNewConfig({ ...config, "usenet.total-streaming-connections": e.target.value })} />
+                <Form.Text id="total-streaming-connections-help" muted>
+                    Total connections shared across all active streams. With 1 stream, it uses all connections. With 2 streams, each uses half, etc.
                 </Form.Text>
+                <ConnectionPoolTip config={config} />
             </Form.Group>
             <hr />
             <Form.Group>
@@ -276,7 +289,7 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
 export function isWebdavSettingsUpdated(config: Record<string, string>, newConfig: Record<string, string>) {
     return config["webdav.user"] !== newConfig["webdav.user"]
         || config["webdav.pass"] !== newConfig["webdav.pass"]
-        || config["usenet.connections-per-stream"] !== newConfig["usenet.connections-per-stream"]
+        || config["usenet.total-streaming-connections"] !== newConfig["usenet.total-streaming-connections"]
         || config["usenet.stream-buffer-size"] !== newConfig["usenet.stream-buffer-size"]
         || config["webdav.show-hidden-files"] !== newConfig["webdav.show-hidden-files"]
         || config["webdav.enforce-readonly"] !== newConfig["webdav.enforce-readonly"]
@@ -286,7 +299,7 @@ export function isWebdavSettingsUpdated(config: Record<string, string>, newConfi
 
 export function isWebdavSettingsValid(newConfig: Record<string, string>) {
     return isValidUser(newConfig["webdav.user"])
-        && isValidConnectionsPerStream(newConfig["usenet.connections-per-stream"])
+        && isValidConnectionsPerStream(newConfig["usenet.total-streaming-connections"])
         && isValidStreamBufferSize(newConfig["usenet.stream-buffer-size"]);
 }
 
@@ -301,4 +314,54 @@ function isValidConnectionsPerStream(value: string): boolean {
 
 function isValidStreamBufferSize(value: string): boolean {
     return isPositiveInteger(value) && parseInt(value) >= 10 && parseInt(value) <= 500;
+}
+
+function ConnectionPoolTip({ config }: { config: Record<string, string> }) {
+    const stats = useMemo(() => {
+        // Parse provider config to get total connections from primary (pooled) providers only
+        // Backup providers are not counted as they're only used for retries/health checks
+        let totalProviderConnections = 0;
+        try {
+            const providerConfig: ProviderConfig = JSON.parse(config["usenet.providers"] || "{}");
+            if (providerConfig.Providers) {
+                totalProviderConnections = providerConfig.Providers
+                    .filter(p => p.Type === ProviderType.Pooled) // Only count primary pooled providers
+                    .reduce((sum, p) => sum + (p.MaxConnections || 0), 0);
+            }
+        } catch { /* ignore parse errors */ }
+
+        const queueConnections = parseInt(config["api.max-queue-connections"] || "1") || 1;
+        const repairConnections = parseInt(config["repair.connections"] || "1") || 1;
+        const streamingConnections = parseInt(config["usenet.total-streaming-connections"] || "20") || 20;
+
+        const reservedConnections = queueConnections + repairConnections;
+        const availableForStreaming = Math.max(0, totalProviderConnections - reservedConnections);
+
+        return {
+            totalProviderConnections,
+            queueConnections,
+            repairConnections,
+            streamingConnections,
+            availableForStreaming,
+            isOverAllocated: streamingConnections > availableForStreaming && totalProviderConnections > 0
+        };
+    }, [config]);
+
+    if (stats.totalProviderConnections === 0) {
+        return null; // No providers configured yet
+    }
+
+    return (
+        <Alert variant={stats.isOverAllocated ? "warning" : "info"} className="mt-2 py-2 px-3" style={{ fontSize: '0.85em' }}>
+            <strong>Connection Pool:</strong>{' '}
+            {stats.totalProviderConnections} total - {stats.queueConnections} queue - {stats.repairConnections} repair = {' '}
+            <strong>{stats.availableForStreaming}</strong> available for streaming
+            {stats.isOverAllocated && (
+                <div className="mt-1 text-warning-emphasis">
+                    Warning: Streaming connections ({stats.streamingConnections}) exceeds available ({stats.availableForStreaming}).
+                    This may cause connection contention.
+                </div>
+            )}
+        </Alert>
+    );
 }

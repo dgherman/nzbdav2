@@ -72,15 +72,24 @@ public class NzbFromDbTester
             new() { ConfigName = "usenet.connections-per-stream", ConfigValue = connections.ToString() }
         });
 
+        // Override total streaming connections for testing
+        configManager.UpdateValues(new List<Database.Models.ConfigItem>
+        {
+            new() { ConfigName = "usenet.total-streaming-connections", ConfigValue = connections.ToString() }
+        });
+
         services.AddSingleton(configManager);
         services.AddSingleton<WebsocketManager>();
         services.AddSingleton<BandwidthService>();
         services.AddSingleton<ProviderErrorService>();
         services.AddSingleton<NzbProviderAffinityService>();
+        services.AddSingleton<StreamingConnectionLimiter>();  // Global streaming connection limiter
         services.AddSingleton<UsenetStreamingClient>();
         services.AddDbContext<DavDatabaseContext>();
 
         var sp = services.BuildServiceProvider();
+        // Initialize the limiter (sets static Instance)
+        _ = sp.GetRequiredService<StreamingConnectionLimiter>();
         var client = sp.GetRequiredService<UsenetStreamingClient>();
 
         try

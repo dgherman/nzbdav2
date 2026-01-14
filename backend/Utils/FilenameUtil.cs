@@ -2,8 +2,14 @@
 
 namespace NzbWebDAV.Utils;
 
-public class FilenameUtil
+public partial class FilenameUtil
 {
+    // Group `pw` contains the password,
+    // Group `rm` contains the part of the filename that should be removed to create a clean job name
+    // Group `br` ensures that the brackets are closed / is used for back reference
+    [GeneratedRegex(@"(?<rm>[\s-]*(?:(?<br>{{)|password=)(?<pw>\w+)(?(br)}}))\.nzb$", RegexOptions.IgnoreCase)]
+    public static partial Regex PasswordRegex();
+
     private static readonly HashSet<string> VideoExtensions =
     [
         ".webm", ".m4v", ".3gp", ".nsv", ".ty", ".strm", ".rm", ".rmvb", ".m3u", ".ifo", ".mov", ".qt", ".divx",
@@ -38,54 +44,44 @@ public class FilenameUtil
         return Regex.IsMatch(filename, @"\.7z(\.(\d+))?$", RegexOptions.IgnoreCase);
     }
 
-        public static bool IsMultipartMkv(string? filename)
-
-        {
-
-            if (string.IsNullOrEmpty(filename)) return false;
-
-            return Regex.IsMatch(filename, @"\.mkv\.(\d+)?$", RegexOptions.IgnoreCase);
-
-        }
-
-    
-
-        public static string GetMultipartBaseName(string filename)
-
-        {
-
-            if (string.IsNullOrEmpty(filename)) return filename;
-
-    
-
-            // handle `.partXXX.rar`
-
-            var rarPartMatch = Regex.Match(filename, @"^(.*)\.part\d+\.rar$", RegexOptions.IgnoreCase);
-
-            if (rarPartMatch.Success) return rarPartMatch.Groups[1].Value;
-
-    
-
-            // handle `.rXXX`
-
-            var rMatch = Regex.Match(filename, @"^(.*)\.r\d+$", RegexOptions.IgnoreCase);
-
-            if (rMatch.Success) return rMatch.Groups[1].Value;
-
-    
-
-            // handle `.mkv.XXX` or any other `.XXX`
-
-            var numericMatch = Regex.Match(filename, @"^(.*)\.\d+$", RegexOptions.IgnoreCase);
-
-            if (numericMatch.Success) return numericMatch.Groups[1].Value;
-
-    
-
-            return filename;
-
-        }
-
+    public static bool IsMultipartMkv(string? filename)
+    {
+        if (string.IsNullOrEmpty(filename)) return false;
+        return Regex.IsMatch(filename, @"\.mkv\.(\d+)?$", RegexOptions.IgnoreCase);
     }
 
-    
+    public static string GetMultipartBaseName(string filename)
+    {
+        if (string.IsNullOrEmpty(filename)) return filename;
+
+        // handle `.partXXX.rar`
+        var rarPartMatch = Regex.Match(filename, @"^(.*)\.part\d+\.rar$", RegexOptions.IgnoreCase);
+        if (rarPartMatch.Success) return rarPartMatch.Groups[1].Value;
+
+        // handle `.rXXX`
+        var rMatch = Regex.Match(filename, @"^(.*)\.r\d+$", RegexOptions.IgnoreCase);
+        if (rMatch.Success) return rMatch.Groups[1].Value;
+
+        // handle `.mkv.XXX` or any other `.XXX`
+        var numericMatch = Regex.Match(filename, @"^(.*)\.\d+$", RegexOptions.IgnoreCase);
+        if (numericMatch.Success) return numericMatch.Groups[1].Value;
+
+        return filename;
+    }
+
+    public static string GetJobName(string filename)
+    {
+        var passMatch = PasswordRegex().Match(filename);
+        return Path.GetFileNameWithoutExtension(
+            passMatch.Success ?
+            filename.Replace(passMatch.Groups["rm"].Value, "") :
+            filename
+        );
+    }
+
+    public static string? GetNzbPassword(string filename)
+    {
+        var passMatch = PasswordRegex().Match(filename);
+        return passMatch.Success ? passMatch.Groups["pw"].Value : null;
+    }
+}

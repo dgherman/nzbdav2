@@ -5,6 +5,7 @@ using NzbWebDAV.Clients.Usenet;
 using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Services;
 using Serilog;
 using System.IO;
 using System.Collections.Concurrent;
@@ -570,41 +571,66 @@ public class BufferedSegmentStream : Stream
 
                             try
                             {
-                                Stopwatch? fetchWatch = null;
-                                if (EnableDetailedTiming) fetchWatch = Stopwatch.StartNew();
-
-                                var segmentData = await FetchSegmentWithRetryAsync(job.index, job.segmentId, segmentIds, client, jobCts.Token).ConfigureAwait(false);
-
-                                if (EnableDetailedTiming && fetchWatch != null)
+                                // Acquire a streaming connection permit from the global pool
+                                // This ensures total streaming connections are shared across all active streams
+                                var limiter = StreamingConnectionLimiter.Instance;
+                                var hasPermit = false;
+                                if (limiter != null)
                                 {
-                                    Interlocked.Add(ref _totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
-                                    Interlocked.Add(ref s_totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
-                                }
-
-                                // Store result directly to slot (lock-free, first write wins)
-                                var existingSlot = Interlocked.CompareExchange(ref segmentSlots[job.index], segmentData, null);
-                                if (existingSlot == null)
-                                {
-                                    // We won the race - update stats
-                                    // Update max fetched using lock-free compare-exchange
-                                    int currentMax;
-                                    do
+                                    hasPermit = await limiter.AcquireAsync(TimeSpan.FromSeconds(60), jobCts.Token).ConfigureAwait(false);
+                                    if (!hasPermit)
                                     {
-                                        currentMax = _maxFetchedIndex;
-                                        if (job.index <= currentMax) break;
-                                    } while (Interlocked.CompareExchange(ref _maxFetchedIndex, job.index, currentMax) != currentMax);
-
-                                    Interlocked.Increment(ref _bufferedCount);
-                                    Interlocked.Increment(ref _totalFetchedCount);
-                                    if (EnableDetailedTiming) Interlocked.Increment(ref s_totalSegmentsFetched);
-                                    // Ordering task will pick up from slot and write to channel
+                                        Log.Warning("[BufferedStream] Worker {WorkerId} timed out waiting for streaming permit for segment {Index}", workerId, job.index);
+                                        continue; // Try again with next job
+                                    }
                                 }
-                                else
+
+                                try
                                 {
-                                    // Lost the race (already fetched), dispose data
-                                    Log.Debug("[BufferedStream] SEGMENT RACE LOST: Segment={SegmentIndex}, Worker={WorkerId}",
-                                        job.index, workerId);
-                                    segmentData.Dispose();
+                                    Stopwatch? fetchWatch = null;
+                                    if (EnableDetailedTiming) fetchWatch = Stopwatch.StartNew();
+
+                                    var segmentData = await FetchSegmentWithRetryAsync(job.index, job.segmentId, segmentIds, client, jobCts.Token).ConfigureAwait(false);
+
+                                    if (EnableDetailedTiming && fetchWatch != null)
+                                    {
+                                        Interlocked.Add(ref _totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
+                                        Interlocked.Add(ref s_totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
+                                    }
+
+                                    // Store result directly to slot (lock-free, first write wins)
+                                    var existingSlot = Interlocked.CompareExchange(ref segmentSlots[job.index], segmentData, null);
+                                    if (existingSlot == null)
+                                    {
+                                        // We won the race - update stats
+                                        // Update max fetched using lock-free compare-exchange
+                                        int currentMax;
+                                        do
+                                        {
+                                            currentMax = _maxFetchedIndex;
+                                            if (job.index <= currentMax) break;
+                                        } while (Interlocked.CompareExchange(ref _maxFetchedIndex, job.index, currentMax) != currentMax);
+
+                                        Interlocked.Increment(ref _bufferedCount);
+                                        Interlocked.Increment(ref _totalFetchedCount);
+                                        if (EnableDetailedTiming) Interlocked.Increment(ref s_totalSegmentsFetched);
+                                        // Ordering task will pick up from slot and write to channel
+                                    }
+                                    else
+                                    {
+                                        // Lost the race (already fetched), dispose data
+                                        Log.Debug("[BufferedStream] SEGMENT RACE LOST: Segment={SegmentIndex}, Worker={WorkerId}",
+                                            job.index, workerId);
+                                        segmentData.Dispose();
+                                    }
+                                }
+                                finally
+                                {
+                                    // Release the streaming connection permit
+                                    if (hasPermit && limiter != null)
+                                    {
+                                        limiter.Release();
+                                    }
                                 }
                             }
                             catch (OperationCanceledException)

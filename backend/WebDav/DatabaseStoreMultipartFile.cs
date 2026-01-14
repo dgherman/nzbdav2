@@ -51,7 +51,7 @@ public class DatabaseStoreMultipartFile(
         var packedStream = new DavMultipartFileStream(
             multipartFile.Metadata.FileParts,
             usenetClient,
-            configManager.GetConnectionsPerStream(),
+            configManager.GetTotalStreamingConnections(),
             usageContext
         );
         Stream finalStream = multipartFile.Metadata.AesParams != null
