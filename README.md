@@ -270,6 +270,13 @@ volumes:
 
 # Changelog
 
+## v0.1.29 (2026-01-14)
+*   **Fix**: Corrected rclone VFS disk cache deletion to use the proper path structure. The cache now correctly mirrors WebDAV paths directly instead of using an incorrect nested directory structure.
+*   **Fix**: Fixed byte position tracking for multipart/RAR files. The UI now displays accurate progress across the entire file instead of resetting for each archive part.
+*   **UI**: Progress slider now uses byte-based position for multipart files, providing accurate visual feedback for files spanning multiple RAR volumes.
+*   **UI**: Improved connection grouping in Stats page - entries with `.mkv` extension and without now properly merge together.
+*   **Performance**: Removed verbose "SEGMENT STORED" debug logging to reduce log noise during streaming.
+
 ## v0.1.28 (2026-01-06)
 *   **Feature**: Added a "Run Health Check" button to the File Details modal across the application (Health, Stats, Explore). This allows users to manually trigger an immediate, high-priority `HEAD` health check for any specific file to verify its availability on Usenet.
 *   **Fix**: Resolved a critical deadlock in `GlobalOperationLimiter` where retrying failed operations (like transient Usenet errors) would recursively acquire new permits without releasing the existing ones, eventually exhausting the permit pool and hanging the application.
