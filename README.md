@@ -55,7 +55,8 @@ The easiest way to get started is by using the official Docker image.
 To try it out, run the following command to pull and run the image with port `3000` exposed:
 
 ```bash
-nzbdav/nzbdav:alpha
+docker pull ghcr.io/johoja12/nzbdav:latest
+```
 
 If you are developing or prefer to build the image locally:
 
@@ -74,7 +75,7 @@ docker run --rm -it \
   -e PUID=1000 \
   -e PGID=1000 \
   -p 3000:3000 \
-  nzbdav/nzbdav:alpha
+  ghcr.io/johoja12/nzbdav:latest
 ```
 After starting the container, be sure to navigate to the Settings page on the UI to finish setting up your usenet connection settings.
 
@@ -180,7 +181,7 @@ In your compose.yaml... **NOTE: Ubuntu container is not required, and is only in
 ```yml
 services:
   nzbdav:
-    image: ghcr.io/nzbdav-dev/nzbdav
+    image: ghcr.io/johoja12/nzbdav:latest
     environment:
       - PUID=1000
       - PGID=1000
