@@ -19,4 +19,6 @@ export type ConnectionUsageContext = {
     bufferWindowStart?: number | null;
     bufferWindowEnd?: number | null;
     totalSegments?: number | null;
+    currentBytePosition?: number | null;
+    fileSize?: number | null;
 }

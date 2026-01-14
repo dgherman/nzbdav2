@@ -14,6 +14,9 @@ public class ConnectionUsageDetails
     public int? BufferWindowStart { get; set; }
     public int? BufferWindowEnd { get; set; }
     public int? TotalSegments { get; set; }
+    public long? CurrentBytePosition { get; set; }
+    public long? FileSize { get; set; }
+    public long? BaseByteOffset { get; set; }  // Starting byte offset for partial streams
 
     public override string ToString()
     {

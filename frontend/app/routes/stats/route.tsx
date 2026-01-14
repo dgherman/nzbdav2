@@ -128,14 +128,16 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                     const transformedConns = rawConns.map(c => ({
                         usageType: c.t,
                         details: c.d,
-                        jobName: c.jn, 
+                        jobName: c.jn,
                         isBackup: c.b,
                         isSecondary: c.s,
                         bufferedCount: c.bc,
                         bufferWindowStart: c.ws,
                         bufferWindowEnd: c.we,
                         totalSegments: c.ts,
-                        davItemId: c.i
+                        davItemId: c.i,
+                        currentBytePosition: c.bp,
+                        fileSize: c.fs
                     } as ConnectionUsageContext));
 
                     setConnections(prev => ({

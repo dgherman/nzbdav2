@@ -56,10 +56,11 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-RAR-VOLUME-FIX");
-        Log.Warning("  FEATURE: Fix RAR multi-volume ordering for obfuscated NZBs");
-        Log.Warning("  - Read VolumeNumber from RAR headers instead of filenames");
-        Log.Warning("  - Fixes files showing as garbage/encrypted when parts misordered");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-13-FFPROBE-FIX");
+        Log.Warning("  FEATURE: ffprobe compatibility via non-buffered cached streams");
+        Log.Warning("  - Caches NzbFile streams across HTTP Range requests (5min expiry)");
+        Log.Warning("  - Uses lazy loading (not prefetch) for cached streams");
+        Log.Warning("  - Fixes ffprobe streaming whole file on seeks");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

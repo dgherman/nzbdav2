@@ -6,7 +6,6 @@ using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.WebDav.Base;
-using NzbWebDAV.Streams;
 
 using NzbWebDAV.Services;
 
@@ -35,8 +34,8 @@ public class DatabaseStoreNzbFile(
         // create streaming usage context
         var usageContext = new ConnectionUsageContext(
             ConnectionUsageType.Streaming,
-            new ConnectionUsageDetails 
-            { 
+            new ConnectionUsageDetails
+            {
                 Text = davNzbFile.Path,
                 JobName = davNzbFile.Name,
                 AffinityKey = Path.GetFileName(Path.GetDirectoryName(davNzbFile.Path)),
@@ -58,7 +57,7 @@ public class DatabaseStoreNzbFile(
 
         Serilog.Log.Debug("[DatabaseStoreNzbFile] Opening stream for {FileName} ({Id})", Name, id);
 
-        var stream = usenetClient.GetFileStream(
+        return usenetClient.GetFileStream(
             file.SegmentIds,
             FileSize,
             configManager.GetConnectionsPerStream(),
@@ -67,7 +66,5 @@ public class DatabaseStoreNzbFile(
             configManager.GetStreamBufferSize(),
             file.GetSegmentSizes()
         );
-        
-        return new RarDeobfuscationStream(stream);
     }
 }

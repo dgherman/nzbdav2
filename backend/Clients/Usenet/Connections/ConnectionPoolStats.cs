@@ -92,7 +92,9 @@ public class ConnectionPoolStats
                 ws = c.DetailsObject?.BufferWindowStart,
                 we = c.DetailsObject?.BufferWindowEnd,
                 ts = c.DetailsObject?.TotalSegments,
-                i = c.DetailsObject?.DavItemId
+                i = c.DetailsObject?.DavItemId,
+                bp = c.DetailsObject?.CurrentBytePosition,
+                fs = c.DetailsObject?.FileSize
             }));
 
             var message = $"{providerIndex}|{args.Live}|{args.Idle}|{_totalLive}|{_max}|{_totalIdle}|{usageBreakdown}|{providerBreakdown}|{connsJson}";

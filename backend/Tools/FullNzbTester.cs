@@ -33,6 +33,7 @@ public class FullNzbTester
     {
         var argIndex = args.ToList().IndexOf("--test-full-nzb");
         var useMockServer = args.Contains("--mock-server");
+        var skipRarParsing = args.Contains("--skip-rar-parsing");
 
         if (args.Length <= argIndex + 1 && !useMockServer)
         {
@@ -206,27 +207,80 @@ public class FullNzbTester
 
                 if (groupType == "rar")
                 {
-                    var processor = new RarProcessor(files, client, null, CancellationToken.None, 1);
-                    var result = await processor.ProcessAsync().ConfigureAwait(false);
-                    
-                    if (result is RarProcessor.Result rarResult)
+                    if (skipRarParsing)
                     {
-                        allResults.Add(rarResult);
-                        Console.WriteLine($"  RAR Processing Success. Extracted segments: {rarResult.StoredFileSegments.Length}");
-                        var filesInArchive = rarResult.StoredFileSegments.GroupBy(s => s.PathWithinArchive);
-                        foreach (var archivedFile in filesInArchive)
+                        // Skip RAR parsing - treat all RAR files as flat streams for throughput testing
+                        Console.WriteLine($"  Skipping RAR parsing (--skip-rar-parsing). Treating as flat stream.");
+
+                        // Combine all RAR parts into one logical file for throughput testing
+                        // Sort by filename to get correct order (.rar, .r00, .r01, ...)
+                        var sortedFiles = files.OrderBy(f => f.FileName).ToList();
+                        long cumulativeOffset = 0;
+                        int partNumber = 1;
+                        var storedSegments = new List<RarProcessor.StoredFileSegment>();
+
+                        foreach (var file in sortedFiles)
                         {
-                            var totalSize = archivedFile.Sum(s => s.ByteRangeWithinPart.Count);
-                            Console.WriteLine($"    - {archivedFile.Key}: {totalSize} bytes in {archivedFile.Count()} segments");
-                            foreach (var seg in archivedFile.OrderBy(s => s.PartNumber))
+                            var segmentIds = file.NzbFile.GetSegmentIds();
+
+                            // Calculate file size
+                            long fileSize;
+                            if (file.SegmentSizes != null && file.SegmentSizes.Length > 0)
+                                fileSize = file.SegmentSizes.Sum();
+                            else if (file.FileSize.HasValue && file.FileSize.Value > 0)
+                                fileSize = file.FileSize.Value;
+                            else
+                                fileSize = segmentIds.Length * 700000L;
+
+                            Console.WriteLine($"    - {file.FileName}: {fileSize / 1024.0 / 1024.0:F2} MB ({segmentIds.Length} segments)");
+
+                            // Create a StoredFileSegment for each RAR part
+                            storedSegments.Add(new RarProcessor.StoredFileSegment
                             {
-                                Console.WriteLine($"      Part {seg.PartNumber}: Offset={seg.ByteRangeWithinPart.StartInclusive}, Count={seg.ByteRangeWithinPart.Count}, PartSize={seg.PartSize}");
-                            }
+                                NzbFile = file.NzbFile,
+                                PartNumber = partNumber++,
+                                PartSize = fileSize,
+                                ArchiveName = baseGroup.Key + ".rar",
+                                PathWithinArchive = baseGroup.Key + " (combined RAR stream)",
+                                ByteRangeWithinPart = LongRange.FromStartAndSize(cumulativeOffset, fileSize),
+                                AesParams = null,
+                                ReleaseDate = file.ReleaseDate
+                            });
+
+                            cumulativeOffset += fileSize;
                         }
+
+                        Console.WriteLine($"    Total: {cumulativeOffset / 1024.0 / 1024.0:F2} MB ({storedSegments.Sum(s => s.NzbFile.GetSegmentIds().Length)} segments)");
+
+                        allResults.Add(new RarProcessor.Result
+                        {
+                            StoredFileSegments = storedSegments.ToArray()
+                        });
                     }
                     else
                     {
-                        Console.WriteLine("  RAR Processing Failed (Result was null)");
+                        var processor = new RarProcessor(files, client, null, CancellationToken.None, 1);
+                        var result = await processor.ProcessAsync().ConfigureAwait(false);
+
+                        if (result is RarProcessor.Result rarResult)
+                        {
+                            allResults.Add(rarResult);
+                            Console.WriteLine($"  RAR Processing Success. Extracted segments: {rarResult.StoredFileSegments.Length}");
+                            var filesInArchive = rarResult.StoredFileSegments.GroupBy(s => s.PathWithinArchive);
+                            foreach (var archivedFile in filesInArchive)
+                            {
+                                var totalSize = archivedFile.Sum(s => s.ByteRangeWithinPart.Count);
+                                Console.WriteLine($"    - {archivedFile.Key}: {totalSize} bytes in {archivedFile.Count()} segments");
+                                foreach (var seg in archivedFile.OrderBy(s => s.PartNumber))
+                                {
+                                    Console.WriteLine($"      Part {seg.PartNumber}: Offset={seg.ByteRangeWithinPart.StartInclusive}, Count={seg.ByteRangeWithinPart.Count}, PartSize={seg.PartSize}");
+                                }
+                            }
+                        }
+                        else
+                        {
+                            Console.WriteLine("  RAR Processing Failed (Result was null)");
+                        }
                     }
                 }
                 else if (groupType == "other")
