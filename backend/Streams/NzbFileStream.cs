@@ -263,13 +263,24 @@ public class NzbFileStream : Stream
         if (shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections)
         {
             // Set BufferedStreaming context - this will be the ONLY ConnectionUsageContext
+            // Calculate the byte offset where this stream starts within this NZB file
+            var segmentByteOffset = _segmentOffsets != null
+                ? _segmentOffsets[firstSegmentIndex]
+                : firstSegmentIndex * (_fileSize / _fileSegmentIds.Length);
+
+            // Add any incoming base offset (for multipart files, this is the cumulative offset across parts)
+            var totalBaseOffset = (_usageContext.DetailsObject?.BaseByteOffset ?? 0) + segmentByteOffset;
+
             var detailsObj = new ConnectionUsageDetails
             {
                 Text = _usageContext.Details ?? "",
                 JobName = _usageContext.DetailsObject?.JobName,
                 AffinityKey = _usageContext.DetailsObject?.AffinityKey,
                 DavItemId = _usageContext.DetailsObject?.DavItemId,
-                FileDate = _usageContext.DetailsObject?.FileDate
+                FileDate = _usageContext.DetailsObject?.FileDate,
+                // Use the original FileSize from context if set (for multipart files), otherwise use stream size
+                FileSize = _usageContext.DetailsObject?.FileSize ?? _fileSize,
+                BaseByteOffset = totalBaseOffset  // Starting offset for this partial stream in the combined file
             };
             var bufferedContext = new ConnectionUsageContext(
                 ConnectionUsageType.BufferedStreaming,

@@ -33,13 +33,14 @@ public class DatabaseStoreMultipartFile(
         // create streaming usage context
         var usageContext = new ConnectionUsageContext(
             ConnectionUsageType.Streaming,
-            new ConnectionUsageDetails 
-            { 
+            new ConnectionUsageDetails
+            {
                 Text = davMultipartFile.Path,
                 JobName = davMultipartFile.Name,
                 AffinityKey = Path.GetFileName(Path.GetDirectoryName(davMultipartFile.Path)),
                 DavItemId = davMultipartFile.Id,
-                FileDate = davMultipartFile.ReleaseDate
+                FileDate = davMultipartFile.ReleaseDate,
+                FileSize = davMultipartFile.FileSize  // Total file size for UI display
             }
         );
 

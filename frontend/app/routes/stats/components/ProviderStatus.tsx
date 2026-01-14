@@ -37,19 +37,23 @@ function getTypeColor(type: number) {
     return map[type] || "secondary";
 }
 
-type GroupedConnection = { 
+type GroupedConnection = {
     key: string;
-    usageType: number; 
-    details: string | null; 
-    jobName?: string | null; 
-    davItemId?: string | null; 
-    isBackup?: boolean; 
-    isSecondary?: boolean; 
-    bufferedCount?: number | null; 
-    count: number; 
-    bufferWindowStart?: number | null; 
-    bufferWindowEnd?: number | null; 
-    totalSegments?: number | null 
+    usageType: number;
+    details: string | null;
+    jobName?: string | null;
+    davItemId?: string | null;
+    isBackup?: boolean;
+    isSecondary?: boolean;
+    bufferedCount?: number | null;
+    count: number;
+    bufferWindowStart?: number | null;
+    bufferWindowEnd?: number | null;
+    totalSegments?: number | null;
+    currentBytePosition?: number | null;
+    fileSize?: number | null;
+    isActive?: boolean;
+    inactiveSince?: number | null;
 };
 
 function ProviderCard({ 
@@ -64,12 +68,28 @@ function ProviderCard({
     onFileClick: (id: string) => void
 }) {
     const [displayGroups, setDisplayGroups] = useState<GroupedConnection[]>([]);
-    const retentionMap = useRef<Map<string, { data: GroupedConnection, lastSeen: number }>>(new Map());
+    const retentionMap = useRef<Map<string, { data: GroupedConnection, lastSeen: number, becameInactiveAt: number | null }>>(new Map());
 
     // Helper to extract filename from path
     const getBasename = (path: string | null) => {
         if (!path) return "";
         return path.split(/[\\/]/).pop() || "";
+    };
+
+    // Helper to normalize filename for grouping (handle dots vs spaces, strip extensions)
+    const normalizeForGrouping = (name: string | null) => {
+        if (!name) return "";
+        // Get basename first
+        let normalized = name.split(/[\\/]/).pop() || name;
+        // Strip common media extensions for grouping purposes
+        normalized = normalized.replace(/\.(mkv|avi|mp4|m4v|mov|wmv|flv|webm|rar|r\d{2}|par2|nzb|nfo|sfv|srr)$/i, '');
+        // Replace dots with spaces to normalize scene naming (The.Boys.S01E01) vs normal naming (The Boys S01E01)
+        normalized = normalized.replace(/\./g, ' ');
+        // Collapse multiple spaces and trim
+        normalized = normalized.replace(/\s+/g, ' ').trim();
+        // Lowercase for case-insensitive comparison
+        normalized = normalized.toLowerCase();
+        return normalized;
     };
 
     // Merge function
@@ -84,13 +104,18 @@ function ProviderCard({
         const missingIds = new Set<string>();
         
         // Pass 1: Build ID map from connections that have davItemId
+        // Include normalized names to handle .mkv vs no-extension variations
         const nameToIdMap = new Map<string, string>();
         for (const c of connections) {
             if (c.davItemId) {
-                if (c.jobName) nameToIdMap.set(c.jobName, c.davItemId);
+                if (c.jobName) {
+                    nameToIdMap.set(c.jobName, c.davItemId);
+                    nameToIdMap.set(normalizeForGrouping(c.jobName), c.davItemId);
+                }
                 if (c.details) {
                     nameToIdMap.set(c.details, c.davItemId);
                     nameToIdMap.set(getBasename(c.details), c.davItemId);
+                    nameToIdMap.set(normalizeForGrouping(c.details), c.davItemId);
                 }
             }
         }
@@ -99,20 +124,27 @@ function ProviderCard({
         for (const c of connections) {
             let effectiveId = c.davItemId;
             
-            // Try to resolve ID if missing
+            // Try to resolve ID if missing - check exact match, basename, and normalized name
             if (!effectiveId) {
+                const normalizedJobName = normalizeForGrouping(c.jobName);
+                const normalizedDetails = normalizeForGrouping(c.details);
+
                 if (c.jobName && nameToIdMap.has(c.jobName)) effectiveId = nameToIdMap.get(c.jobName);
+                else if (normalizedJobName && nameToIdMap.has(normalizedJobName)) effectiveId = nameToIdMap.get(normalizedJobName);
                 else if (c.details && nameToIdMap.has(c.details)) effectiveId = nameToIdMap.get(c.details);
                 else if (c.details && nameToIdMap.has(getBasename(c.details))) effectiveId = nameToIdMap.get(getBasename(c.details));
+                else if (normalizedDetails && nameToIdMap.has(normalizedDetails)) effectiveId = nameToIdMap.get(normalizedDetails);
             }
 
             if (!effectiveId) {
                 missingIds.add(`Type=${getTypeLabel(c.usageType)} Name=${c.jobName || c.details}`);
             }
 
-            // Generate Key
-            let key = `${c.usageType}|${c.jobName || c.details || ""}|${c.isBackup}|${c.isSecondary}`;
-            
+            // Generate Key - use normalized name to avoid .mkv vs no-extension fluctuation
+            // Don't include usageType in key so Streaming and BufferedStreaming group together
+            const normalizedName = normalizeForGrouping(c.jobName || c.details);
+            let key = `name:${normalizedName}|${c.isBackup}|${c.isSecondary}`;
+
             // If we have a definitive Item ID, group by that regardless of usage/text variations
             if (effectiveId) {
                 key = `id:${effectiveId}|${c.isBackup}|${c.isSecondary}`;
@@ -125,7 +157,15 @@ function ProviderCard({
                 if (!entry.davItemId && effectiveId) {
                     entry.davItemId = effectiveId;
                 }
-                
+
+                // Prefer the longer/more complete name (with file extension) for display stability
+                const currentName = c.jobName || c.details || "";
+                const existingName = entry.jobName || entry.details || "";
+                if (currentName.length > existingName.length) {
+                    entry.jobName = c.jobName;
+                    entry.details = c.details;
+                }
+
                 // Accumulate stats (max/min)
                 if (c.bufferedCount !== undefined && c.bufferedCount !== null) {
                     entry.bufferedCount = Math.max(entry.bufferedCount || 0, c.bufferedCount);
@@ -139,6 +179,12 @@ function ProviderCard({
                 if (c.totalSegments !== undefined && c.totalSegments !== null) {
                     entry.totalSegments = c.totalSegments;
                 }
+                if (c.currentBytePosition !== undefined && c.currentBytePosition !== null) {
+                    entry.currentBytePosition = Math.max(entry.currentBytePosition || 0, c.currentBytePosition);
+                }
+                if (c.fileSize !== undefined && c.fileSize !== null) {
+                    entry.fileSize = c.fileSize;
+                }
             } else {
                 freshGroupsMap.set(key, { 
                     key,
@@ -150,23 +196,51 @@ function ProviderCard({
             }
         }
         
-        // Update retention map
-        // 1. Mark fresh items as seen now
+        // Update retention map with active/inactive tracking
+        // 1. Update fresh items - mark as active, preserve longer name from existing
         for (const [key, group] of freshGroupsMap.entries()) {
-            retentionMap.current.set(key, { data: group, lastSeen: now });
+            const existing = retentionMap.current.get(key);
+            let mergedGroup = { ...group, isActive: true, inactiveSince: null };
+
+            // Preserve the longer/more complete name from existing entry
+            if (existing) {
+                const existingName = existing.data.jobName || existing.data.details || "";
+                const newName = group.jobName || group.details || "";
+                if (existingName.length > newName.length) {
+                    mergedGroup.jobName = existing.data.jobName;
+                    mergedGroup.details = existing.data.details;
+                }
+            }
+
+            retentionMap.current.set(key, {
+                data: mergedGroup,
+                lastSeen: now,
+                becameInactiveAt: null
+            });
         }
-        
-        // 2. Prune expired items (older than 3000ms - increased for stability) AND not in fresh map
+
+        // 2. Mark items not in fresh map as inactive, track when they became inactive
         for (const [key, entry] of retentionMap.current.entries()) {
             if (!freshGroupsMap.has(key)) {
-                if (now - entry.lastSeen > 3000) {
+                // Item is no longer active
+                if (entry.data.isActive) {
+                    // Just became inactive
+                    entry.data.isActive = false;
+                    entry.data.inactiveSince = now;
+                    entry.becameInactiveAt = now;
+                }
+                // Prune after 10 seconds of inactivity (fade out period)
+                if (entry.becameInactiveAt && now - entry.becameInactiveAt > 10000) {
                     retentionMap.current.delete(key);
                 }
             }
         }
-        
-        // 3. Build display list (sorted)
-        const list = Array.from(retentionMap.current.values()).map(v => v.data);
+
+        // 3. Build display list with inactive time info
+        const list = Array.from(retentionMap.current.values()).map(v => ({
+            ...v.data,
+            inactiveSince: v.data.isActive ? null : v.becameInactiveAt
+        }));
         
         // DEBUG: Log the groups to see keys
         if (list.length > 0) {
@@ -282,8 +356,27 @@ function ProviderCard({
                                                     <span className="text-muted fw-bold" style={{ fontSize: '0.65rem', letterSpacing: '0.05rem' }}>{title.toUpperCase()} ({items.length})</span>
                                                 </div>
                                                 <div className="font-mono small overflow-y-auto" style={{ maxHeight: "180px" }}>
-                                                    {items.map((c) => (
-                                                        <div key={c.key} className="mb-2 p-2 rounded bg-black bg-opacity-25 border border-secondary border-opacity-10" title={c.details || ""} style={{ minHeight: '45px' }}>
+                                                    {items.map((c) => {
+                                                        // Calculate opacity based on inactive time
+                                                        // Active: 1.0, Inactive: dims from 0.6 to 0.2 over 10 seconds
+                                                        let opacity = 1.0;
+                                                        if (!c.isActive && c.inactiveSince) {
+                                                            const inactiveMs = Date.now() - c.inactiveSince;
+                                                            // Start at 0.6, fade to 0.2 over 10 seconds
+                                                            opacity = Math.max(0.2, 0.6 - (inactiveMs / 10000) * 0.4);
+                                                        }
+                                                        return (
+                                                        <div
+                                                            key={c.key}
+                                                            className="mb-2 p-2 rounded bg-black bg-opacity-25 border border-secondary border-opacity-10"
+                                                            title={c.details || ""}
+                                                            style={{
+                                                                minHeight: '45px',
+                                                                opacity,
+                                                                transition: 'opacity 0.5s ease-in-out',
+                                                                filter: !c.isActive ? 'grayscale(50%)' : 'none'
+                                                            }}
+                                                        >
                                                             <div className="d-flex align-items-start gap-2 mb-1">
                                                                 <span className="text-warning fw-bold flex-shrink-0 text-center" style={{fontSize: '0.7rem', marginTop: '2px', minWidth: '30px'}}>
                                                                     {c.count > 1 ? `(${c.count})` : ''}
@@ -322,46 +415,81 @@ function ProviderCard({
                                                                 )}
                                                             </div>
                                                             
-                                                            {/* Sliding Window Bar */}
-                                                            {c.totalSegments && c.bufferWindowStart !== undefined && c.bufferWindowEnd !== undefined && (
+                                                            {/* Sliding Window Bar - use byte position for multipart files, segments for single files */}
+                                                            {((c.currentBytePosition !== undefined && c.currentBytePosition !== null && c.fileSize) ||
+                                                              (c.totalSegments && c.bufferWindowStart !== undefined && c.bufferWindowEnd !== undefined)) && (
                                                                 <div className="mt-2" style={{ height: '10px', background: 'rgba(0,0,0,0.3)', borderRadius: '5px', position: 'relative', overflow: 'hidden', border: '1px solid rgba(255,255,255,0.1)' }}>
-                                                                    {/* Full Range Progress (Already Read) */}
-                                                                    <div style={{ 
-                                                                        position: 'absolute', 
-                                                                        left: 0, 
-                                                                        top: 0, 
-                                                                        bottom: 0, 
-                                                                        width: `${(c.bufferWindowStart! / c.totalSegments) * 100}%`, 
-                                                                        background: 'rgba(255,255,255,0.1)' 
-                                                                    }} title={`Consumed: ${c.bufferWindowStart} / ${c.totalSegments}`} />
-                                                                    
-                                                                    {/* Buffered Range (Sliding Window) */}
-                                                                    <div style={{ 
-                                                                        position: 'absolute', 
-                                                                        left: `${(c.bufferWindowStart! / c.totalSegments) * 100}%`, 
-                                                                        top: 0, 
-                                                                        bottom: 0, 
-                                                                        width: `${((c.bufferWindowEnd! - c.bufferWindowStart!) / c.totalSegments) * 100}%`, 
-                                                                        background: 'linear-gradient(90deg, #0d6efd, #6ea8fe)',
-                                                                        boxShadow: '0 0 8px rgba(13, 110, 253, 0.5)',
-                                                                        borderRadius: '2px',
-                                                                        minWidth: '2px'
-                                                                    }} title={`Buffered Window: ${c.bufferWindowStart} - ${c.bufferWindowEnd} (Total: ${c.totalSegments} segments)`} />
-                                                                    
-                                                                    {/* Read Head Marker */}
-                                                                    <div style={{
-                                                                        position: 'absolute',
-                                                                        left: `${(c.bufferWindowStart! / c.totalSegments) * 100}%`,
-                                                                        top: 0,
-                                                                        bottom: 0,
-                                                                        width: '2px',
-                                                                        background: '#fff',
-                                                                        zIndex: 2
-                                                                    }} />
+                                                                    {(() => {
+                                                                        // Use byte-based progress when available (more accurate for multipart files)
+                                                                        const useBytePosition = c.currentBytePosition !== undefined && c.currentBytePosition !== null && c.fileSize;
+                                                                        const progressPercent = useBytePosition
+                                                                            ? (c.currentBytePosition! / c.fileSize!) * 100
+                                                                            : (c.bufferWindowStart! / c.totalSegments!) * 100;
+                                                                        const bufferWidthPercent = useBytePosition
+                                                                            ? 2 // Small fixed buffer indicator for byte-based
+                                                                            : ((c.bufferWindowEnd! - c.bufferWindowStart!) / c.totalSegments!) * 100;
+                                                                        const progressTitle = useBytePosition
+                                                                            ? `Position: ${(c.currentBytePosition! / 1024 / 1024).toFixed(1)} MB / ${(c.fileSize! / 1024 / 1024).toFixed(1)} MB`
+                                                                            : `Consumed: ${c.bufferWindowStart} / ${c.totalSegments}`;
+                                                                        const bufferTitle = useBytePosition
+                                                                            ? `Buffered: ${c.bufferedCount || 0} segments`
+                                                                            : `Buffered Window: ${c.bufferWindowStart} - ${c.bufferWindowEnd} (Total: ${c.totalSegments} segments)`;
+
+                                                                        return (
+                                                                            <>
+                                                                                {/* Full Range Progress (Already Read) */}
+                                                                                <div style={{
+                                                                                    position: 'absolute',
+                                                                                    left: 0,
+                                                                                    top: 0,
+                                                                                    bottom: 0,
+                                                                                    width: `${progressPercent}%`,
+                                                                                    background: 'rgba(255,255,255,0.1)'
+                                                                                }} title={progressTitle} />
+
+                                                                                {/* Buffered Range (Sliding Window) */}
+                                                                                <div style={{
+                                                                                    position: 'absolute',
+                                                                                    left: `${progressPercent}%`,
+                                                                                    top: 0,
+                                                                                    bottom: 0,
+                                                                                    width: `${bufferWidthPercent}%`,
+                                                                                    background: 'linear-gradient(90deg, #0d6efd, #6ea8fe)',
+                                                                                    boxShadow: '0 0 8px rgba(13, 110, 253, 0.5)',
+                                                                                    borderRadius: '2px',
+                                                                                    minWidth: '2px'
+                                                                                }} title={bufferTitle} />
+
+                                                                                {/* Read Head Marker */}
+                                                                                <div style={{
+                                                                                    position: 'absolute',
+                                                                                    left: `${progressPercent}%`,
+                                                                                    top: 0,
+                                                                                    bottom: 0,
+                                                                                    width: '2px',
+                                                                                    background: '#fff',
+                                                                                    zIndex: 2
+                                                                                }} />
+                                                                            </>
+                                                                        );
+                                                                    })()}
+                                                                </div>
+                                                            )}
+
+                                                            {/* Byte Position Indicator */}
+                                                            {c.currentBytePosition !== undefined && c.currentBytePosition !== null && c.fileSize && (
+                                                                <div className="mt-1 d-flex justify-content-between" style={{ fontSize: '0.6rem', color: 'rgba(255,255,255,0.5)' }}>
+                                                                    <span>
+                                                                        {(c.currentBytePosition / 1024 / 1024).toFixed(1)} MB / {(c.fileSize / 1024 / 1024).toFixed(1)} MB
+                                                                    </span>
+                                                                    <span>
+                                                                        {((c.currentBytePosition / c.fileSize) * 100).toFixed(1)}%
+                                                                    </span>
                                                                 </div>
                                                             )}
                                                         </div>
-                                                    ))}
+                                                        );
+                                                    })}
                                                 </div>
                                             </div>
                                         );

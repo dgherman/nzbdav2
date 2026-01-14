@@ -250,13 +250,16 @@ public class BufferedSegmentStream : Stream
     private void UpdateUsageContext()
     {
         if (_usageContext?.DetailsObject == null) return;
-        
+
         // Update the shared details object
         var details = _usageContext.Value.DetailsObject;
         details.BufferedCount = _bufferedCount;
         details.BufferWindowStart = _nextIndexToRead;
         details.BufferWindowEnd = Math.Max(_nextIndexToRead, _maxFetchedIndex);
         details.TotalSegments = _totalSegments;
+        // Use BaseByteOffset (set by NzbFileStream) + current position for absolute byte position
+        // FileSize is already set by NzbFileStream to total file size, don't overwrite it
+        details.CurrentBytePosition = (details.BaseByteOffset ?? 0) + _position;
 
         // Occasionally trigger a UI update via ConnectionPool if possible
         var multiClient = GetMultiProviderClient(_client);
@@ -332,10 +335,16 @@ public class BufferedSegmentStream : Stream
                         if (activeAssignments.TryGetValue(nextNeeded, out var assignment))
                         {
                             var duration = DateTimeOffset.UtcNow - assignment.StartTime;
-                            
-                            // If running > 1.5s and not already racing
-                            if (duration.TotalSeconds > 1.5 && !racingIndices.ContainsKey(nextNeeded))
+                            var activeCount = activeAssignments.Count;
+                            var activeIndices = string.Join(",", activeAssignments.Keys.OrderBy(k => k).Take(10));
+
+                            // If running > 3s and not already racing
+                            // (Previously 5s but reducing to improve responsiveness)
+                            if (duration.TotalSeconds > 3.0 && !racingIndices.ContainsKey(nextNeeded))
                             {
+                                Log.Debug("[BufferedStream] STRAGGLER CHECK: NextNeeded={NextNeeded}, Duration={Duration}s, ActiveCount={ActiveCount}, ActiveIndices=[{ActiveIndices}]",
+                                    nextNeeded, duration.TotalSeconds, activeCount, activeIndices);
+
                                 // Find a victim to preempt (highest index currently running)
                                 var victim = activeAssignments.Keys.DefaultIfEmpty(-1).Max();
 
@@ -396,7 +405,22 @@ public class BufferedSegmentStream : Stream
                                 writeWatch = Stopwatch.StartNew();
                             }
 
-                            await _bufferChannel.Writer.WriteAsync(segment, ct).ConfigureAwait(false);
+                            // Try to write, but channel may be closed if stream disposed early
+                            if (!_bufferChannel.Writer.TryWrite(segment))
+                            {
+                                // Channel is full or closed - try async write with cancellation
+                                try
+                                {
+                                    await _bufferChannel.Writer.WriteAsync(segment, ct).ConfigureAwait(false);
+                                }
+                                catch (ChannelClosedException)
+                                {
+                                    // Channel was closed (stream disposed) - dispose segment and exit
+                                    segment.Dispose();
+                                    Log.Debug("[BufferedStream] Ordering task exiting - channel closed");
+                                    return;
+                                }
+                            }
 
                             if (EnableDetailedTiming && writeWatch != null)
                             {
@@ -482,18 +506,33 @@ public class BufferedSegmentStream : Stream
                                 
                                 if (!segmentQueue.Reader.TryRead(out job))
                                 {
-                                    // Wait for item available on EITHER
-                                    var t1 = segmentQueue.Reader.WaitToReadAsync(ct).AsTask();
-                                    var t2 = urgentChannel.Reader.WaitToReadAsync(ct).AsTask();
-                                    
-                                    await Task.WhenAny(t1, t2).ConfigureAwait(false);
-                                    
-                                    if (urgentChannel.Reader.TryRead(out job)) isUrgent = true;
-                                    else if (!segmentQueue.Reader.TryRead(out job)) 
+                                    // Check if we're done: standard queue completed AND urgent queue empty
+                                    if (segmentQueue.Reader.Completion.IsCompleted)
                                     {
-                                        // Both empty or closed?
-                                        if (segmentQueue.Reader.Completion.IsCompleted) break;
-                                        continue; 
+                                        // Try urgent one more time before exiting
+                                        if (urgentChannel.Reader.TryRead(out job))
+                                        {
+                                            isUrgent = true;
+                                        }
+                                        else
+                                        {
+                                            // Both truly empty - worker can exit
+                                            break;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        // Wait for item available on EITHER
+                                        var t1 = segmentQueue.Reader.WaitToReadAsync(ct).AsTask();
+                                        var t2 = urgentChannel.Reader.WaitToReadAsync(ct).AsTask();
+
+                                        await Task.WhenAny(t1, t2).ConfigureAwait(false);
+
+                                        if (urgentChannel.Reader.TryRead(out job)) isUrgent = true;
+                                        else if (!segmentQueue.Reader.TryRead(out job))
+                                        {
+                                            continue;
+                                        }
                                     }
                                 }
                             }
@@ -501,9 +540,8 @@ public class BufferedSegmentStream : Stream
                             // Skip if already fetched (race condition handling)
                             if (Volatile.Read(ref segmentSlots[job.index]) != null) continue;
 
-                            // Create job-specific CTS for preemption with hard timeout (5s max per segment)
+                            // Create job-specific CTS for preemption (no hard timeout - straggler monitor handles stuck segments)
                             using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                            jobCts.CancelAfter(TimeSpan.FromSeconds(5)); // Hard timeout for stuck network reads
                             using var _scope = jobCts.Token.SetScopedContext(ct.GetContext<ConnectionUsageContext>());
                             var assignment = (DateTimeOffset.UtcNow, jobCts, workerId);
                             
@@ -564,6 +602,8 @@ public class BufferedSegmentStream : Stream
                                 else
                                 {
                                     // Lost the race (already fetched), dispose data
+                                    Log.Debug("[BufferedStream] SEGMENT RACE LOST: Segment={SegmentIndex}, Worker={WorkerId}",
+                                        job.index, workerId);
                                     segmentData.Dispose();
                                 }
                             }
@@ -650,6 +690,7 @@ public class BufferedSegmentStream : Stream
         const int maxRetries = 3;
         Exception? lastException = null;
         var jobName = _usageContext?.DetailsObject?.Text ?? "Unknown";
+        var fetchStartTime = Stopwatch.StartNew();
 
         for (int attempt = 0; attempt < maxRetries; attempt++)
         {
@@ -671,6 +712,7 @@ public class BufferedSegmentStream : Stream
 
                 var fetchHeaders = index == 0;
                 var multiClient = GetMultiProviderClient(client);
+
                 if (multiClient != null)
                 {
                     stream = await multiClient.GetBalancedSegmentStreamAsync(segmentId, fetchHeaders, ct).ConfigureAwait(false);
@@ -679,6 +721,10 @@ public class BufferedSegmentStream : Stream
                 {
                     stream = await client.GetSegmentStreamAsync(segmentId, fetchHeaders, ct).ConfigureAwait(false);
                 }
+
+                // IMPORTANT: Reset the fetch start time now that we have the stream.
+                // This ensures straggler detection only considers data read time, not connection time.
+                fetchStartTime.Restart();
 
                 if (EnableDetailedTiming && acquireWatch != null)
                 {
@@ -703,6 +749,9 @@ public class BufferedSegmentStream : Stream
                 Stopwatch? readWatch = null;
                 if (EnableDetailedTiming) readWatch = Stopwatch.StartNew();
 
+                var readLoopWatch = Stopwatch.StartNew();
+                var readLoopCount = 0;
+
                 try
                 {
                     while (true)
@@ -716,7 +765,18 @@ public class BufferedSegmentStream : Stream
                             buffer = newBuffer;
                         }
 
+                        var readStartMs = readLoopWatch.ElapsedMilliseconds;
                         var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
+                        var readDurationMs = readLoopWatch.ElapsedMilliseconds - readStartMs;
+                        readLoopCount++;
+
+                        // Only log slow individual reads (> 1 second)
+                        if (readDurationMs > 1000)
+                        {
+                            Log.Debug("[BufferedStream] SLOW READ: Segment={SegmentIndex}, ReadCount={ReadCount}, BytesRead={BytesRead}, ReadDuration={ReadDuration}ms",
+                                index, readLoopCount, read, readDurationMs);
+                        }
+
                         if (read == 0) break;
                         totalRead += read;
                     }

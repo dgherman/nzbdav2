@@ -70,9 +70,29 @@ public class DavMultipartFileStream(
         // Build list of stream factories with their lengths for seekable CombinedStream
         var parts = new List<(Func<Task<Stream>> StreamFactory, long Length)>();
 
+        // Track cumulative byte offset across all parts for accurate position display
+        long cumulativeByteOffset = 0;
+
         foreach (var filePart in fileParts)
         {
             var capturedPart = filePart; // Capture for closure
+            var capturedOffset = cumulativeByteOffset; // Capture current offset for this part
+
+            // Create a usage context with the correct cumulative base offset for this part
+            var partContext = new ConnectionUsageContext(
+                _usageContext.UsageType,
+                new ConnectionUsageDetails
+                {
+                    Text = _usageContext.DetailsObject?.Text ?? _usageContext.Details ?? "",
+                    JobName = _usageContext.DetailsObject?.JobName,
+                    AffinityKey = _usageContext.DetailsObject?.AffinityKey,
+                    DavItemId = _usageContext.DetailsObject?.DavItemId,
+                    FileDate = _usageContext.DetailsObject?.FileDate,
+                    FileSize = _usageContext.DetailsObject?.FileSize,
+                    BaseByteOffset = capturedOffset  // Cumulative offset for this part in the combined file
+                }
+            );
+
             parts.Add((
                 StreamFactory: () =>
                 {
@@ -82,7 +102,7 @@ public class DavMultipartFileStream(
                         capturedPart.SegmentIds,
                         capturedPart.SegmentIdByteRange.Count,
                         concurrentConnections,
-                        _usageContext,
+                        partContext,
                         useBufferedStreaming: true
                     );
                     // Seek to the start of this part within the RAR file
@@ -92,6 +112,8 @@ public class DavMultipartFileStream(
                 },
                 Length: capturedPart.FilePartByteRange.Count
             ));
+
+            cumulativeByteOffset += capturedPart.FilePartByteRange.Count;
         }
 
         return new CombinedStream(parts, maxCachedStreams: 0);

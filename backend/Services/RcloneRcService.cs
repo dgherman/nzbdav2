@@ -60,33 +60,28 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
 
     /// <summary>
     /// Deletes a file from the rclone VFS disk cache.
-    /// Rclone VFS cache uses a nested directory structure based on the first 5 characters of the filename.
-    /// e.g., .ids/4e5b250e-30ae-484c-ab9e-573beb7eb6a6 becomes:
-    /// {CachePath}/vfs/{remote}/.ids/4/e/5/b/2/4e5b250e-30ae-484c-ab9e-573beb7eb6a6
+    /// Rclone VFS cache mirrors the WebDAV path structure directly:
+    /// e.g., /content/movies/Movie/Movie.mkv becomes:
+    /// {CachePath}/vfs/{remote}/content/movies/Movie/Movie.mkv
     /// </summary>
     private void DeleteFromDiskCache(string? cachePath, string file)
     {
-        if (string.IsNullOrEmpty(cachePath)) return;
+        if (string.IsNullOrEmpty(cachePath))
+        {
+            Log.Debug("[RcloneRc] CachePath not configured, skipping disk cache deletion");
+            return;
+        }
 
         try
         {
-            // Extract the guid from the file path (e.g., ".ids/4e5b250e-30ae-484c-ab9e-573beb7eb6a6")
-            var fileName = Path.GetFileName(file);
-            if (string.IsNullOrEmpty(fileName) || fileName.Length < 5) return;
+            // Normalize the file path - remove leading slashes for Path.Combine
+            var relativePath = file.Replace('/', Path.DirectorySeparatorChar).TrimStart(Path.DirectorySeparatorChar);
+            if (string.IsNullOrEmpty(relativePath))
+            {
+                Log.Debug("[RcloneRc] Empty file path, skipping cache deletion");
+                return;
+            }
 
-            // Build the nested cache path structure (first 5 chars split into directories)
-            var nestedPath = string.Join(Path.DirectorySeparatorChar.ToString(),
-                fileName[0].ToString(),
-                fileName[1].ToString(),
-                fileName[2].ToString(),
-                fileName[3].ToString(),
-                fileName[4].ToString(),
-                fileName);
-
-            // Get the parent directory from the original file path
-            var parentDir = Path.GetDirectoryName(file)?.Replace('/', Path.DirectorySeparatorChar) ?? "";
-
-            // Search for matching files in the cache directory
             var cacheDir = cachePath.TrimEnd(Path.DirectorySeparatorChar);
 
             // Look for vfs subdirectory
@@ -98,9 +93,16 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
             }
 
             // Search all remote directories under vfs
-            foreach (var remoteDir in Directory.GetDirectories(vfsPath))
+            var remoteDirectories = Directory.GetDirectories(vfsPath);
+            Log.Information("[RcloneRc] Deleting from disk cache: {RelativePath} (searching {Count} remotes)",
+                relativePath, remoteDirectories.Length);
+
+            foreach (var remoteDir in remoteDirectories)
             {
-                var fullCachePath = Path.Combine(remoteDir, parentDir, nestedPath);
+                // Rclone VFS cache mirrors the path directly (no nested structure)
+                var fullCachePath = Path.Combine(remoteDir, relativePath);
+                Log.Debug("[RcloneRc] Checking cache path: {Path}", fullCachePath);
+
                 if (File.Exists(fullCachePath))
                 {
                     Log.Information("[RcloneRc] Deleting cached file: {Path}", fullCachePath);
@@ -108,7 +110,7 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
                 }
 
                 // Also check vfsMeta for metadata files
-                var vfsMetaPath = Path.Combine(cacheDir, "vfsMeta", Path.GetFileName(remoteDir), parentDir, nestedPath);
+                var vfsMetaPath = Path.Combine(cacheDir, "vfsMeta", Path.GetFileName(remoteDir), relativePath);
                 if (File.Exists(vfsMetaPath))
                 {
                     Log.Information("[RcloneRc] Deleting cached metadata: {Path}", vfsMetaPath);
