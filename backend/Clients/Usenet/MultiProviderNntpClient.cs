@@ -90,6 +90,47 @@ public class MultiProviderNntpClient : INntpClient
             "BODY");
     }
 
+    /// <summary>
+    /// Fetches a segment from a specific provider by index, with fallback to other providers on failure.
+    /// Used by batch segment assignment to reduce connection pool contention.
+    /// </summary>
+    public Task<YencHeaderStream> GetSegmentStreamFromProviderAsync(
+        string segmentId,
+        bool includeHeaders,
+        int preferredProviderIndex,
+        CancellationToken cancellationToken)
+    {
+        // Build provider list with preferred provider first, then others as fallback
+        var preferredProvider = preferredProviderIndex >= 0 && preferredProviderIndex < Providers.Count
+            ? Providers[preferredProviderIndex]
+            : null;
+
+        var orderedProviders = GetBalancedProviders(cancellationToken)
+            .Prepend(preferredProvider)
+            .Where(x => x is not null)
+            .Select(x => x!)
+            .Distinct();
+
+        return RunFromPoolWithBackup(
+            connection => connection.GetSegmentStreamAsync(segmentId, includeHeaders, cancellationToken),
+            orderedProviders,
+            cancellationToken,
+            segmentId,
+            "BODY");
+    }
+
+    /// <summary>
+    /// Gets the list of pooled providers with their available connection counts.
+    /// Used by batch segment assignment to distribute segments proportionally.
+    /// </summary>
+    public IReadOnlyList<(int ProviderIndex, int MaxConnections, int AvailableConnections)> GetPooledProviderCapacities()
+    {
+        return Providers
+            .Where(p => p.ProviderType == ProviderType.Pooled)
+            .Select(p => (p.ProviderIndex, p.ConnectionPool.MaxConnections, p.AvailableConnections))
+            .ToList();
+    }
+
     public Task<UsenetYencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken cancellationToken)
     {
         return RunFromPoolWithBackup(
@@ -301,11 +342,19 @@ public class MultiProviderNntpClient : INntpClient
 
     private IEnumerable<MultiConnectionNntpClient> GetOrderedProviders(MultiConnectionNntpClient? preferredProvider, CancellationToken cancellationToken)
     {
+        // Check for forced provider (used for testing individual provider performance)
+        var context = cancellationToken.GetContext<ConnectionUsageContext>();
+        var forcedIndex = context.DetailsObject?.ForcedProviderIndex;
+        if (forcedIndex.HasValue && forcedIndex.Value >= 0 && forcedIndex.Value < Providers.Count)
+        {
+            // Return ONLY the forced provider - no fallback, no affinity
+            return new[] { Providers[forcedIndex.Value] };
+        }
+
         // Check for NZB-level provider affinity with epsilon-greedy exploration
         MultiConnectionNntpClient? affinityProvider = null;
         if (_affinityService != null)
         {
-            var context = cancellationToken.GetContext<ConnectionUsageContext>();
             var affinityKey = context.AffinityKey;
 
             if (!string.IsNullOrEmpty(affinityKey))
@@ -334,6 +383,15 @@ public class MultiProviderNntpClient : INntpClient
 
     private IEnumerable<MultiConnectionNntpClient> GetBalancedProviders(CancellationToken cancellationToken = default)
     {
+        // Check for forced provider (used for testing individual provider performance)
+        var context = cancellationToken.GetContext<ConnectionUsageContext>();
+        var forcedIndex = context.DetailsObject?.ForcedProviderIndex;
+        if (forcedIndex.HasValue && forcedIndex.Value >= 0 && forcedIndex.Value < Providers.Count)
+        {
+            // Return ONLY the forced provider - no fallback, no affinity
+            return new[] { Providers[forcedIndex.Value] };
+        }
+
         // Balanced strategy for BufferedStream with NZB-level affinity support:
         // 1. Prioritize affinity provider (learned performance)
         // 2. Then Pooled providers sorted by available connections and latency
@@ -343,7 +401,6 @@ public class MultiProviderNntpClient : INntpClient
         MultiConnectionNntpClient? affinityProvider = null;
         if (_affinityService != null)
         {
-            var context = cancellationToken.GetContext<ConnectionUsageContext>();
             var affinityKey = context.AffinityKey;
 
             if (!string.IsNullOrEmpty(affinityKey))
@@ -360,9 +417,18 @@ public class MultiProviderNntpClient : INntpClient
 
         var pooled = Providers
             .Where(x => x.ProviderType == ProviderType.Pooled)
-            .OrderByDescending(x => x.AvailableConnections > 0)
-            .ThenBy(x => x.AverageLatency)
-            .ThenByDescending(x => x.AvailableConnections)
+            .Select(x => new {
+                Provider = x,
+                // Calculate availability ratio (0.0 to 1.0) for better load distribution
+                // This prevents thundering herd where all workers pick the same "available" provider
+                AvailabilityRatio = x.ConnectionPool.MaxConnections > 0
+                    ? (double)x.AvailableConnections / x.ConnectionPool.MaxConnections
+                    : 0.0
+            })
+            .OrderByDescending(x => x.AvailabilityRatio > 0) // Has any availability
+            .ThenByDescending(x => x.AvailabilityRatio)       // Prefer higher availability ratio
+            .ThenBy(x => x.Provider.AverageLatency)           // Then by latency
+            .Select(x => x.Provider)
             .ToList();
 
         var others = Providers

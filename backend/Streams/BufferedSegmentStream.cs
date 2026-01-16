@@ -187,6 +187,11 @@ public class BufferedSegmentStream : Stream
     private readonly List<(int Index, string SegmentId)> _corruptedSegments = new();
     private int _lastSuccessfulSegmentSize = 0;
 
+    // NOTE: Batch segment assignment and worker-provider affinity were tested but caused more duplicate
+    // fetches and slower performance. The dynamic availability-ratio selection in
+    // MultiProviderNntpClient.GetBalancedProviders() is more effective at distributing load.
+    // See commit history for the attempted implementation.
+
     public BufferedSegmentStream(
         string[] segmentIds,
         long fileSize,
@@ -223,6 +228,11 @@ public class BufferedSegmentStream : Stream
             _linkedCts.Token.SetScopedContext(usageContext ?? cancellationToken.GetContext<ConnectionUsageContext>())
         };
         var contextToken = _linkedCts.Token;
+
+        // NOTE: Batch segment assignment was tested but caused more duplicate fetches.
+        // The availability-ratio provider selection in MultiProviderNntpClient.GetBalancedProviders
+        // is more effective at distributing load. Keeping this disabled.
+        // InitializeSegmentAssignments(segmentIds.Length, client, concurrentConnections);
 
         // Start background fetcher
         _fetchTask = Task.Run(async () =>
@@ -741,6 +751,7 @@ public class BufferedSegmentStream : Stream
 
                 if (multiClient != null)
                 {
+                    // Use balanced provider selection based on availability ratio
                     stream = await multiClient.GetBalancedSegmentStreamAsync(segmentId, fetchHeaders, ct).ConfigureAwait(false);
                 }
                 else
@@ -1153,4 +1164,5 @@ public class BufferedSegmentStream : Stream
             return null;
         }
     }
+
 }

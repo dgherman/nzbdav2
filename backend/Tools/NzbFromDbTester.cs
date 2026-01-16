@@ -21,6 +21,7 @@ using NzbWebDAV.Queue.DeobfuscationSteps._1.FetchFirstSegment;
 using NzbWebDAV.Queue.DeobfuscationSteps._2.GetPar2FileDescriptors;
 using NzbWebDAV.Queue.DeobfuscationSteps._3.GetFileInfos;
 using NzbWebDAV.Queue.FileProcessors;
+using NzbWebDAV.Utils;
 using Serilog;
 using Usenet.Nzb;
 
@@ -45,6 +46,7 @@ public class NzbFromDbTester
         var healthCheck = false;
         var findMode = false;
         var testImport = false;
+        int? forcedProvider = null;  // Force using a specific provider by index
 
         for (int i = argIndex + 1; i < args.Length; i++)
         {
@@ -53,6 +55,7 @@ public class NzbFromDbTester
             else if (arg.StartsWith("--file=")) nzbFilePath = arg.Substring(7);
             else if (arg.StartsWith("--size=")) downloadSize = long.Parse(arg.Substring(7)) * 1024 * 1024;
             else if (arg.StartsWith("--connections=")) connections = int.Parse(arg.Substring(14));
+            else if (arg.StartsWith("--provider=")) forcedProvider = int.Parse(arg.Substring(11));
             else if (arg == "--import-only") importOnly = true;
             else if (arg == "--health-check") healthCheck = true;
             else if (arg == "--find") findMode = true;
@@ -137,10 +140,30 @@ public class NzbFromDbTester
                 (fileName, segmentIds, fileSize) = result.Value;
             }
 
+            // Get provider info for display
+            var providers = client.GetProviderInfo();
+
             Console.WriteLine($"  File: {fileName}");
             Console.WriteLine($"  Size: {fileSize / 1024.0 / 1024.0:F2} MB");
             Console.WriteLine($"  Segments: {segmentIds.Length}");
             Console.WriteLine($"  Connections: {connections}");
+            Console.WriteLine("───────────────────────────────────────────────────────────────");
+            Console.WriteLine("  Providers:");
+            foreach (var (index, host, type) in providers)
+            {
+                var marker = forcedProvider.HasValue && forcedProvider.Value == index ? " ← FORCED" : "";
+                var typeLabel = type == "Pooled" ? "" : $" [{type}]";
+                Console.WriteLine($"    [{index}] {host}{typeLabel}{marker}");
+            }
+            if (forcedProvider.HasValue)
+            {
+                var forcedHost = providers.FirstOrDefault(p => p.Index == forcedProvider.Value).Host ?? "unknown";
+                Console.WriteLine($"  Mode: SINGLE PROVIDER ({forcedHost})");
+            }
+            else
+            {
+                Console.WriteLine($"  Mode: ALL PROVIDERS (load balanced)");
+            }
             if (!importOnly)
             {
                 Console.WriteLine($"  Download Size: {(downloadSize > 0 ? $"{downloadSize / 1024 / 1024} MB" : "Full file")}");
@@ -171,7 +194,19 @@ public class NzbFromDbTester
             Console.WriteLine("\n--- SEQUENTIAL THROUGHPUT BENCHMARK ---");
             Console.WriteLine($"Downloading {targetSize / 1024.0 / 1024.0:F1} MB...\n");
 
-            var usageContext = new ConnectionUsageContext(ConnectionUsageType.Streaming);
+            // Create usage context with AffinityKey for proper provider affinity tracking
+            // AffinityKey is typically the normalized parent directory name (job name)
+            var affinityKey = FilenameNormalizer.NormalizeName(Path.GetFileNameWithoutExtension(fileName));
+            var usageContext = new ConnectionUsageContext(
+                ConnectionUsageType.Streaming,
+                new ConnectionUsageDetails
+                {
+                    Text = fileName,
+                    JobName = fileName,
+                    AffinityKey = affinityKey,
+                    ForcedProviderIndex = forcedProvider
+                }
+            );
             var stream = client.GetFileStream(
                 segmentIds,
                 fileSize,
@@ -289,6 +324,7 @@ public class NzbFromDbTester
         Console.WriteLine("  --find                  List matching files without testing");
         Console.WriteLine("  --size=<MB>             Download only first N MB (default: full file)");
         Console.WriteLine("  --connections=<N>       Number of connections to use (default: 20)");
+        Console.WriteLine("  --provider=<N>          Force using provider index N (0-based, bypasses affinity)");
         Console.WriteLine("  --import-only           Parse and validate NZB only, no streaming");
         Console.WriteLine("  --health-check          Check segment availability on providers");
         Console.WriteLine("  --test-import           Benchmark import pipeline with timing breakdown");
@@ -301,6 +337,8 @@ public class NzbFromDbTester
         Console.WriteLine("  dotnet run -- --test-db-nzb --file=/path/to.nzb --test-import");
         Console.WriteLine("  dotnet run -- --test-db-nzb \"Movie.2024\" --health-check");
         Console.WriteLine("  dotnet run -- --test-db-nzb \"Movie.2024\" --size=100 --connections=30");
+        Console.WriteLine("  dotnet run -- --test-db-nzb \"Movie.2024\" --provider=0       # Test provider 0 only");
+        Console.WriteLine("  dotnet run -- --test-db-nzb \"Movie.2024\" --provider=1       # Test provider 1 only");
         Console.WriteLine("═══════════════════════════════════════════════════════════════");
     }
 
@@ -396,27 +434,80 @@ public class NzbFromDbTester
             .FirstOrDefaultAsync()
             .ConfigureAwait(false);
 
-        if (file == null)
+        if (file != null)
         {
-            Console.WriteLine($"  ERROR: No file found matching '{searchPattern}'");
-            Console.WriteLine("  Use --find to list matching files");
-            return null;
+            var fileName = file.DavItem?.Name ?? "Unknown";
+            var fileSize = file.DavItem?.FileSize ?? 0;
+            var segmentIds = file.SegmentIds;
+
+            if (segmentIds.Length == 0)
+            {
+                Console.WriteLine("  ERROR: No segments found for this file");
+                return null;
+            }
+
+            Console.WriteLine($"  Type: NzbFile");
+            Console.WriteLine("───────────────────────────────────────────────────────────────");
+            return (fileName, segmentIds, fileSize);
         }
 
-        var fileName = file.DavItem?.Name ?? "Unknown";
-        var fileSize = file.DavItem?.FileSize ?? 0;
+        // Try MultipartFile if no NzbFile found
+        var multipartFile = await db.MultipartFiles
+            .Include(m => m.DavItem)
+            .Where(m => m.DavItem != null && m.DavItem.Name.Contains(searchPattern))
+            .OrderByDescending(m => m.DavItem!.FileSize)
+            .FirstOrDefaultAsync()
+            .ConfigureAwait(false);
 
-        // Get segment IDs (already a string[] in the model)
-        var segmentIds = file.SegmentIds;
-
-        if (segmentIds.Length == 0)
+        if (multipartFile != null)
         {
-            Console.WriteLine("  ERROR: No segments found for this file");
-            return null;
+            var fileName = multipartFile.DavItem?.Name ?? "Unknown";
+            var fileSize = multipartFile.DavItem?.FileSize ?? 0;
+            var segmentIds = multipartFile.Metadata?.FileParts?
+                .SelectMany(p => p.SegmentIds)
+                .ToArray() ?? [];
+
+            if (segmentIds.Length == 0)
+            {
+                Console.WriteLine("  ERROR: No segments found for this multipart file");
+                return null;
+            }
+
+            Console.WriteLine($"  Type: MultipartFile ({multipartFile.Metadata?.FileParts?.Count() ?? 0} parts)");
+            Console.WriteLine("───────────────────────────────────────────────────────────────");
+            return (fileName, segmentIds, fileSize);
         }
 
-        Console.WriteLine("───────────────────────────────────────────────────────────────");
-        return (fileName, segmentIds, fileSize);
+        // Try RarFile if no MultipartFile found
+        var rarFile = await db.RarFiles
+            .Include(r => r.DavItem)
+            .Where(r => r.DavItem != null && r.DavItem.Name.Contains(searchPattern))
+            .OrderByDescending(r => r.DavItem!.FileSize)
+            .FirstOrDefaultAsync()
+            .ConfigureAwait(false);
+
+        if (rarFile != null)
+        {
+            var fileName = rarFile.DavItem?.Name ?? "Unknown";
+            var fileSize = rarFile.DavItem?.FileSize ?? 0;
+            var segmentIds = rarFile.RarParts?
+                .SelectMany(p => p.SegmentIds)
+                .ToArray() ?? [];
+
+            if (segmentIds.Length == 0)
+            {
+                Console.WriteLine("  ERROR: No segments found for this RAR file");
+                return null;
+            }
+
+            Console.WriteLine($"  Type: RarFile ({rarFile.RarParts?.Count() ?? 0} parts)");
+            Console.WriteLine("───────────────────────────────────────────────────────────────");
+            return (fileName, segmentIds, fileSize);
+        }
+
+        Console.WriteLine($"  ERROR: No file found matching '{searchPattern}'");
+        Console.WriteLine("  Use --find to list matching files");
+        return null;
     }
 
     private static async Task RunHealthCheck(string[] segmentIds, string fileName, UsenetStreamingClient client, int connections)

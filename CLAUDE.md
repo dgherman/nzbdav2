@@ -268,6 +268,15 @@ docker logs --no-color nzbdav 2>&1 | grep "some pattern"
 - Monitor WebSocket messages for progress updates
 - Check history page for completion status and symlink paths
 
+**NzbTester (--test-db-nzb)**
+- Command-line tool for benchmarking streaming performance
+- **Maximum connections: 40** (do not exceed this for testing)
+- Usage: `dotnet run -- --test-db-nzb "SearchPattern" --size=100 --connections=40`
+- Use `--provider=N` to test individual providers (0-indexed, bypasses affinity)
+- Use `--find` to list matching files before testing
+- Speed scales with connections: 20 conn ≈ 2 MB/s, 40 conn ≈ 10 MB/s
+- Connection acquire time should be <80% for healthy performance
+
 ## Performance Troubleshooting
 
 ### Slow Download Speeds

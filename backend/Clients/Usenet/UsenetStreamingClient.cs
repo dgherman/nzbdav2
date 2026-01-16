@@ -557,4 +557,19 @@ public class UsenetStreamingClient
     {
         return _connectionPoolStats?.GetActiveConnectionsByProvider() ?? new Dictionary<int, List<ConnectionUsageContext>>();
     }
+
+    /// <summary>
+    /// Gets information about all configured providers (index, host, type).
+    /// Used for displaying provider details in testing tools.
+    /// </summary>
+    public IReadOnlyList<(int Index, string Host, string Type)> GetProviderInfo()
+    {
+        if (_client.InnerClient is MultiProviderNntpClient multiProvider)
+        {
+            return multiProvider.Providers
+                .Select(p => (p.ProviderIndex, p.Host, p.ProviderType.ToString()))
+                .ToList();
+        }
+        return Array.Empty<(int, string, string)>();
+    }
 }

@@ -18,6 +18,12 @@ public class ConnectionUsageDetails
     public long? FileSize { get; set; }
     public long? BaseByteOffset { get; set; }  // Starting byte offset for partial streams
 
+    /// <summary>
+    /// Forces all operations to use a specific provider index, bypassing affinity and load balancing.
+    /// Used for testing individual provider performance. -1 or null means no forced provider.
+    /// </summary>
+    public int? ForcedProviderIndex { get; init; }
+
     public override string ToString()
     {
         if (FileDate.HasValue)
