@@ -9,7 +9,7 @@
     <TargetFrameworks>net48;netstandard20;net8.0</TargetFrameworks>
     <AssemblyName>SharpCompress</AssemblyName>
     <AssemblyOriginatorKeyFile>../../SharpCompress.snk</AssemblyOriginatorKeyFile>
-    <SignAssembly>true</SignAssembly>
+    <SignAssembly>false</SignAssembly>
     <PackageId>SharpCompress</PackageId>
     <PackageTags>rar;unrar;zip;unzip;bzip2;gzip;tar;7zip;lzip;xz</PackageTags>
     <PackageProjectUrl>https://github.com/adamhathcock/sharpcompress</PackageProjectUrl>

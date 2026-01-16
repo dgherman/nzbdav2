@@ -204,10 +204,12 @@ public class ConfigManager
         return null;
     }
 
-    public bool IsEnsureImportableVideoEnabled()
+    public bool IsEnsureImportableMediaEnabled()
     {
         var defaultValue = true;
-        var configValue = StringUtil.EmptyToNull(GetConfigValue("api.ensure-importable-video"));
+        // Check new config key first, fall back to legacy key for backward compatibility
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("api.ensure-importable-media"))
+                          ?? StringUtil.EmptyToNull(GetConfigValue("api.ensure-importable-video"));
         return (configValue != null ? bool.Parse(configValue) : defaultValue);
     }
 

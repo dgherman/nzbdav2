@@ -23,6 +23,7 @@ public class UsenetStreamingClient
     private readonly BandwidthService _bandwidthService;
     private readonly ProviderErrorService _providerErrorService;
     private readonly NzbProviderAffinityService _affinityService;
+    private readonly ProviderUsageTrackingService _trackingService;
     private ConnectionPoolStats? _connectionPoolStats;
 
     // Track recent GetFileSizeAsync operation times for dynamic timeout calculation
@@ -35,7 +36,8 @@ public class UsenetStreamingClient
         WebsocketManager websocketManager,
         BandwidthService bandwidthService,
         ProviderErrorService providerErrorService,
-        NzbProviderAffinityService affinityService)
+        NzbProviderAffinityService affinityService,
+        ProviderUsageTrackingService trackingService)
     {
         // initialize private members
         _websocketManager = websocketManager;
@@ -43,6 +45,7 @@ public class UsenetStreamingClient
         _bandwidthService = bandwidthService;
         _providerErrorService = providerErrorService;
         _affinityService = affinityService;
+        _trackingService = trackingService;
 
         // get connection settings from config-manager
         var providerConfig = configManager.GetUsenetProviderConfig();
@@ -449,7 +452,7 @@ public class UsenetStreamingClient
                 operationTimeout
             ))
             .ToList();
-        return new MultiProviderNntpClient(providerClients, _providerErrorService, _affinityService);
+        return new MultiProviderNntpClient(providerClients, _providerErrorService, _affinityService, _trackingService);
     }
 
     private MultiConnectionNntpClient CreateProviderClient

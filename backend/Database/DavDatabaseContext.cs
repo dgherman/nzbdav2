@@ -41,6 +41,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<LocalLink> LocalLinks { get; set; }
     public DbSet<NzbProviderStats> NzbProviderStats { get; set; }
     public DbSet<AnalysisHistoryItem> AnalysisHistoryItems { get; set; }
+    public DbSet<ProviderUsageEvent> ProviderUsageEvents => Set<ProviderUsageEvent>();
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
@@ -542,6 +543,47 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                     x => DateTimeOffset.FromUnixTimeSeconds(x)
                 );
             e.HasIndex(i => i.LastSeen);
+        });
+
+        // ProviderUsageEvent
+        b.Entity<ProviderUsageEvent>(e =>
+        {
+            e.ToTable("ProviderUsageEvents");
+            e.HasKey(i => i.Id);
+
+            e.Property(i => i.Id)
+                .ValueGeneratedNever()
+                .IsRequired();
+
+            e.Property(i => i.CreatedAt)
+                .ValueGeneratedNever()
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+
+            e.Property(i => i.ProviderHost)
+                .IsRequired()
+                .HasMaxLength(255);
+
+            e.Property(i => i.ProviderType)
+                .IsRequired()
+                .HasMaxLength(50);
+
+            e.Property(i => i.OperationType)
+                .HasMaxLength(50);
+
+            e.Property(i => i.BytesTransferred);
+
+            e.HasIndex(i => new { i.CreatedAt })
+                .IsUnique(false);
+
+            e.HasIndex(i => new { i.ProviderHost })
+                .IsUnique(false);
+
+            e.HasIndex(i => new { i.OperationType })
+                .IsUnique(false);
         });
     }
 }

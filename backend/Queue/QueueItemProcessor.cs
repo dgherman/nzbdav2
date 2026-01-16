@@ -324,11 +324,11 @@ public class QueueItemProcessor(
                 new RenameDuplicatesPostProcessor(dbClient).RenameDuplicates();
                 new BlacklistedExtensionPostProcessor(configManager, dbClient).RemoveBlacklistedExtensions();
 
-                // validate video files found
-                if (configManager.IsEnsureImportableVideoEnabled())
+                // validate media files found (video or audio)
+                if (configManager.IsEnsureImportableMediaEnabled())
                 {
-                    Log.Debug("[QueueItemProcessor] Step 4d: Validating importable video for {JobName}...", queueItem.JobName);
-                    new EnsureImportableVideoValidator(dbClient).ThrowIfValidationFails();
+                    Log.Debug("[QueueItemProcessor] Step 4d: Validating importable media for {JobName}...", queueItem.JobName);
+                    new EnsureImportableMediaValidator(dbClient).ThrowIfValidationFails();
                 }
 
                 // create strm files, if necessary

@@ -19,15 +19,18 @@ public class MultiProviderNntpClient : INntpClient
     public IReadOnlyList<MultiConnectionNntpClient> Providers { get; }
     private readonly ProviderErrorService? _providerErrorService;
     private readonly NzbProviderAffinityService? _affinityService;
+    private readonly ProviderUsageTrackingService? _trackingService;
 
     public MultiProviderNntpClient(
         List<MultiConnectionNntpClient> providers,
         ProviderErrorService? providerErrorService = null,
-        NzbProviderAffinityService? affinityService = null)
+        NzbProviderAffinityService? affinityService = null,
+        ProviderUsageTrackingService? trackingService = null)
     {
         Providers = providers;
         _providerErrorService = providerErrorService;
         _affinityService = affinityService;
+        _trackingService = trackingService;
     }
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
@@ -252,6 +255,13 @@ public class MultiProviderNntpClient : INntpClient
                         _affinityService.RecordSuccess(affinityKey, provider.ProviderIndex, bytes, stopwatch.ElapsedMilliseconds);
                     }
                 }
+
+                // Track provider usage for statistics dashboard
+                _trackingService?.TrackProviderUsage(
+                    provider.Host,
+                    provider.ProviderType.ToString(),
+                    operationName,
+                    null);
 
                 if (lastSuccessfulProviderContext is not null && lastSuccessfulProvider != provider)
                     lastSuccessfulProviderContext.Provider = provider;

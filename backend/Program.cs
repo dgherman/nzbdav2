@@ -224,6 +224,8 @@ class Program
             .AddSingleton<MediaAnalysisService>()
             .AddSingleton<RcloneRcService>()
             .AddSingleton<StreamingConnectionLimiter>()
+            .AddSingleton<ProviderUsageTrackingService>()
+            .AddSingleton<ProviderStatsService>()
             .AddHostedService<DatabaseMaintenanceService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
@@ -245,6 +247,8 @@ class Program
         app.Services.GetRequiredService<ArrMonitoringService>();
         app.Services.GetRequiredService<HealthCheckService>();
         app.Services.GetRequiredService<BandwidthService>();
+        app.Services.GetRequiredService<ProviderUsageTrackingService>();
+        app.Services.GetRequiredService<ProviderStatsService>();
 
         // Backfill JobNames for missing article events (Background, delayed)
         _ = Task.Run(async () =>

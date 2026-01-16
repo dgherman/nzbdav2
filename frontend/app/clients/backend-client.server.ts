@@ -460,12 +460,40 @@ class BackendClient {
         const data = await response.json();
         return data.resetCount;
     }
+
+    public async getProviderStats(hours: number = 24): Promise<ProviderStatsResponse> {
+        const url = process.env.BACKEND_URL + `/api/provider-stats?hours=${hours}`;
+
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, {
+            method: "GET",
+            headers: { "x-api-key": apiKey }
+        });
+
+        if (!response.ok) {
+            throw new Error(`Failed to get provider stats: ${(await response.json()).error}`);
+        }
+        const data = await response.json();
+        return data;
+    }
 }
 
     
 
-    export const backendClient = new BackendClient();
+export const backendClient = new BackendClient();
 
+export type ProviderStatsResponse = {
+    providers: ProviderStats[],
+    totalOperations: number,
+    calculatedAt: string,
+    timeWindow: string,
+    timeWindowHours: number
+}
 
-
-    
+export type ProviderStats = {
+    providerHost: string,
+    providerType: string,
+    totalOperations: number,
+    operationCounts: { [key: string]: number },
+    percentageOfTotal: number
+}
