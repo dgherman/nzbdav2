@@ -47,7 +47,10 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
     // Track active connections by usage type
     private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ActiveConnectionInfo> _activeConnections = new();
-    private record ActiveConnectionInfo(T Connection, ConnectionUsageContext Context);
+    private record ActiveConnectionInfo(T Connection, ConnectionUsageContext Context, DateTimeOffset BorrowedAt);
+
+    // Maximum time a connection can be held before being considered stuck (30 minutes)
+    private static readonly TimeSpan MaxActiveConnectionTime = TimeSpan.FromMinutes(30);
 
     // Track doomed connections (marked for release)
     private readonly System.Collections.Concurrent.ConcurrentDictionary<T, bool> _doomedConnections = new();
@@ -156,8 +159,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             }
 
             TriggerConnectionPoolChangedEvent();
-            _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext);
-            
+            _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext, DateTimeOffset.UtcNow);
+
             return BuildLock(item.Connection, connectionId);
         }
 
@@ -243,7 +246,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         Interlocked.Increment(ref _live);
         TriggerConnectionPoolChangedEvent();
 
-        _activeConnections[connectionId] = new ActiveConnectionInfo(conn, usageContext);
+        _activeConnections[connectionId] = new ActiveConnectionInfo(conn, usageContext, DateTimeOffset.UtcNow);
         return BuildLock(conn, connectionId);
 
         ConnectionLock<T> BuildLock(T c, string connId)
@@ -376,6 +379,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         var survivors = new List<Pooled>();
         var isAnyConnectionFreed = false;
 
+        // Sweep idle connections
         while (_idleConnections.TryPop(out var item))
         {
             if (item.IsExpired(IdleTimeout, now))
@@ -393,6 +397,41 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         // Preserve original LIFO order.
         for (int i = survivors.Count - 1; i >= 0; i--)
             _idleConnections.Push(survivors[i]);
+
+        // Detect and handle stuck active connections
+        var utcNow = DateTimeOffset.UtcNow;
+        foreach (var kvp in _activeConnections)
+        {
+            var connectionId = kvp.Key;
+            var info = kvp.Value;
+            var heldFor = utcNow - info.BorrowedAt;
+
+            if (heldFor > MaxActiveConnectionTime)
+            {
+                Serilog.Log.Warning(
+                    "[ConnectionPool][{PoolName}] STUCK CONNECTION DETECTED: Connection held for {HeldMinutes:F1} minutes. " +
+                    "Usage: {UsageType}, Details: {Details}. Marking for forced release.",
+                    PoolName, heldFor.TotalMinutes, info.Context.UsageType, info.Context.Details);
+
+                // Mark the connection as doomed - it will be disposed when/if it's ever returned
+                _doomedConnections.TryAdd(info.Connection, true);
+
+                // Remove from active tracking (the connection is leaked, but we free the tracking slot)
+                if (_activeConnections.TryRemove(connectionId, out _))
+                {
+                    // Release the semaphore permit to allow new connections
+                    // The actual connection is leaked but at least we unblock the pool
+                    _gate.Release();
+                    Interlocked.Decrement(ref _live);
+                    isAnyConnectionFreed = true;
+
+                    Serilog.Log.Warning(
+                        "[ConnectionPool][{PoolName}] Forced release of stuck connection. Pool permit released. " +
+                        "Connection may be leaked but pool is unblocked.",
+                        PoolName);
+                }
+            }
+        }
 
         if (isAnyConnectionFreed)
             TriggerConnectionPoolChangedEvent();

@@ -69,16 +69,34 @@ public class ProviderErrorService : IDisposable
                 // 1. Add Events (SKIPPED to save space - aggregated into summaries only)
                 // dbContext.MissingArticleEvents.AddRange(batch);
 
-                // 2. Update Summaries
-                var fileGroups = batch.GroupBy(x => x.Filename);
+                // 2. Update Summaries - group by NORMALIZED filename to merge variants like "Movie.mkv" and "Movie"
+                var fileGroups = batch.GroupBy(x => NormalizeFilenameForGrouping(x.Filename));
                 foreach (var group in fileGroups)
                 {
-                    var filename = group.Key;
+                    var normalizedFilename = group.Key;
+                    // Try to find existing summary by normalized filename
                     var summary = await dbContext.MissingArticleSummaries
-                        .FirstOrDefaultAsync(x => x.Filename == filename);
+                        .FirstOrDefaultAsync(x => x.Filename == normalizedFilename);
 
+                    // Also check for summaries with un-normalized filenames (for migration from old data)
+                    if (summary == null)
+                    {
+                        // Check if any original filename variant exists
+                        var originalFilenames = group.Select(x => x.Filename).Distinct().ToList();
+                        summary = await dbContext.MissingArticleSummaries
+                            .FirstOrDefaultAsync(x => originalFilenames.Contains(x.Filename));
+
+                        // If found with old filename, update to normalized
+                        if (summary != null)
+                        {
+                            summary.Filename = normalizedFilename;
+                        }
+                    }
+
+                    // Try to find DavItem by any of the original paths
+                    var originalPaths = group.Select(x => x.Filename).Distinct().ToList();
                     var davItem = await dbContext.Items
-                        .Where(x => x.Path == filename)
+                        .Where(x => originalPaths.Contains(x.Path) || x.Path == normalizedFilename)
                         .Select(x => new { x.Id })
                         .FirstOrDefaultAsync();
 
@@ -88,7 +106,7 @@ public class ProviderErrorService : IDisposable
                         {
                             Id = Guid.NewGuid(),
                             DavItemId = davItem?.Id ?? Guid.Empty, // Populate DavItemId
-                            Filename = filename,
+                            Filename = normalizedFilename, // Store normalized filename
                             JobName = group.First().JobName,
                             FirstSeen = DateTimeOffset.UtcNow,
                             LastSeen = DateTimeOffset.UtcNow,
@@ -151,7 +169,7 @@ public class ProviderErrorService : IDisposable
                              if (distinctProvidersInBatch >= totalProviders)
                              {
                                  summary.HasBlockingMissingArticles = true;
-                                 Log.Information($"[MissingArticles] File '{filename}' (DavItemId: {summary.DavItemId}) is now blocking (missing across all providers in current batch).");
+                                 Log.Information($"[MissingArticles] File '{normalizedFilename}' (DavItemId: {summary.DavItemId}) is now blocking (missing across all providers in current batch).");
                                  break;
                              }
                          }
@@ -168,19 +186,62 @@ public class ProviderErrorService : IDisposable
         }
     }
 
+    // Common video/media extensions to strip for normalization
+    private static readonly HashSet<string> MediaExtensions = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ".mkv", ".avi", ".mp4", ".mov", ".wmv", ".ts", ".m2ts", ".mpg", ".mpeg",
+        ".m4v", ".flv", ".webm", ".vob", ".ogv", ".3gp", ".divx", ".xvid",
+        ".mp3", ".flac", ".wav", ".aac", ".ogg", ".wma", ".m4a",
+        ".srt", ".sub", ".idx", ".ass", ".ssa", ".nfo", ".txt", ".jpg", ".png"
+    };
+
+    /// <summary>
+    /// Normalizes a filename/path for grouping purposes by stripping media extensions.
+    /// This ensures "Movie.2024.mkv" and "Movie.2024" are treated as the same logical file.
+    /// </summary>
+    private static string NormalizeFilenameForGrouping(string filename)
+    {
+        if (string.IsNullOrEmpty(filename)) return filename;
+
+        // Get just the filename part if it's a path
+        var lastSlash = filename.LastIndexOf('/');
+        var directory = lastSlash >= 0 ? filename.Substring(0, lastSlash + 1) : "";
+        var name = lastSlash >= 0 ? filename.Substring(lastSlash + 1) : filename;
+
+        // Strip known media extensions
+        var lastDot = name.LastIndexOf('.');
+        if (lastDot > 0)
+        {
+            var ext = name.Substring(lastDot);
+            if (MediaExtensions.Contains(ext))
+            {
+                name = name.Substring(0, lastDot);
+            }
+        }
+
+        // Trim trailing dots and spaces
+        name = name.TrimEnd('.', ' ');
+
+        return directory + name;
+    }
+
     private string ExtractJobName(string filename)
     {
         if (string.IsNullOrEmpty(filename)) return "Unknown";
-        if (!filename.StartsWith('/')) return filename; // Likely a Job Name from Queue
-        
-        var parts = filename.Split('/', StringSplitOptions.RemoveEmptyEntries);
+
+        // First normalize by stripping extensions
+        var normalized = NormalizeFilenameForGrouping(filename);
+
+        if (!normalized.StartsWith('/')) return normalized; // Likely a Job Name from Queue
+
+        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
         // /content/Category/JobName/File -> parts[2]
         // /content/File.mkv -> parts[1]
-        
+
         if (parts.Length >= 3) return parts[2];
         if (parts.Length == 2) return parts[1];
         if (parts.Length == 1) return parts[0];
-        
+
         return "Uncategorized";
     }
 
@@ -271,10 +332,110 @@ public class ProviderErrorService : IDisposable
 
             await dbContext.SaveChangesAsync(ct);
             Log.Information("Completed backfilling MissingArticleSummaries");
+
+            // Merge any duplicates that differ only by extension
+            await MergeDuplicateSummariesAsync(ct);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "Failed to backfill MissingArticleSummaries");
+        }
+    }
+
+    /// <summary>
+    /// Merges duplicate summaries that differ only by file extension (e.g., "Movie" and "Movie.mkv").
+    /// This handles migration from old data where normalization wasn't applied.
+    /// </summary>
+    public async Task MergeDuplicateSummariesAsync(CancellationToken ct = default)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+
+            // Get all summaries and group by normalized filename
+            var allSummaries = await dbContext.MissingArticleSummaries.ToListAsync(ct);
+            var groupedByNormalized = allSummaries
+                .GroupBy(s => NormalizeFilenameForGrouping(s.Filename))
+                .Where(g => g.Count() > 1) // Only process groups with duplicates
+                .ToList();
+
+            if (groupedByNormalized.Count == 0) return;
+
+            Log.Information($"[ProviderErrorService] Found {groupedByNormalized.Count} groups of duplicate summaries to merge");
+
+            var mergedCount = 0;
+            foreach (var group in groupedByNormalized)
+            {
+                var normalizedFilename = group.Key;
+                var summaries = group.OrderByDescending(s => s.TotalEvents).ToList();
+
+                // Keep the one with most events as the primary
+                var primary = summaries[0];
+                var toMerge = summaries.Skip(1).ToList();
+
+                // Merge data from duplicates into primary
+                foreach (var dup in toMerge)
+                {
+                    primary.TotalEvents += dup.TotalEvents;
+                    if (dup.FirstSeen < primary.FirstSeen) primary.FirstSeen = dup.FirstSeen;
+                    if (dup.LastSeen > primary.LastSeen) primary.LastSeen = dup.LastSeen;
+                    if (dup.HasBlockingMissingArticles) primary.HasBlockingMissingArticles = true;
+                    if (dup.IsImported) primary.IsImported = true;
+                    if (primary.DavItemId == Guid.Empty && dup.DavItemId != Guid.Empty)
+                    {
+                        primary.DavItemId = dup.DavItemId;
+                    }
+
+                    // Merge provider counts
+                    var primaryCounts = !string.IsNullOrWhiteSpace(primary.ProviderCountsJson)
+                        ? JsonSerializer.Deserialize<Dictionary<int, int>>(primary.ProviderCountsJson) ?? new()
+                        : new Dictionary<int, int>();
+                    var dupCounts = !string.IsNullOrWhiteSpace(dup.ProviderCountsJson)
+                        ? JsonSerializer.Deserialize<Dictionary<int, int>>(dup.ProviderCountsJson) ?? new()
+                        : new Dictionary<int, int>();
+
+                    foreach (var kvp in dupCounts)
+                    {
+                        if (!primaryCounts.ContainsKey(kvp.Key)) primaryCounts[kvp.Key] = 0;
+                        primaryCounts[kvp.Key] += kvp.Value;
+                    }
+                    primary.ProviderCountsJson = JsonSerializer.Serialize(primaryCounts);
+
+                    // Merge operation counts
+                    var primaryOpCounts = !string.IsNullOrWhiteSpace(primary.OperationCountsJson)
+                        ? JsonSerializer.Deserialize<Dictionary<string, int>>(primary.OperationCountsJson) ?? new()
+                        : new Dictionary<string, int>();
+                    var dupOpCounts = !string.IsNullOrWhiteSpace(dup.OperationCountsJson)
+                        ? JsonSerializer.Deserialize<Dictionary<string, int>>(dup.OperationCountsJson) ?? new()
+                        : new Dictionary<string, int>();
+
+                    foreach (var kvp in dupOpCounts)
+                    {
+                        if (!primaryOpCounts.ContainsKey(kvp.Key)) primaryOpCounts[kvp.Key] = 0;
+                        primaryOpCounts[kvp.Key] += kvp.Value;
+                    }
+                    primary.OperationCountsJson = JsonSerializer.Serialize(primaryOpCounts);
+                }
+
+                // Update primary to use normalized filename
+                primary.Filename = normalizedFilename;
+                primary.JobName = ExtractJobName(normalizedFilename);
+
+                // Remove duplicates
+                dbContext.MissingArticleSummaries.RemoveRange(toMerge);
+                mergedCount += toMerge.Count;
+            }
+
+            if (mergedCount > 0)
+            {
+                await dbContext.SaveChangesAsync(ct);
+                Log.Information($"[ProviderErrorService] Merged {mergedCount} duplicate summaries into {groupedByNormalized.Count} primary entries");
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Error(ex, "[ProviderErrorService] Failed to merge duplicate summaries");
         }
     }
 

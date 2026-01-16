@@ -74,9 +74,14 @@ public class MultiConnectionNntpClient : INntpClient
         var latency = _bandwidthService?.GetAverageLatency(_providerIndex) ?? 0;
         if (latency <= 0) return _operationTimeoutSeconds * 1000;
 
-        // Formula: Latency * 4, clamped between 15s and ConfiguredTimeout
+        // Formula: Latency * 4, clamped between MinTimeout and ConfiguredTimeout
+        // Minimum of 45s (increased from 15s) because:
+        // - Connection pool contention can add significant wait time
+        // - Health checks with many concurrent segments need headroom
+        // - Occasional slow segments shouldn't fail the entire operation
+        const int MinTimeoutMs = 45000;
         var dynamic = latency * 4;
-        return (int)Math.Clamp(dynamic, 15000, _operationTimeoutSeconds * 1000);
+        return (int)Math.Clamp(dynamic, MinTimeoutMs, _operationTimeoutSeconds * 1000);
     }
 
     private void CheckLatency(object? state)

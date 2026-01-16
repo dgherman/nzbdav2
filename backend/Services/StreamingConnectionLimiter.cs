@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using NzbWebDAV.Config;
 using Serilog;
 
@@ -24,6 +25,18 @@ public class StreamingConnectionLimiter : IDisposable
     private long _totalAcquires;
     private long _totalReleases;
     private long _totalTimeouts;
+    private long _totalForcedReleases;
+
+    // Track active permits for stuck detection
+    private readonly ConcurrentDictionary<string, PermitInfo> _activePermits = new();
+    private record PermitInfo(DateTimeOffset AcquiredAt, string? Context);
+
+    // Maximum time a permit can be held before being considered stuck (30 minutes)
+    private static readonly TimeSpan MaxPermitHoldTime = TimeSpan.FromMinutes(30);
+
+    // Background sweeper
+    private readonly CancellationTokenSource _sweeperCts = new();
+    private readonly Task _sweeperTask;
 
     public StreamingConnectionLimiter(ConfigManager configManager)
     {
@@ -31,6 +44,7 @@ public class StreamingConnectionLimiter : IDisposable
         _currentMaxConnections = configManager.GetTotalStreamingConnections();
         _semaphore = new SemaphoreSlim(_currentMaxConnections, _currentMaxConnections);
         _instance = this;  // Set static instance
+        _sweeperTask = Task.Run(SweeperLoop);  // Start background sweeper
         Log.Information("[StreamingConnectionLimiter] Initialized with {MaxConnections} total streaming connections", _currentMaxConnections);
     }
 
@@ -74,8 +88,9 @@ public class StreamingConnectionLimiter : IDisposable
     /// </summary>
     /// <param name="timeout">Maximum time to wait for a permit</param>
     /// <param name="ct">Cancellation token</param>
-    /// <returns>True if permit was acquired, false if timed out</returns>
-    public async Task<bool> AcquireAsync(TimeSpan timeout, CancellationToken ct)
+    /// <param name="context">Optional context string for debugging stuck permits</param>
+    /// <returns>Permit ID if acquired, null if timed out</returns>
+    public async Task<string?> AcquireWithTrackingAsync(TimeSpan timeout, CancellationToken ct, string? context = null)
     {
         // Check if config changed and we need to resize
         var configuredMax = _configManager.GetTotalStreamingConnections();
@@ -87,21 +102,56 @@ public class StreamingConnectionLimiter : IDisposable
         var acquired = await _semaphore.WaitAsync(timeout, ct).ConfigureAwait(false);
         if (acquired)
         {
+            var permitId = Guid.NewGuid().ToString("N");
+            _activePermits[permitId] = new PermitInfo(DateTimeOffset.UtcNow, context);
             Interlocked.Increment(ref _totalAcquires);
+            return permitId;
         }
         else
         {
             Interlocked.Increment(ref _totalTimeouts);
             Log.Warning("[StreamingConnectionLimiter] Timeout acquiring streaming permit. Active: {Active}, Available: {Available}/{Total}",
                 _activeStreams, AvailableConnections, TotalConnections);
+            return null;
         }
-        return acquired;
     }
 
     /// <summary>
-    /// Release a streaming connection permit.
+    /// Acquire a streaming connection permit (legacy API without tracking).
+    /// </summary>
+    /// <param name="timeout">Maximum time to wait for a permit</param>
+    /// <param name="ct">Cancellation token</param>
+    /// <returns>True if permit was acquired, false if timed out</returns>
+    public async Task<bool> AcquireAsync(TimeSpan timeout, CancellationToken ct)
+    {
+        var permitId = await AcquireWithTrackingAsync(timeout, ct, "legacy").ConfigureAwait(false);
+        return permitId != null;
+    }
+
+    /// <summary>
+    /// Release a streaming connection permit with tracking.
+    /// </summary>
+    /// <param name="permitId">The permit ID returned from AcquireWithTrackingAsync</param>
+    public void Release(string? permitId)
+    {
+        if (permitId != null)
+        {
+            _activePermits.TryRemove(permitId, out _);
+        }
+        ReleaseInternal();
+    }
+
+    /// <summary>
+    /// Release a streaming connection permit (legacy API without tracking).
     /// </summary>
     public void Release()
+    {
+        // Legacy release - we can't track which permit this is for
+        // The sweeper will eventually clean up stuck permits if there's a leak
+        ReleaseInternal();
+    }
+
+    private void ReleaseInternal()
     {
         try
         {
@@ -145,13 +195,84 @@ public class StreamingConnectionLimiter : IDisposable
     /// <summary>
     /// Get stats for monitoring
     /// </summary>
-    public (long Acquires, long Releases, long Timeouts, int Available, int Total, int ActiveStreams) GetStats()
+    public (long Acquires, long Releases, long Timeouts, long ForcedReleases, int Available, int Total, int ActiveStreams, int TrackedPermits) GetStats()
     {
-        return (_totalAcquires, _totalReleases, _totalTimeouts, AvailableConnections, TotalConnections, _activeStreams);
+        return (_totalAcquires, _totalReleases, _totalTimeouts, _totalForcedReleases,
+                AvailableConnections, TotalConnections, _activeStreams, _activePermits.Count);
+    }
+
+    /// <summary>
+    /// Background sweeper that detects and releases stuck permits
+    /// </summary>
+    private async Task SweeperLoop()
+    {
+        try
+        {
+            // Check every 5 minutes
+            using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
+            while (await timer.WaitForNextTickAsync(_sweeperCts.Token).ConfigureAwait(false))
+            {
+                await SweepStuckPermits().ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Normal on disposal
+        }
+    }
+
+    private Task SweepStuckPermits()
+    {
+        var now = DateTimeOffset.UtcNow;
+        var stuckCount = 0;
+
+        foreach (var kvp in _activePermits)
+        {
+            var permitId = kvp.Key;
+            var info = kvp.Value;
+            var heldFor = now - info.AcquiredAt;
+
+            if (heldFor > MaxPermitHoldTime)
+            {
+                Log.Warning(
+                    "[StreamingConnectionLimiter] STUCK PERMIT DETECTED: Permit held for {HeldMinutes:F1} minutes. " +
+                    "Context: {Context}. Force-releasing to unblock pool.",
+                    heldFor.TotalMinutes, info.Context ?? "unknown");
+
+                // Remove from tracking
+                if (_activePermits.TryRemove(permitId, out _))
+                {
+                    // Force-release the semaphore permit
+                    try
+                    {
+                        _semaphore.Release();
+                        Interlocked.Increment(ref _totalForcedReleases);
+                        stuckCount++;
+                    }
+                    catch (SemaphoreFullException)
+                    {
+                        Log.Warning("[StreamingConnectionLimiter] Semaphore already full when force-releasing stuck permit");
+                    }
+                }
+            }
+        }
+
+        if (stuckCount > 0)
+        {
+            Log.Warning(
+                "[StreamingConnectionLimiter] Force-released {Count} stuck permits. " +
+                "Available now: {Available}/{Total}",
+                stuckCount, AvailableConnections, TotalConnections);
+        }
+
+        return Task.CompletedTask;
     }
 
     public void Dispose()
     {
+        _sweeperCts.Cancel();
+        try { _sweeperTask.Wait(TimeSpan.FromSeconds(2)); } catch { }
+        _sweeperCts.Dispose();
         _semaphore.Dispose();
     }
 }

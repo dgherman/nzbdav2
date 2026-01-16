@@ -411,17 +411,30 @@ public class UsenetStreamingClient
         var connectionPoolStats = new ConnectionPoolStats(providerConfig, _websocketManager);
         _connectionPoolStats = connectionPoolStats;
         var totalPooledConnectionCount = providerConfig.TotalPooledConnections;
-        var pooledSemaphore = new ExtendedSemaphoreSlim(totalPooledConnectionCount, totalPooledConnectionCount);
+
+        // Use the MINIMUM of provider total and user-configured streaming limit
+        // This ensures the pooled semaphore respects both:
+        // 1. What providers support (TotalPooledConnections)
+        // 2. What user configured (GetTotalStreamingConnections)
+        var userStreamingLimit = _configManager.GetTotalStreamingConnections();
+        var effectivePoolSize = Math.Min(totalPooledConnectionCount, userStreamingLimit);
+
+        Serilog.Log.Information(
+            "[UsenetStreamingClient] Connection pool sizing: Providers={ProviderTotal}, UserLimit={UserLimit}, Effective={Effective}",
+            totalPooledConnectionCount, userStreamingLimit, effectivePoolSize);
+
+        var pooledSemaphore = new ExtendedSemaphoreSlim(effectivePoolSize, effectivePoolSize);
         
         var operationTimeout = _configManager.GetUsenetOperationTimeout();
 
         // Create ONE global operation limiter shared across ALL providers
+        // Use effectivePoolSize to respect user's streaming connection limit
         var maxQueueConnections = _configManager.GetMaxQueueConnections();
         var maxHealthCheckConnections = _configManager.GetMaxRepairConnections();
         var globalLimiter = new GlobalOperationLimiter(
             maxQueueConnections,
             maxHealthCheckConnections,
-            totalPooledConnectionCount,
+            effectivePoolSize,
             _configManager
         );
 

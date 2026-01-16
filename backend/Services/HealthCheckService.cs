@@ -151,7 +151,10 @@ public class HealthCheckService
             var timeoutMinutes = 30;
             cts.CancelAfter(TimeSpan.FromMinutes(timeoutMinutes)); // Timeout after 30 minutes per file
             
-            using var contextScope = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check", JobName = davItem.Name, DavItemId = davItem.Id }));
+            // Normalize AffinityKey from parent directory (matches WebDav file patterns)
+            var rawAffinityKey = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
+            var normalizedAffinityKey = FilenameNormalizer.NormalizeName(rawAffinityKey);
+            using var contextScope = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = "Health Check", JobName = davItem.Name, AffinityKey = normalizedAffinityKey, DavItemId = davItem.Id }));
 
             // Determine if this is an urgent health check
             var isUrgentCheck = davItem.NextHealthCheck == DateTimeOffset.MinValue;
@@ -396,7 +399,10 @@ public class HealthCheckService
             var progress = progressHook.ToPercentage(segments.Count);
             var isImported = OrganizedLinksUtil.GetLink(davItem, _configManager, allowScan: false) != null;
             using var healthCheckCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, IsImported = isImported, DavItemId = davItem.Id }));
+            // Normalize AffinityKey from parent directory (matches WebDav file patterns)
+            var rawAffinityKey2 = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
+            var normalizedAffinityKey2 = FilenameNormalizer.NormalizeName(rawAffinityKey2);
+            using var contextScope = healthCheckCts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.HealthCheck, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, AffinityKey = normalizedAffinityKey2, IsImported = isImported, DavItemId = davItem.Id }));
             var sizes = await _usenetClient.CheckAllSegmentsAsync(segments, concurrency, progress, healthCheckCts.Token, useHead).ConfigureAwait(false);
 
             // If we did a HEAD check, we now have the segment sizes. Cache them for faster seeking.
@@ -473,7 +479,10 @@ public class HealthCheckService
 
             // when usenet article is missing, perform repairs
             using var cts2 = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, DavItemId = davItem.Id }));
+            // Normalize AffinityKey from parent directory (matches WebDav file patterns)
+            var rawAffinityKey3 = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
+            var normalizedAffinityKey3 = FilenameNormalizer.NormalizeName(rawAffinityKey3);
+            using var _3 = cts2.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, AffinityKey = normalizedAffinityKey3, DavItemId = davItem.Id }));
 
             // Set operation type based on the check method used
             var operation = useHead ? "HEAD" : "STAT";
@@ -575,7 +584,10 @@ public class HealthCheckService
 
         // when usenet article is missing, perform repairs
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        using var _ = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, DavItemId = davItem.Id }));
+        // Normalize AffinityKey from parent directory (matches WebDav file patterns)
+        var rawAffinityKey = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
+        var normalizedAffinityKey = FilenameNormalizer.NormalizeName(rawAffinityKey);
+        using var _ = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Repair, new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, AffinityKey = normalizedAffinityKey, DavItemId = davItem.Id }));
         await Repair(davItem, dbClient, cts.Token, "Manual repair triggered by user").ConfigureAwait(false);
     }
 

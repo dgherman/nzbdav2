@@ -31,6 +31,7 @@ public class NzbAnalysisService(
 )
 {
     private static readonly ConcurrentDictionary<Guid, AnalysisInfo> _activeAnalyses = new();
+    private static readonly ConcurrentDictionary<Guid, int> _ffprobeRetryAttempts = new();
     private readonly SemaphoreSlim _concurrencyLimiter = new(configManager.GetMaxConcurrentAnalyses(), configManager.GetMaxConcurrentAnalyses());
 
     public IEnumerable<AnalysisInfo> GetActiveAnalyses() => _activeAnalyses.Values;
@@ -94,9 +95,12 @@ public class NzbAnalysisService(
 
             // Create cancellation token with usage context so analysis operations show up in stats
             using var cts = new CancellationTokenSource();
+            // Normalize AffinityKey from parent directory (matches WebDav file patterns)
+            var rawAffinityKey = Path.GetFileName(Path.GetDirectoryName(davItem.Path));
+            var normalizedAffinityKey = FilenameNormalizer.NormalizeName(rawAffinityKey);
             var usageContext = new ConnectionUsageContext(
                 ConnectionUsageType.Analysis,
-                new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, DavItemId = davItem.Id }
+                new ConnectionUsageDetails { Text = davItem.Path, JobName = davItem.Name, AffinityKey = normalizedAffinityKey, DavItemId = davItem.Id }
             );
             using var _ = cts.Token.SetScopedContext(usageContext);
 
@@ -123,17 +127,56 @@ public class NzbAnalysisService(
             }
 
             // Media Analysis (ffprobe)
+            var mediaResult = MediaAnalysisResult.Success;
             if (force || !mediaAnalysisComplete)
             {
                 info.Progress = 90;
                 websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|90");
-                await mediaAnalysisService.AnalyzeMediaAsync(fileId, cts.Token).ConfigureAwait(false);
+                mediaResult = await mediaAnalysisService.AnalyzeMediaAsync(fileId, cts.Token).ConfigureAwait(false);
             }
+
+            // Handle ffprobe timeout - schedule retry if we haven't already retried
+            if (mediaResult == MediaAnalysisResult.Timeout)
+            {
+                var retryCount = _ffprobeRetryAttempts.GetOrAdd(fileId, 0);
+                if (retryCount < 1)
+                {
+                    _ffprobeRetryAttempts[fileId] = retryCount + 1;
+                    Log.Warning("[NzbAnalysisService] ffprobe timed out for {FileName}. Scheduling retry in 1 hour (attempt {Attempt}/1)", info.Name, retryCount + 1);
+
+                    // Schedule retry in 1 hour (fire-and-forget)
+                    var retryTask = Task.Run(async () =>
+                    {
+                        await Task.Delay(TimeSpan.FromHours(1)).ConfigureAwait(false);
+                        Log.Information("[NzbAnalysisService] Executing scheduled ffprobe retry for {FileName} ({Id})", info.Name, fileId);
+                        TriggerAnalysisInBackground(fileId, segmentIds, force: true);
+                    });
+                    // Suppress warning - intentional fire-and-forget
+                    GC.KeepAlive(retryTask);
+
+                    websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|90");
+                    websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|pending");
+                    await SaveAnalysisHistoryAsync(fileId, info.Name, info.JobName, "Pending", "ffprobe timed out - retry scheduled in 1 hour").ConfigureAwait(false);
+                    return;
+                }
+                else
+                {
+                    // Already retried once, mark as failed
+                    Log.Warning("[NzbAnalysisService] ffprobe timed out again for {FileName}. Max retries reached.", info.Name);
+                    _ffprobeRetryAttempts.TryRemove(fileId, out var unused1);
+                    websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|error");
+                    await SaveAnalysisHistoryAsync(fileId, info.Name, info.JobName, "Failed", "ffprobe timed out after retry").ConfigureAwait(false);
+                    return;
+                }
+            }
+
+            // Clear retry counter on success
+            _ffprobeRetryAttempts.TryRemove(fileId, out var unused2);
 
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|100");
             websocketManager.SendMessage(WebsocketTopic.AnalysisItemProgress, $"{fileId}|done");
             Log.Information("[NzbAnalysisService] Finished analysis for file: {FileName} ({Id})", info.Name, fileId);
-            
+
             await SaveAnalysisHistoryAsync(fileId, info.Name, info.JobName, "Success", "Analysis completed successfully").ConfigureAwait(false);
         }
         catch (Exception ex)

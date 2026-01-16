@@ -56,11 +56,11 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-14-GLOBAL-STREAM-POOL");
-        Log.Warning("  FEATURE: Global streaming connection pool shared across streams");
-        Log.Warning("  - All streams now use total-streaming-connections for workers");
-        Log.Warning("  - Single stream uses all connections, multiple streams share");
-        Log.Warning("  - Fixed: Workers limited to 10 instead of configured value");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-01-15-STATS-NORMALIZE");
+        Log.Warning("  FEATURE: Fix real-time stats grouping duplicates");
+        Log.Warning("  - StatsController now uses normalized AffinityKey from context");
+        Log.Warning("  - Prevents duplicate entries (e.g., 'Movie.mkv' vs 'Movie')");
+        Log.Warning("  - Falls back to normalized path extraction if AffinityKey missing");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -116,6 +116,13 @@ class Program
         if (args.Contains("--test-db-nzb"))
         {
             await NzbFromDbTester.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
+        // Run Usenet connectivity tester
+        if (args.Contains("--test-usenet"))
+        {
+            await UsenetConnectivityTester.RunAsync(args).ConfigureAwait(false);
             return;
         }
 
@@ -253,6 +260,10 @@ class Program
 
             await providerErrorService
                 .BackfillDavItemIdsAsync(app.Lifetime.ApplicationStopping);
+
+            // Merge duplicate summaries (e.g., "Movie" and "Movie.mkv" -> single entry)
+            await providerErrorService
+                .MergeDuplicateSummariesAsync(app.Lifetime.ApplicationStopping);
 
             await providerErrorService
                 .CleanupOrphanedErrorsAsync(app.Lifetime.ApplicationStopping);

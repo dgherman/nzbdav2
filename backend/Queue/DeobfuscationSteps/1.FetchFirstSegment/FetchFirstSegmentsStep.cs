@@ -158,9 +158,14 @@ public static class FetchFirstSegmentsStep
 
             // Perform smart analysis to get total file size accurately and quickly
             // This avoids slow scans later in RarProcessor
+            // OPTIMIZATION: Skip smart analysis for RAR/Par2 files - they get sizes from Par2 descriptors
+            // This prevents connection exhaustion during large NZB imports with many RAR parts
             long[]? smartSizes = null;
             var isBenchmark = Environment.GetEnvironmentVariable("BENCHMARK") == "true" || Environment.GetEnvironmentVariable("BENCHMARK") == "1";
-            if (nzbFile.Segments.Count > 1 && !isBenchmark)
+            var isRarOrPar2 = FilenameUtil.IsRarFile(nzbFile.FileName) ||
+                              nzbFile.FileName.EndsWith(".par2", StringComparison.OrdinalIgnoreCase);
+
+            if (nzbFile.Segments.Count > 1 && !isBenchmark && !isRarOrPar2)
             {
                 try {
                     smartSizes = await client.AnalyzeNzbAsync(nzbFile.GetSegmentIds(), 1, null, timeoutCts.Token, useSmartAnalysis: true).ConfigureAwait(false);

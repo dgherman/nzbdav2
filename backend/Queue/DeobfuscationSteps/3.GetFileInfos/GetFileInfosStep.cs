@@ -55,12 +55,21 @@ public static class GetFileInfosStep
             (FileName: headerFileName, Priority: GetFilenamePriority(headerFileName, 1)),
         }.Where(x => x.FileName is not null).MaxBy(x => x.Priority).FileName ?? "";
 
+        // Get file size from multiple sources in order of accuracy:
+        // 1. Par2 descriptor (most accurate, matches exact file content)
+        // 2. Yenc header FileSize (from first segment, very reliable for RAR parts)
+        // 3. Smart analysis (if available)
+        // 4. null (will be fetched in Step 1d)
+        var fileSize = (long?)fileDesc?.FileLength
+                    ?? file.Header?.FileSize
+                    ?? (file.SmartAnalysisSegmentSizes?.Length > 0 ? file.SmartAnalysisSegmentSizes.Sum() : null);
+
         return new FileInfo()
         {
             NzbFile = file.NzbFile,
             FileName = filename,
             ReleaseDate = file.ReleaseDate,
-            FileSize = (long?)fileDesc?.FileLength,
+            FileSize = fileSize,
             IsRar = file.HasRar4Magic() || file.HasRar5Magic(),
             IsSevenZip = file.HasSevenZipMagic(),
             MagicOffset = file.MagicOffset,

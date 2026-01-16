@@ -14,16 +14,38 @@ namespace NzbWebDAV.Par2Recovery.Packets
             Header = header;
         }
 
+        /// <summary>
+        /// Shared buffer for discarding bytes when seeking isn't supported.
+        /// Using a larger buffer (64KB) reduces the number of read calls needed.
+        /// </summary>
+        private static readonly byte[] DiscardBuffer = new byte[64 * 1024];
+
         public async Task ReadAsync(Stream stream, CancellationToken cancellationToken = default)
         {
             // Determine the length of the body as the given packet length, minus the length of the header.
             var bodyLength = Header.PacketLength - (ulong)Marshal.SizeOf<Par2PacketHeader>();
 
             // Optimization: If this is the base Par2Packet class, we don't need the body data.
-            // We can just skip over it using Seek to avoid downloading unnecessary data (often GBs for recovery slices).
-            if (GetType() == typeof(Par2Packet) && stream.CanSeek)
+            // We can skip over it to avoid downloading unnecessary data (often GBs for recovery slices).
+            if (GetType() == typeof(Par2Packet))
             {
-                stream.Seek((long)bodyLength, SeekOrigin.Current);
+                if (stream.CanSeek)
+                {
+                    // Fast path: seek past the body
+                    stream.Seek((long)bodyLength, SeekOrigin.Current);
+                }
+                else
+                {
+                    // Fallback: read and discard in chunks (for non-seekable streams like BufferedSegmentStream)
+                    var remaining = (long)bodyLength;
+                    while (remaining > 0 && !cancellationToken.IsCancellationRequested)
+                    {
+                        var toRead = (int)Math.Min(remaining, DiscardBuffer.Length);
+                        var read = await stream.ReadAsync(DiscardBuffer.AsMemory(0, toRead), cancellationToken).ConfigureAwait(false);
+                        if (read == 0) break; // EOF
+                        remaining -= read;
+                    }
+                }
                 return;
             }
 

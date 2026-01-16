@@ -7,18 +7,25 @@ using Serilog;
 
 namespace NzbWebDAV.Services;
 
+public enum MediaAnalysisResult
+{
+    Success,
+    Failed,
+    Timeout
+}
+
 public class MediaAnalysisService(
     IServiceScopeFactory scopeFactory,
     ConfigManager configManager
 )
 {
-    public async Task AnalyzeMediaAsync(Guid davItemId, CancellationToken ct = default)
+    public async Task<MediaAnalysisResult> AnalyzeMediaAsync(Guid davItemId, CancellationToken ct = default)
     {
         // 1. Get Item
         using var scope = scopeFactory.CreateScope();
         var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
         var item = await dbContext.Items.FindAsync([davItemId], ct);
-        if (item == null) return;
+        if (item == null) return MediaAnalysisResult.Failed;
 
         // 2. Construct Path
         var mountDir = configManager.GetRcloneMountDir();
@@ -32,15 +39,23 @@ public class MediaAnalysisService(
 
         // 3. Run ffprobe
         Log.Information("[MediaAnalysis] Running ffprobe on {Path}", fullPath);
-        var result = await RunFfprobeAsync(fullPath, ct);
-        
+        var (result, timedOut) = await RunFfprobeAsync(fullPath, ct);
+
         // 4. Update DB
-        if (string.IsNullOrWhiteSpace(result))
+        MediaAnalysisResult analysisResult;
+        if (timedOut)
+        {
+             Log.Warning("[MediaAnalysis] ffprobe timed out for {Path}", fullPath);
+             // Don't save error to MediaInfo on timeout - leave it null for retry
+             analysisResult = MediaAnalysisResult.Timeout;
+        }
+        else if (string.IsNullOrWhiteSpace(result))
         {
              Log.Warning("[MediaAnalysis] ffprobe failed or returned empty result for {Path}", fullPath);
              item.MediaInfo = "{\"error\": \"ffprobe failed (file may be corrupt or incomplete)\", \"streams\": []}";
              item.IsCorrupted = true;
              item.CorruptionReason = "Media analysis (ffprobe) failed - possible corrupt file.";
+             analysisResult = MediaAnalysisResult.Failed;
         }
         else if (result.Contains("\"error\":"))
         {
@@ -48,19 +63,30 @@ public class MediaAnalysisService(
              item.MediaInfo = result;
              item.IsCorrupted = true;
              item.CorruptionReason = "Media analysis reported stream errors.";
+             analysisResult = MediaAnalysisResult.Failed;
         }
         else
         {
              item.MediaInfo = result;
              item.IsCorrupted = false;
              item.CorruptionReason = null;
+             analysisResult = MediaAnalysisResult.Success;
         }
 
-        await dbContext.SaveChangesAsync(ct);
-        Log.Information("[MediaAnalysis] Media analysis complete for {Name}", item.Name);
+        if (analysisResult != MediaAnalysisResult.Timeout)
+        {
+            await dbContext.SaveChangesAsync(ct);
+        }
+
+        Log.Information("[MediaAnalysis] Media analysis complete for {Name}. Result: {Result}", item.Name, analysisResult);
+        return analysisResult;
     }
 
-    private async Task<string?> RunFfprobeAsync(string filePath, CancellationToken ct)
+    /// <summary>
+    /// Runs ffprobe on the given file path.
+    /// </summary>
+    /// <returns>Tuple of (output, timedOut). If timedOut is true, output will be null.</returns>
+    private async Task<(string? output, bool timedOut)> RunFfprobeAsync(string filePath, CancellationToken ct)
     {
         try
         {
@@ -84,9 +110,9 @@ public class MediaAnalysisService(
             var outputTask = process.StandardOutput.ReadToEndAsync(ct);
             var errorTask = process.StandardError.ReadToEndAsync(ct);
 
-            // Wait for exit with timeout (e.g. 60 seconds)
+            // Wait for exit with timeout (2 minutes)
             using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeoutCts.CancelAfter(TimeSpan.FromSeconds(60));
+            timeoutCts.CancelAfter(TimeSpan.FromMinutes(2));
 
             try
             {
@@ -94,9 +120,9 @@ public class MediaAnalysisService(
             }
             catch (OperationCanceledException)
             {
-                Log.Warning("[MediaAnalysis] ffprobe timed out after 60s for {Path}", filePath);
+                Log.Warning("[MediaAnalysis] ffprobe timed out after 2 minutes for {Path}", filePath);
                 process.Kill();
-                return null;
+                return (null, timedOut: true);
             }
 
             var output = await outputTask;
@@ -108,15 +134,15 @@ public class MediaAnalysisService(
             if (process.ExitCode != 0)
             {
                 Log.Warning("[MediaAnalysis] ffprobe exited with code {Code}: {Error}", process.ExitCode, error);
-                return null;
+                return (null, timedOut: false);
             }
 
-            return output;
+            return (output, timedOut: false);
         }
         catch (Exception ex)
         {
             Log.Error(ex, "[MediaAnalysis] Failed to run ffprobe");
-            return null;
+            return (null, timedOut: false);
         }
     }
 }

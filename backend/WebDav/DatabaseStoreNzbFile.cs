@@ -5,6 +5,7 @@ using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
+using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav.Base;
 
 using NzbWebDAV.Services;
@@ -31,14 +32,20 @@ public class DatabaseStoreNzbFile(
         // store the DavItem being accessed in the http context
         httpContext.Items["DavItem"] = davNzbFile;
 
-        // create streaming usage context
+        // create streaming usage context with normalized AffinityKey
+        var rawAffinityKey = Path.GetFileName(Path.GetDirectoryName(davNzbFile.Path));
+        var normalizedAffinityKey = FilenameNormalizer.NormalizeName(rawAffinityKey);
+
+        Serilog.Log.Debug("[DatabaseStoreNzbFile] AffinityKey: Raw='{Raw}' Normalized='{Normalized}' for file '{File}'",
+            rawAffinityKey, normalizedAffinityKey, davNzbFile.Name);
+
         var usageContext = new ConnectionUsageContext(
             ConnectionUsageType.Streaming,
             new ConnectionUsageDetails
             {
                 Text = davNzbFile.Path,
                 JobName = davNzbFile.Name,
-                AffinityKey = Path.GetFileName(Path.GetDirectoryName(davNzbFile.Path)),
+                AffinityKey = normalizedAffinityKey,
                 DavItemId = davNzbFile.Id,
                 FileDate = davNzbFile.ReleaseDate
             }

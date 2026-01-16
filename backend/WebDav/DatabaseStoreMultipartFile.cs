@@ -7,6 +7,7 @@ using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Streams;
+using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav.Base;
 
 namespace NzbWebDAV.WebDav;
@@ -30,14 +31,20 @@ public class DatabaseStoreMultipartFile(
         // store the DavItem being accessed in the http context
         httpContext.Items["DavItem"] = davMultipartFile;
 
-        // create streaming usage context
+        // create streaming usage context with normalized AffinityKey
+        var rawAffinityKey = Path.GetFileName(Path.GetDirectoryName(davMultipartFile.Path));
+        var normalizedAffinityKey = FilenameNormalizer.NormalizeName(rawAffinityKey);
+
+        Serilog.Log.Debug("[DatabaseStoreMultipartFile] AffinityKey: Raw='{Raw}' Normalized='{Normalized}' for file '{File}'",
+            rawAffinityKey, normalizedAffinityKey, davMultipartFile.Name);
+
         var usageContext = new ConnectionUsageContext(
             ConnectionUsageType.Streaming,
             new ConnectionUsageDetails
             {
                 Text = davMultipartFile.Path,
                 JobName = davMultipartFile.Name,
-                AffinityKey = Path.GetFileName(Path.GetDirectoryName(davMultipartFile.Path)),
+                AffinityKey = normalizedAffinityKey,
                 DavItemId = davMultipartFile.Id,
                 FileDate = davMultipartFile.ReleaseDate,
                 FileSize = davMultipartFile.FileSize  // Total file size for UI display

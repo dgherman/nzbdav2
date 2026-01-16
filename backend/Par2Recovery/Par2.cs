@@ -15,20 +15,54 @@ namespace NzbWebDAV.Par2Recovery
 
         private const string Par2PacketHeaderMagic = "PAR2\0PKT";
 
+        /// <summary>
+        /// Number of consecutive non-FileDesc packets to see before stopping.
+        /// FileDesc packets are typically grouped at the beginning of Par2 files.
+        /// Once we see several non-FileDesc packets in a row, we've likely found all descriptors.
+        /// </summary>
+        private const int MaxConsecutiveNonFileDesc = 5;
+
+        /// <summary>
+        /// Reads file descriptions from a Par2 stream.
+        /// </summary>
+        /// <param name="stream">The Par2 file stream</param>
+        /// <param name="ct">Cancellation token</param>
+        /// <param name="maxDescriptors">Optional: Stop after finding this many descriptors (early termination optimization)</param>
         public static async IAsyncEnumerable<FileDesc> ReadFileDescriptions
         (
             Stream stream,
-            CancellationToken ct = default
+            CancellationToken ct = default,
+            int? maxDescriptors = null
         )
         {
             Par2Packet? packet = null;
             var iterationCount = 0;
             var lastPosition = stream.Position;
+            var descriptorsFound = 0;
+            var consecutiveNonFileDesc = 0;
 
-            Log.Debug("[Par2] Starting ReadFileDescriptions. Stream length: {Length}, Initial position: {Position}", stream.Length, stream.Position);
+            Log.Debug("[Par2] Starting ReadFileDescriptions. Stream length: {Length}, Initial position: {Position}, MaxDescriptors: {Max}",
+                stream.Length, stream.Position, maxDescriptors?.ToString() ?? "unlimited");
 
             while (stream.Position < stream.Length && !ct.IsCancellationRequested)
             {
+                // Early termination: stop if we've found enough descriptors
+                if (maxDescriptors.HasValue && descriptorsFound >= maxDescriptors.Value)
+                {
+                    Log.Information("[Par2] Early termination: Found {Count} descriptors (max: {Max}). Skipping remaining {Remaining} bytes",
+                        descriptorsFound, maxDescriptors.Value, stream.Length - stream.Position);
+                    yield break;
+                }
+
+                // Smart early termination: if we've found some descriptors and then see several
+                // non-FileDesc packets in a row, we've likely passed the FileDesc section
+                if (descriptorsFound > 0 && consecutiveNonFileDesc >= MaxConsecutiveNonFileDesc)
+                {
+                    Log.Information("[Par2] Smart early termination: Found {Count} descriptors, then {NonFileDesc} consecutive non-FileDesc packets. Skipping remaining {Remaining} bytes",
+                        descriptorsFound, consecutiveNonFileDesc, stream.Length - stream.Position);
+                    yield break;
+                }
+
                 iterationCount++;
                 var currentPosition = stream.Position;
 
@@ -42,8 +76,8 @@ namespace NzbWebDAV.Par2Recovery
 
                 if (iterationCount % 10 == 0)
                 {
-                    Log.Debug("[Par2] ReadFileDescriptions iteration {Iteration}: Position {Position}/{Length}",
-                        iterationCount, currentPosition, stream.Length);
+                    Log.Debug("[Par2] ReadFileDescriptions iteration {Iteration}: Position {Position}/{Length}, Found {Count} descriptors",
+                        iterationCount, currentPosition, stream.Length, descriptorsFound);
                 }
 
                 try
@@ -61,15 +95,21 @@ namespace NzbWebDAV.Par2Recovery
 
                 if (packet is FileDesc newFile)
                 {
-                    Log.Debug("[Par2] Found FileDesc packet: {FileName}", newFile.FileName);
+                    descriptorsFound++;
+                    consecutiveNonFileDesc = 0; // Reset counter when we find a FileDesc
+                    Log.Debug("[Par2] Found FileDesc packet #{Count}: {FileName}", descriptorsFound, newFile.FileName);
                     yield return newFile;
+                }
+                else
+                {
+                    consecutiveNonFileDesc++;
                 }
 
                 lastPosition = currentPosition;
             }
 
-            Log.Debug("[Par2] ReadFileDescriptions completed. Total iterations: {Iterations}, Final position: {Position}/{Length}",
-                iterationCount, stream.Position, stream.Length);
+            Log.Debug("[Par2] ReadFileDescriptions completed. Total iterations: {Iterations}, Descriptors found: {Count}, Final position: {Position}/{Length}",
+                iterationCount, descriptorsFound, stream.Position, stream.Length);
         }
 
         private static async Task<Par2Packet> ReadPacketAsync(Stream stream, CancellationToken cancellationToken = default)

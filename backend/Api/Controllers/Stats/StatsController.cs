@@ -82,7 +82,9 @@ public class StatsController(
                     var parts = context.Details.Split('/', StringSplitOptions.RemoveEmptyEntries);
                     if (parts.Length >= 3 && parts[0] == "content")
                     {
+                        // Add both raw and normalized job names for lookup
                         allJobNames.Add(parts[2]);
+                        allJobNames.Add(FilenameNormalizer.NormalizeName(parts[2]));
                         allPaths.Add(context.Details);
                         allPaths.Add("/" + context.Details); // Also try with leading slash
                     }
@@ -125,15 +127,22 @@ public class StatsController(
                 foreach (var context in contextList)
                 {
                     var fullPath = context.Details;
-                    string? jobName = null;
                     string? davItemId = null;
+
+                    // Use the normalized AffinityKey from context for grouping
+                    // This ensures "Movie.mkv" and "Movie" are grouped together
+                    var jobName = context.AffinityKey;
 
                     if (!string.IsNullOrEmpty(fullPath))
                     {
                         var parts = fullPath.Split('/', StringSplitOptions.RemoveEmptyEntries);
                         if (parts.Length >= 3 && parts[0] == "content")
                         {
-                            jobName = parts[2];
+                            // Fallback: If AffinityKey is not set, extract from path but normalize it
+                            if (string.IsNullOrEmpty(jobName))
+                            {
+                                jobName = FilenameNormalizer.NormalizeName(parts[2]);
+                            }
 
                             // Try to get davItemId from lookup maps
                             if (!pathToIdMap.TryGetValue(fullPath, out davItemId))
@@ -141,10 +150,14 @@ public class StatsController(
                                 pathToIdMap.TryGetValue("/" + fullPath, out davItemId);
                             }
 
-                            // If still not found, try job name lookup
-                            if (davItemId == null)
+                            // If still not found, try job name lookup (try both raw and normalized)
+                            if (davItemId == null && jobName != null)
                             {
-                                jobNameToIdMap.TryGetValue(jobName, out davItemId);
+                                if (!jobNameToIdMap.TryGetValue(jobName, out davItemId))
+                                {
+                                    // Try raw directory name as fallback
+                                    jobNameToIdMap.TryGetValue(parts[2], out davItemId);
+                                }
                             }
                         }
                     }
