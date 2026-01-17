@@ -31,8 +31,9 @@ public class StreamingConnectionLimiter : IDisposable
     private readonly ConcurrentDictionary<string, PermitInfo> _activePermits = new();
     private record PermitInfo(DateTimeOffset AcquiredAt, string? Context);
 
-    // Maximum time a permit can be held before being considered stuck (30 minutes)
-    private static readonly TimeSpan MaxPermitHoldTime = TimeSpan.FromMinutes(30);
+    // Maximum time a permit can be held before being considered stuck (5 minutes)
+    // Reduced from 30 minutes to detect stuck permits faster
+    private static readonly TimeSpan MaxPermitHoldTime = TimeSpan.FromMinutes(5);
 
     // Background sweeper
     private readonly CancellationTokenSource _sweeperCts = new();
@@ -208,8 +209,8 @@ public class StreamingConnectionLimiter : IDisposable
     {
         try
         {
-            // Check every 5 minutes
-            using var timer = new PeriodicTimer(TimeSpan.FromMinutes(5));
+            // Check every 30 seconds to detect stuck permits quickly
+            using var timer = new PeriodicTimer(TimeSpan.FromSeconds(30));
             while (await timer.WaitForNextTickAsync(_sweeperCts.Token).ConfigureAwait(false))
             {
                 await SweepStuckPermits().ConfigureAwait(false);
