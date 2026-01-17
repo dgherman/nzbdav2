@@ -1083,7 +1083,7 @@ public class BufferedSegmentStream : Stream
             _cts.Cancel();
             _cts.Dispose();
             _bufferChannel.Writer.TryComplete();
-            try { _fetchTask.Wait(TimeSpan.FromSeconds(5)); } catch { }
+            try { _fetchTask.Wait(TimeSpan.FromSeconds(30)); } catch { }
             
             _currentSegment?.Dispose();
             _currentSegment = null;
@@ -1107,7 +1107,7 @@ public class BufferedSegmentStream : Stream
 
         try
         {
-            await _fetchTask.WaitAsync(TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            await _fetchTask.WaitAsync(TimeSpan.FromSeconds(30)).ConfigureAwait(false);
         }
         catch { }
 
