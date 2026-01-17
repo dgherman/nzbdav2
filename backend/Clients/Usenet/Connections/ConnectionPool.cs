@@ -414,10 +414,13 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                     "Usage: {UsageType}, Details: {Details}. Force disposing connection.",
                     PoolName, heldFor.TotalMinutes, info.Context.UsageType, info.Context.Details);
 
-                // Remove from active tracking first
+                // Mark as doomed first - this prevents Return() from pushing a disposed connection to idle
+                _doomedConnections.TryAdd(info.Connection, true);
+
+                // Remove from active tracking
                 if (_activeConnections.TryRemove(connectionId, out _))
                 {
-                    // Immediately dispose the stuck connection instead of just marking it doomed
+                    // Immediately dispose the stuck connection instead of waiting for Return()
                     // This ensures resources are freed even if the connection is never returned
                     _ = DisposeConnectionSafeAsync(info.Connection, "stuck connection cleanup");
 
