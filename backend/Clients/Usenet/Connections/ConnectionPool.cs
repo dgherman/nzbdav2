@@ -295,7 +295,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
         if (Volatile.Read(ref _disposed) == 1 || _doomedConnections.TryRemove(connection, out _))
         {
-            _ = DisposeConnectionSafeAsync(connection, "doomed/disposed return");
+            _ = DisposeConnectionAsync(connection); // fire & forget
             Interlocked.Decrement(ref _live);
             TriggerConnectionPoolChangedEvent();
             return;
@@ -312,7 +312,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
 
         // When a lock requests replacement, we dispose the connection instead of reusing.
-        _ = DisposeConnectionSafeAsync(connection, "destroy/replace");
+        _ = DisposeConnectionAsync(connection); // fire & forget
         Interlocked.Decrement(ref _live);
         if (Volatile.Read(ref _disposed) == 0)
         {
@@ -411,26 +411,24 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             {
                 Serilog.Log.Warning(
                     "[ConnectionPool][{PoolName}] STUCK CONNECTION DETECTED: Connection held for {HeldMinutes:F1} minutes. " +
-                    "Usage: {UsageType}, Details: {Details}. Force disposing connection.",
+                    "Usage: {UsageType}, Details: {Details}. Marking for forced release.",
                     PoolName, heldFor.TotalMinutes, info.Context.UsageType, info.Context.Details);
 
-                // Mark as doomed first - this prevents Return() from pushing a disposed connection to idle
+                // Mark the connection as doomed - it will be disposed when/if it's ever returned
                 _doomedConnections.TryAdd(info.Connection, true);
 
-                // Remove from active tracking
+                // Remove from active tracking (the connection is leaked, but we free the tracking slot)
                 if (_activeConnections.TryRemove(connectionId, out _))
                 {
-                    // Immediately dispose the stuck connection instead of waiting for Return()
-                    // This ensures resources are freed even if the connection is never returned
-                    _ = DisposeConnectionSafeAsync(info.Connection, "stuck connection cleanup");
-
                     // Release the semaphore permit to allow new connections
+                    // The actual connection is leaked but at least we unblock the pool
                     _gate.Release();
                     Interlocked.Decrement(ref _live);
                     isAnyConnectionFreed = true;
 
                     Serilog.Log.Warning(
-                        "[ConnectionPool][{PoolName}] Force disposed stuck connection. Pool permit released.",
+                        "[ConnectionPool][{PoolName}] Forced release of stuck connection. Pool permit released. " +
+                        "Connection may be leaked but pool is unblocked.",
                         PoolName);
                 }
             }
@@ -452,23 +450,6 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
             case IDisposable d:
                 d.Dispose();
                 break;
-        }
-    }
-
-    /// <summary>
-    /// Safely disposes a connection, catching and logging any errors.
-    /// This prevents fire-and-forget disposal from swallowing exceptions silently.
-    /// </summary>
-    private async Task DisposeConnectionSafeAsync(T conn, string context)
-    {
-        try
-        {
-            await DisposeConnectionAsync(conn).ConfigureAwait(false);
-        }
-        catch (Exception ex)
-        {
-            Serilog.Log.Warning(ex, "[ConnectionPool][{PoolName}] Error disposing connection ({Context}). Connection may be leaked.",
-                PoolName, context);
         }
     }
 
