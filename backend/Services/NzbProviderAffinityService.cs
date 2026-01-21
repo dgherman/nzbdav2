@@ -183,6 +183,36 @@ public class NzbProviderAffinityService
         _stats.TryRemove(jobName, out _);
     }
 
+    /// <summary>
+    /// Get providers with success rate below threshold for a specific job.
+    /// Used for soft deprioritization - these providers are used as last resort.
+    /// </summary>
+    /// <param name="jobName">The job/NZB name to check</param>
+    /// <param name="minSamples">Minimum number of operations before triggering (default: 10)</param>
+    /// <param name="successRateThreshold">Success rate threshold in percent (default: 30%)</param>
+    /// <returns>Set of provider indices with low success rates</returns>
+    public HashSet<int> GetLowSuccessRateProviders(string jobName, int minSamples = 10, double successRateThreshold = 30.0)
+    {
+        var result = new HashSet<int>();
+        if (!_configManager.IsProviderAffinityEnabled()) return result;
+        if (string.IsNullOrEmpty(jobName)) return result;
+        if (!_stats.TryGetValue(jobName, out var jobStats)) return result;
+
+        foreach (var (providerIndex, performance) in jobStats)
+        {
+            var totalSegments = performance.SuccessfulSegments + performance.FailedSegments;
+            if (totalSegments < minSamples) continue;
+
+            if (performance.SuccessRate < successRateThreshold)
+            {
+                result.Add(providerIndex);
+                Log.Debug("[NzbProviderAffinity] Provider {ProviderIndex} has low success rate {SuccessRate:F1}% for job {JobName} (threshold: {Threshold}%)",
+                    providerIndex, performance.SuccessRate, jobName, successRateThreshold);
+            }
+        }
+        return result;
+    }
+
     private async Task LoadStatsAsync()
     {
         try

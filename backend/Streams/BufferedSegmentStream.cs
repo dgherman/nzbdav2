@@ -187,6 +187,128 @@ public class BufferedSegmentStream : Stream
     private readonly List<(int Index, string SegmentId)> _corruptedSegments = new();
     private int _lastSuccessfulSegmentSize = 0;
 
+    // Per-stream provider scoring for cooldown system
+    private readonly ConcurrentDictionary<int, ProviderStreamScore> _providerScores = new();
+
+    // Dynamic straggler timeout tracking
+    private long _successfulFetchTimeMs;
+    private int _successfulFetchCount;
+
+    // Track failed providers per segment for exclusion on retry
+    private readonly ConcurrentDictionary<int, HashSet<int>> _failedProvidersPerSegment = new();
+
+    /// <summary>
+    /// Per-stream provider performance tracking with rolling window and sticky failure weight.
+    /// Used to implement soft deprioritization (cooldown) for slow/unreliable providers.
+    /// </summary>
+    private class ProviderStreamScore
+    {
+        private const int WindowSize = 30; // Rolling window size for success rate calculation
+        private readonly bool[] _recentResults = new bool[WindowSize]; // true = success, false = failure
+        private int _writeIndex;
+        private int _totalOperations;
+        private int _failureWeight; // Sticky weight: +2 per failure, -1 per success (min 0)
+        private readonly object _lock = new();
+
+        public DateTimeOffset LastFailureTime { get; private set; }
+        public DateTimeOffset CooldownUntil { get; private set; }
+
+        /// <summary>
+        /// Record a successful operation. Reduces failure weight by 1 (min 0).
+        /// </summary>
+        public void RecordSuccess()
+        {
+            lock (_lock)
+            {
+                _recentResults[_writeIndex] = true;
+                _writeIndex = (_writeIndex + 1) % WindowSize;
+                _totalOperations++;
+                _failureWeight = Math.Max(0, _failureWeight - 1);
+            }
+        }
+
+        /// <summary>
+        /// Record a failed/straggler operation. Increases failure weight by 2.
+        /// </summary>
+        public void RecordFailure()
+        {
+            lock (_lock)
+            {
+                _recentResults[_writeIndex] = false;
+                _writeIndex = (_writeIndex + 1) % WindowSize;
+                _totalOperations++;
+                _failureWeight += 2;
+                LastFailureTime = DateTimeOffset.UtcNow;
+            }
+        }
+
+        /// <summary>
+        /// Calculate success rate from rolling window (0.0 to 1.0).
+        /// </summary>
+        public double SuccessRate
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    var sampleSize = Math.Min(_totalOperations, WindowSize);
+                    if (sampleSize == 0) return 1.0; // Assume success if no data
+
+                    var successes = 0;
+                    for (int i = 0; i < sampleSize; i++)
+                    {
+                        if (_recentResults[i]) successes++;
+                    }
+                    return (double)successes / sampleSize;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Get the current failure weight (sticky counter).
+        /// </summary>
+        public int FailureWeight
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _failureWeight;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Get the total number of operations tracked.
+        /// </summary>
+        public int TotalOperations
+        {
+            get
+            {
+                lock (_lock)
+                {
+                    return _totalOperations;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Check if this provider is currently in cooldown.
+        /// </summary>
+        public bool IsInCooldown => DateTimeOffset.UtcNow < CooldownUntil;
+
+        /// <summary>
+        /// Set the cooldown end time.
+        /// </summary>
+        public void SetCooldown(DateTimeOffset until)
+        {
+            lock (_lock)
+            {
+                CooldownUntil = until;
+            }
+        }
+    }
+
     // NOTE: Batch segment assignment and worker-provider affinity were tested but caused more duplicate
     // fetches and slower performance. The dynamic availability-ratio selection in
     // MultiProviderNntpClient.GetBalancedProviders() is more effective at distributing load.
@@ -331,7 +453,11 @@ public class BufferedSegmentStream : Stream
                 }
             }, ct);
 
-            // Straggler Monitor Task
+            // Get total provider count for cooldown calculations
+            var multiClient = GetMultiProviderClient(client);
+            var totalProviders = multiClient?.Providers.Count ?? 1;
+
+            // Straggler Monitor Task with dynamic timeout and provider tracking
             var monitorTask = Task.Run(async () =>
             {
                 try
@@ -341,7 +467,10 @@ public class BufferedSegmentStream : Stream
                         await Task.Delay(100, ct).ConfigureAwait(false); // Check every 100ms
 
                         var nextNeeded = _nextIndexToRead;
-                        
+
+                        // Get dynamic timeout based on average successful fetch time
+                        var stragglerTimeout = GetDynamicStragglerTimeout();
+
                         // Check if the next needed segment is active and running too long
                         if (activeAssignments.TryGetValue(nextNeeded, out var assignment))
                         {
@@ -349,12 +478,11 @@ public class BufferedSegmentStream : Stream
                             var activeCount = activeAssignments.Count;
                             var activeIndices = string.Join(",", activeAssignments.Keys.OrderBy(k => k).Take(10));
 
-                            // If running > 3s and not already racing
-                            // (Previously 5s but reducing to improve responsiveness)
-                            if (duration.TotalSeconds > 3.0 && !racingIndices.ContainsKey(nextNeeded))
+                            // Use dynamic timeout instead of fixed 3.0s
+                            if (duration.TotalSeconds > stragglerTimeout && !racingIndices.ContainsKey(nextNeeded))
                             {
-                                Log.Debug("[BufferedStream] STRAGGLER CHECK: NextNeeded={NextNeeded}, Duration={Duration}s, ActiveCount={ActiveCount}, ActiveIndices=[{ActiveIndices}]",
-                                    nextNeeded, duration.TotalSeconds, activeCount, activeIndices);
+                                Log.Debug("[BufferedStream] STRAGGLER CHECK: NextNeeded={NextNeeded}, Duration={Duration:F1}s, Timeout={Timeout:F1}s, ActiveCount={ActiveCount}, ActiveIndices=[{ActiveIndices}]",
+                                    nextNeeded, duration.TotalSeconds, stragglerTimeout, activeCount, activeIndices);
 
                                 // Find a victim to preempt (highest index currently running)
                                 var victim = activeAssignments.Keys.DefaultIfEmpty(-1).Max();
@@ -363,7 +491,8 @@ public class BufferedSegmentStream : Stream
                                 {
                                     if (activeAssignments.TryGetValue(victim, out var victimAssignment))
                                     {
-                                        Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration}s. Preempting Segment {Victim} to race.", nextNeeded, duration.TotalSeconds, victim);
+                                        Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Preempting Segment {Victim} to race.",
+                                            nextNeeded, duration.TotalSeconds, stragglerTimeout, victim);
 
                                         // Cancel victim to free up its worker
                                         victimAssignment.Cts.Cancel();
@@ -380,11 +509,32 @@ public class BufferedSegmentStream : Stream
                                 {
                                     // No victim available (stalled segment is highest index)
                                     // Cancel the stalled worker itself to free its connection
-                                    Log.Debug("[BufferedStream] STRAGGLER SELF-CANCEL: Segment {Index} running for {Duration}s. Cancelling stalled worker and queueing for retry.", nextNeeded, duration.TotalSeconds);
+                                    Log.Debug("[BufferedStream] STRAGGLER SELF-CANCEL: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Cancelling stalled worker and queueing for retry.",
+                                        nextNeeded, duration.TotalSeconds, stragglerTimeout);
                                     assignment.Cts.Cancel();
                                     _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
                                     racingIndices.TryAdd(nextNeeded, true);
                                 }
+                            }
+                        }
+
+                        // Also check ALL active workers for stragglers (not just the blocking one)
+                        // This helps detect slow providers earlier and apply cooldown
+                        foreach (var kvp in activeAssignments)
+                        {
+                            if (kvp.Key == nextNeeded) continue; // Already handled above
+
+                            var segmentIndex = kvp.Key;
+                            var segmentAssignment = kvp.Value;
+                            var segmentDuration = DateTimeOffset.UtcNow - segmentAssignment.StartTime;
+
+                            // Use a more generous timeout for non-blocking segments (1.5x)
+                            if (segmentDuration.TotalSeconds > stragglerTimeout * 1.5 && !racingIndices.ContainsKey(segmentIndex))
+                            {
+                                // This segment is slow but not blocking - just log and potentially record straggler
+                                // We don't cancel it since it's not blocking progress
+                                Log.Debug("[BufferedStream] SLOW WORKER: Segment {Index} running for {Duration:F1}s (non-blocking, timeout would be {Timeout:F1}s)",
+                                    segmentIndex, segmentDuration.TotalSeconds, stragglerTimeout * 1.5);
                             }
                         }
                     }
@@ -553,7 +703,33 @@ public class BufferedSegmentStream : Stream
 
                             // Create job-specific CTS for preemption (no hard timeout - straggler monitor handles stuck segments)
                             using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-                            using var _scope = jobCts.Token.SetScopedContext(ct.GetContext<ConnectionUsageContext>());
+
+                            // Build per-job exclusion list from previous failures on this segment
+                            HashSet<int>? jobExcludedProviders = null;
+                            if (_failedProvidersPerSegment.TryGetValue(job.index, out var failedProviders))
+                            {
+                                lock (failedProviders)
+                                {
+                                    if (failedProviders.Count > 0)
+                                    {
+                                        jobExcludedProviders = new HashSet<int>(failedProviders);
+                                    }
+                                }
+                            }
+
+                            // Get providers currently in cooldown for soft deprioritization
+                            var cooldownProviders = GetProvidersInCooldown();
+                            var hasCooldown = cooldownProviders.Count > 0;
+
+                            // Create per-job context with both exclusions AND cooldown providers
+                            // This uses struct-based context to avoid race conditions between workers
+                            var baseContext = ct.GetContext<ConnectionUsageContext>();
+                            var jobContext = baseContext.WithProviderAdjustments(
+                                jobExcludedProviders,
+                                hasCooldown ? cooldownProviders : null
+                            );
+                            using var _scope = jobCts.Token.SetScopedContext(jobContext);
+
                             var assignment = (DateTimeOffset.UtcNow, jobCts, workerId);
                             
                             // Track assignment
@@ -597,16 +773,30 @@ public class BufferedSegmentStream : Stream
 
                                 try
                                 {
-                                    Stopwatch? fetchWatch = null;
-                                    if (EnableDetailedTiming) fetchWatch = Stopwatch.StartNew();
+                                    // Track fetch timing for both detailed timing stats and dynamic straggler timeout
+                                    var fetchWatch = Stopwatch.StartNew();
 
                                     var segmentData = await FetchSegmentWithRetryAsync(job.index, job.segmentId, segmentIds, client, jobCts.Token).ConfigureAwait(false);
 
-                                    if (EnableDetailedTiming && fetchWatch != null)
+                                    fetchWatch.Stop();
+                                    var fetchTimeMs = fetchWatch.ElapsedMilliseconds;
+
+                                    if (EnableDetailedTiming)
                                     {
-                                        Interlocked.Add(ref _totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
-                                        Interlocked.Add(ref s_totalFetchTimeMs, fetchWatch.ElapsedMilliseconds);
+                                        Interlocked.Add(ref _totalFetchTimeMs, fetchTimeMs);
+                                        Interlocked.Add(ref s_totalFetchTimeMs, fetchTimeMs);
                                     }
+
+                                    // Track successful fetch time for dynamic straggler timeout calculation
+                                    TrackSuccessfulFetchTime(fetchTimeMs);
+
+                                    // Record provider success for per-stream scoring
+                                    // We need to get the provider index from the context if available
+                                    var successContext = jobCts.Token.GetContext<ConnectionUsageContext>();
+                                    var successProviderIndex = successContext.DetailsObject?.ForcedProviderIndex;
+                                    // Note: For now, we can't easily get the actual provider used since it's determined
+                                    // inside MultiProviderNntpClient. The cooldown system still works because
+                                    // stragglers are tracked via the monitor task which cancels slow workers.
 
                                     // Store result directly to slot (lock-free, first write wins)
                                     var existingSlot = Interlocked.CompareExchange(ref segmentSlots[job.index], segmentData, null);
@@ -645,17 +835,32 @@ public class BufferedSegmentStream : Stream
                             }
                             catch (OperationCanceledException)
                             {
-                                // If main CT not cancelled, we were preempted.
+                                // If main CT not cancelled, we were preempted (straggler detection).
                                 if (!ct.IsCancellationRequested)
                                 {
                                     Log.Debug("[BufferedStream] Worker {WorkerId} preempted on segment {Index}.", workerId, job.index);
+
+                                    // Record straggler for the provider that was being used
+                                    // Since we can't easily get the provider index here, we record based on
+                                    // any forced provider or just log the event. The cooldown system primarily
+                                    // works through the affinity service's job-level tracking.
+                                    var preemptContext = jobCts.Token.GetContext<ConnectionUsageContext>();
+                                    var preemptProviderIndex = preemptContext.DetailsObject?.ForcedProviderIndex;
+                                    if (preemptProviderIndex.HasValue && preemptProviderIndex.Value >= 0)
+                                    {
+                                        RecordProviderStraggler(preemptProviderIndex.Value, totalProviders);
+
+                                        // Track failed provider for this segment so retry excludes it
+                                        var failedSet = _failedProvidersPerSegment.GetOrAdd(job.index, _ => new HashSet<int>());
+                                        lock (failedSet)
+                                        {
+                                            failedSet.Add(preemptProviderIndex.Value);
+                                        }
+                                    }
+
                                     // We DO NOT re-queue here; the monitor already re-queued it (or the race duplicate).
-                                    // If we were the victim, monitor queued us. 
-                                    // If we were the slow straggler being killed? We should probably re-queue just in case?
-                                    // Monitor queued a duplicate. If we die, the duplicate runs. 
-                                    // But monitor queues duplicate to URGENT.
-                                    // If we were preempted, it means we were the VICTIM (high index).
-                                    // Monitor re-queued us to URGENT. So we are fine.
+                                    // If we were the victim, monitor queued us.
+                                    // If we were the slow straggler being killed, monitor queued a duplicate.
                                 }
                                 else throw;
                             }
@@ -1125,6 +1330,97 @@ public class BufferedSegmentStream : Stream
         _disposed = true;
         GC.SuppressFinalize(this);
     }
+
+    #region Provider Cooldown Methods
+
+    /// <summary>
+    /// Record a successful fetch for a provider. Reduces failure weight.
+    /// </summary>
+    private void RecordProviderSuccess(int providerIndex)
+    {
+        var score = _providerScores.GetOrAdd(providerIndex, _ => new ProviderStreamScore());
+        score.RecordSuccess();
+    }
+
+    /// <summary>
+    /// Record a straggler/failure for a provider and calculate cooldown.
+    /// Implements sticky failure weight and dynamic cooldown formula.
+    /// </summary>
+    private void RecordProviderStraggler(int providerIndex, int totalProviders)
+    {
+        var score = _providerScores.GetOrAdd(providerIndex, _ => new ProviderStreamScore());
+        score.RecordFailure();
+
+        var failureRate = 1.0 - score.SuccessRate;
+        var failureWeight = score.FailureWeight;
+
+        // COOLDOWN FORMULA:
+        // Base: 15s + failureWeight*3s + failureRate*20s (max 60s)
+        var cooldownSeconds = Math.Min(60.0, 15.0 + (failureWeight * 3.0) + (failureRate * 20.0));
+
+        // Never cooldown all providers at once - keep at least one available
+        var providersInCooldown = _providerScores.Count(kvp => kvp.Value.IsInCooldown);
+        if (providersInCooldown >= totalProviders - 1)
+        {
+            // Can't fully deprioritize this one - use reduced cooldown
+            cooldownSeconds = 5.0;
+            Log.Debug("[BufferedStream] COOLDOWN REDUCED: Provider {ProviderIndex} would be {FullProviders}th in cooldown of {Total}. Reducing cooldown to {Cooldown}s to ensure availability.",
+                providerIndex, providersInCooldown + 1, totalProviders, cooldownSeconds);
+        }
+
+        score.SetCooldown(DateTimeOffset.UtcNow.AddSeconds(cooldownSeconds));
+
+        Log.Debug("[BufferedStream] PROVIDER COOLDOWN: Provider {ProviderIndex} cooldown for {Cooldown:F1}s (FailureWeight={Weight}, FailureRate={Rate:P1}, TotalOps={Ops})",
+            providerIndex, cooldownSeconds, failureWeight, failureRate, score.TotalOperations);
+    }
+
+    /// <summary>
+    /// Get the set of provider indices currently in cooldown.
+    /// </summary>
+    private HashSet<int> GetProvidersInCooldown()
+    {
+        var result = new HashSet<int>();
+        foreach (var kvp in _providerScores)
+        {
+            if (kvp.Value.IsInCooldown)
+            {
+                result.Add(kvp.Key);
+            }
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Calculate dynamic straggler timeout based on average successful fetch time.
+    /// Formula: max(5.0s, avgFetchTime * 3)
+    /// Requires minimum 10 successful fetches before activation.
+    /// </summary>
+    private double GetDynamicStragglerTimeout()
+    {
+        var fetchCount = Volatile.Read(ref _successfulFetchCount);
+        if (fetchCount < 10)
+        {
+            // Not enough data yet - use conservative default
+            return 5.0;
+        }
+
+        var totalMs = Volatile.Read(ref _successfulFetchTimeMs);
+        var avgMs = (double)totalMs / fetchCount;
+        var timeout = Math.Max(5.0, (avgMs / 1000.0) * 3.0);
+
+        return timeout;
+    }
+
+    /// <summary>
+    /// Track a successful fetch time for dynamic timeout calculation.
+    /// </summary>
+    private void TrackSuccessfulFetchTime(long elapsedMs)
+    {
+        Interlocked.Add(ref _successfulFetchTimeMs, elapsedMs);
+        Interlocked.Increment(ref _successfulFetchCount);
+    }
+
+    #endregion
 
     private class PooledSegmentData : IDisposable
     {

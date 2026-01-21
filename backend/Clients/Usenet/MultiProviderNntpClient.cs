@@ -21,6 +21,11 @@ public class MultiProviderNntpClient : INntpClient
     private readonly NzbProviderAffinityService? _affinityService;
     private readonly ProviderUsageTrackingService? _trackingService;
 
+    /// <summary>
+    /// Exposes the affinity service for external access (e.g., BufferedSegmentStream cooldown logic).
+    /// </summary>
+    public NzbProviderAffinityService? AffinityService => _affinityService;
+
     public MultiProviderNntpClient(
         List<MultiConnectionNntpClient> providers,
         ProviderErrorService? providerErrorService = null,
@@ -402,10 +407,31 @@ public class MultiProviderNntpClient : INntpClient
             return new[] { Providers[forcedIndex.Value] };
         }
 
+        // Get excluded and deprioritized provider indices from context
+        var excludedIndices = context.ExcludedProviderIndices;
+        var deprioritizedIndices = context.DeprioritizedProviderIndices;
+        var hasExcluded = excludedIndices != null && excludedIndices.Count > 0;
+        var hasDeprioritized = deprioritizedIndices != null && deprioritizedIndices.Count > 0;
+
+        // Get low success rate providers from affinity service (global job-level tracking)
+        HashSet<int>? lowSuccessRateIndices = null;
+        if (_affinityService != null)
+        {
+            var affinityKey = context.AffinityKey;
+            if (!string.IsNullOrEmpty(affinityKey))
+            {
+                lowSuccessRateIndices = _affinityService.GetLowSuccessRateProviders(affinityKey);
+            }
+        }
+        var hasLowSuccessRate = lowSuccessRateIndices != null && lowSuccessRateIndices.Count > 0;
+
         // Balanced strategy for BufferedStream with NZB-level affinity support:
-        // 1. Prioritize affinity provider (learned performance)
+        // 1. Prioritize affinity provider (learned performance) - unless excluded/deprioritized
         // 2. Then Pooled providers sorted by available connections and latency
-        // 3. Fallback to Backups
+        // 3. Deprioritized providers (in cooldown) - last resort before backups
+        // 4. Low success rate providers (< 30%) - last resort
+        // 5. Fallback to Backups
+        // 6. Excluded providers are NEVER included
 
         // Check for NZB-level provider affinity
         MultiConnectionNntpClient? affinityProvider = null;
@@ -420,13 +446,25 @@ public class MultiProviderNntpClient : INntpClient
                 var preferredIndex = _affinityService.GetPreferredProvider(affinityKey, Providers.Count, logDecision);
                 if (preferredIndex.HasValue && preferredIndex.Value >= 0 && preferredIndex.Value < Providers.Count)
                 {
-                    affinityProvider = Providers[preferredIndex.Value];
+                    // Skip affinity provider if it's excluded, deprioritized, or has low success rate
+                    var skipAffinity = (hasExcluded && excludedIndices!.Contains(preferredIndex.Value)) ||
+                                       (hasDeprioritized && deprioritizedIndices!.Contains(preferredIndex.Value)) ||
+                                       (hasLowSuccessRate && lowSuccessRateIndices!.Contains(preferredIndex.Value));
+
+                    if (!skipAffinity)
+                    {
+                        affinityProvider = Providers[preferredIndex.Value];
+                    }
                 }
             }
         }
 
+        // Filter and categorize providers
         var pooled = Providers
             .Where(x => x.ProviderType == ProviderType.Pooled)
+            .Where(x => !hasExcluded || !excludedIndices!.Contains(x.ProviderIndex))
+            .Where(x => !hasDeprioritized || !deprioritizedIndices!.Contains(x.ProviderIndex))
+            .Where(x => !hasLowSuccessRate || !lowSuccessRateIndices!.Contains(x.ProviderIndex))
             .Select(x => new {
                 Provider = x,
                 // Calculate availability ratio (0.0 to 1.0) for better load distribution
@@ -443,10 +481,39 @@ public class MultiProviderNntpClient : INntpClient
 
         var others = Providers
             .Where(x => x.ProviderType != ProviderType.Pooled && x.ProviderType != ProviderType.Disabled)
+            .Where(x => !hasExcluded || !excludedIndices!.Contains(x.ProviderIndex))
+            .Where(x => !hasDeprioritized || !deprioritizedIndices!.Contains(x.ProviderIndex))
+            .Where(x => !hasLowSuccessRate || !lowSuccessRateIndices!.Contains(x.ProviderIndex))
             .OrderBy(x => x.ProviderType) // Backup vs BackupOnly
             .ThenByDescending(x => x.IdleConnections);
 
-        return pooled.Concat(others)
+        // Deprioritized providers (in per-stream cooldown) - used as last resort
+        var deprioritized = hasDeprioritized
+            ? Providers
+                .Where(x => x.ProviderType != ProviderType.Disabled)
+                .Where(x => !hasExcluded || !excludedIndices!.Contains(x.ProviderIndex))
+                .Where(x => deprioritizedIndices!.Contains(x.ProviderIndex))
+                .Where(x => !hasLowSuccessRate || !lowSuccessRateIndices!.Contains(x.ProviderIndex))
+                .OrderByDescending(x => x.AvailableConnections)
+            : Enumerable.Empty<MultiConnectionNntpClient>();
+
+        // Low success rate providers (global job-level) - absolute last resort before failure
+        var lowSuccessRate = hasLowSuccessRate
+            ? Providers
+                .Where(x => x.ProviderType != ProviderType.Disabled)
+                .Where(x => !hasExcluded || !excludedIndices!.Contains(x.ProviderIndex))
+                .Where(x => lowSuccessRateIndices!.Contains(x.ProviderIndex))
+                .OrderByDescending(x => x.AvailableConnections)
+            : Enumerable.Empty<MultiConnectionNntpClient>();
+
+        // Provider ordering:
+        // 1. Affinity provider (if available and not excluded/deprioritized)
+        // 2. Pooled providers (sorted by availability)
+        // 3. Other providers (backups)
+        // 4. Deprioritized providers (per-stream cooldown)
+        // 5. Low success rate providers (global job-level)
+        // Excluded providers are NEVER included
+        return pooled.Concat(others).Concat(deprioritized).Concat(lowSuccessRate)
             .Prepend(affinityProvider)  // NZB-level affinity takes priority
             .Where(x => x is not null)
             .Select(x => x!)

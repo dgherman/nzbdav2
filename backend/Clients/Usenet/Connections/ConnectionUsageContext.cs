@@ -41,7 +41,7 @@ public class ConnectionUsageDetails
 public readonly struct ConnectionUsageContext
 {
     public ConnectionUsageType UsageType { get; }
-    
+
     private readonly ConnectionUsageDetails? _detailsObj;
     private readonly string? _detailsStr;
 
@@ -51,21 +51,64 @@ public readonly struct ConnectionUsageContext
     public bool IsBackup => _detailsObj?.IsBackup ?? false;
     public bool IsSecondary => _detailsObj?.IsSecondary ?? false;
     public bool IsImported => _detailsObj?.IsImported ?? false;
-    
+
     public ConnectionUsageDetails? DetailsObject => _detailsObj;
+
+    /// <summary>
+    /// Provider indices to completely exclude from selection (per-operation).
+    /// These providers will not be used at all for this operation.
+    /// </summary>
+    public HashSet<int>? ExcludedProviderIndices { get; init; }
+
+    /// <summary>
+    /// Provider indices to deprioritize (use as last resort).
+    /// These providers are in cooldown due to recent failures/slowness.
+    /// They will still be used if no other providers are available.
+    /// </summary>
+    public HashSet<int>? DeprioritizedProviderIndices { get; init; }
 
     public ConnectionUsageContext(ConnectionUsageType usageType, string? details = null)
     {
         UsageType = usageType;
         _detailsStr = details;
         _detailsObj = null;
+        ExcludedProviderIndices = null;
+        DeprioritizedProviderIndices = null;
     }
-    
+
     public ConnectionUsageContext(ConnectionUsageType usageType, ConnectionUsageDetails details)
     {
         UsageType = usageType;
         _detailsObj = details;
         _detailsStr = null;
+        ExcludedProviderIndices = null;
+        DeprioritizedProviderIndices = null;
+    }
+
+    /// <summary>
+    /// Creates a copy of this context with the specified excluded providers.
+    /// Used for per-segment provider exclusion after failures.
+    /// </summary>
+    public ConnectionUsageContext WithExcludedProviders(HashSet<int>? excluded)
+    {
+        return new ConnectionUsageContext(UsageType, _detailsObj!)
+        {
+            ExcludedProviderIndices = excluded,
+            DeprioritizedProviderIndices = this.DeprioritizedProviderIndices
+        };
+    }
+
+    /// <summary>
+    /// Creates a copy of this context with both excluded and deprioritized providers.
+    /// Used for per-job context with cooldown information.
+    /// </summary>
+    public ConnectionUsageContext WithProviderAdjustments(HashSet<int>? excluded, HashSet<int>? deprioritized)
+    {
+        return new ConnectionUsageContext(UsageType, _detailsObj!)
+        {
+            ExcludedProviderIndices = excluded,
+            DeprioritizedProviderIndices = deprioritized
+        };
     }
 
     public override string ToString()
