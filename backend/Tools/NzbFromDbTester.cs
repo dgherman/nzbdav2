@@ -149,7 +149,7 @@ public class NzbFromDbTester
             Console.WriteLine($"  Connections: {connections}");
             Console.WriteLine("───────────────────────────────────────────────────────────────");
             Console.WriteLine("  Providers:");
-            foreach (var (index, host, type) in providers)
+            foreach (var (index, host, type, _) in providers)
             {
                 var marker = forcedProvider.HasValue && forcedProvider.Value == index ? " ← FORCED" : "";
                 var typeLabel = type == "Pooled" ? "" : $" [{type}]";

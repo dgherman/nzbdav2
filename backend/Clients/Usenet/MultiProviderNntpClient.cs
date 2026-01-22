@@ -204,6 +204,9 @@ public class MultiProviderNntpClient : INntpClient
             var ctx = cancellationToken.GetContext<ConnectionUsageContext>();
             if (ctx.DetailsObject != null)
             {
+                // Track which provider we're currently using (for straggler detection)
+                ctx.DetailsObject.CurrentProviderIndex = provider.ProviderIndex;
+
                 if (provider.ProviderType != ProviderType.Pooled)
                 {
                     ctx.DetailsObject.IsBackup = true;
@@ -366,6 +369,18 @@ public class MultiProviderNntpClient : INntpClient
             return new[] { Providers[forcedIndex.Value] };
         }
 
+        // Get excluded providers from both struct (per-job) and DetailsObject (per-segment straggler retry)
+        var structExcluded = context.ExcludedProviderIndices;
+        var detailsExcluded = context.DetailsObject?.ExcludedProviderIndices;
+        HashSet<int>? excludedIndices = null;
+        if (structExcluded != null || detailsExcluded != null)
+        {
+            excludedIndices = new HashSet<int>();
+            if (structExcluded != null) excludedIndices.UnionWith(structExcluded);
+            if (detailsExcluded != null) excludedIndices.UnionWith(detailsExcluded);
+        }
+        var hasExclusions = excludedIndices != null && excludedIndices.Count > 0;
+
         // Check for NZB-level provider affinity with epsilon-greedy exploration
         MultiConnectionNntpClient? affinityProvider = null;
         if (_affinityService != null)
@@ -379,18 +394,39 @@ public class MultiProviderNntpClient : INntpClient
                 var preferredIndex = _affinityService.GetPreferredProvider(affinityKey, Providers.Count, logDecision);
                 if (preferredIndex.HasValue && preferredIndex.Value >= 0 && preferredIndex.Value < Providers.Count)
                 {
-                    affinityProvider = Providers[preferredIndex.Value];
+                    // Skip affinity provider if it's in the excluded list
+                    if (!hasExclusions || !excludedIndices!.Contains(preferredIndex.Value))
+                    {
+                        affinityProvider = Providers[preferredIndex.Value];
+                    }
                 }
             }
         }
 
-        return Providers
+        // Skip preferred provider if it's excluded
+        if (hasExclusions && preferredProvider != null && excludedIndices!.Contains(preferredProvider.ProviderIndex))
+        {
+            preferredProvider = null;
+        }
+
+        // Non-excluded providers first
+        var nonExcluded = Providers
             .Where(x => x.ProviderType != ProviderType.Disabled)
+            .Where(x => !hasExclusions || !excludedIndices!.Contains(x.ProviderIndex))
             .OrderBy(x => x.ProviderType)
             .ThenByDescending(x => x.IdleConnections)
-            .ThenByDescending(x => x.RemainingSemaphoreSlots)
-            .Prepend(preferredProvider)     // Stream-level stickiness
-            .Prepend(affinityProvider)      // NZB-level affinity (HIGHEST priority - overrides stream stickiness)
+            .ThenByDescending(x => x.RemainingSemaphoreSlots);
+
+        // Excluded providers as last resort
+        var excluded = hasExclusions
+            ? Providers
+                .Where(x => x.ProviderType != ProviderType.Disabled && excludedIndices!.Contains(x.ProviderIndex))
+                .OrderBy(x => x.ProviderType)
+            : Enumerable.Empty<MultiConnectionNntpClient>();
+
+        return nonExcluded.Concat(excluded)
+            .Prepend(preferredProvider)     // Stream-level stickiness (if not excluded)
+            .Prepend(affinityProvider)      // NZB-level affinity (HIGHEST priority - if not excluded)
             .Where(x => x is not null)
             .Select(x => x!)
             .Distinct();
@@ -407,11 +443,26 @@ public class MultiProviderNntpClient : INntpClient
             return new[] { Providers[forcedIndex.Value] };
         }
 
-        // Get excluded and deprioritized provider indices from context
-        var excludedIndices = context.ExcludedProviderIndices;
-        var deprioritizedIndices = context.DeprioritizedProviderIndices;
+        // Get excluded providers from both struct (per-job) and DetailsObject (per-segment straggler retry)
+        var structExcluded = context.ExcludedProviderIndices;
+        var detailsExcluded = context.DetailsObject?.ExcludedProviderIndices;
+        HashSet<int>? excludedIndices = null;
+        if (structExcluded != null || detailsExcluded != null)
+        {
+            excludedIndices = new HashSet<int>();
+            if (structExcluded != null) excludedIndices.UnionWith(structExcluded);
+            if (detailsExcluded != null) excludedIndices.UnionWith(detailsExcluded);
+        }
         var hasExcluded = excludedIndices != null && excludedIndices.Count > 0;
+
+        var deprioritizedIndices = context.DeprioritizedProviderIndices;
         var hasDeprioritized = deprioritizedIndices != null && deprioritizedIndices.Count > 0;
+
+        if (hasExcluded)
+        {
+            Log.Debug("[MultiProvider] Excluding {Count} provider(s) from selection: [{Indices}]",
+                excludedIndices!.Count, string.Join(", ", excludedIndices));
+        }
 
         // Get low success rate providers from affinity service (global job-level tracking)
         HashSet<int>? lowSuccessRateIndices = null;

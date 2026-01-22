@@ -1,12 +1,15 @@
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Database;
+using NzbWebDAV.Services;
 
 namespace NzbWebDAV.Api.Controllers.ResetProviderStats;
 
 [ApiController]
 [Route("api/reset-provider-stats")]
-public class ResetProviderStatsController(DavDatabaseClient dbClient) : BaseApiController
+public class ResetProviderStatsController(
+    DavDatabaseClient dbClient,
+    NzbProviderAffinityService affinityService) : BaseApiController
 {
     protected override async Task<IActionResult> HandleRequest()
     {
@@ -14,22 +17,28 @@ public class ResetProviderStatsController(DavDatabaseClient dbClient) : BaseApiC
 
         if (string.IsNullOrEmpty(jobName))
         {
-            // Reset all provider stats
+            // Reset all provider stats in database
             await dbClient.Ctx.NzbProviderStats
                 .ExecuteDeleteAsync()
                 .ConfigureAwait(false);
 
-            return Ok(new { message = "All provider stats have been reset", deletedCount = -1 });
+            // Also clear the in-memory cache
+            affinityService.ClearAllStats();
+
+            return Ok(new { message = "All provider stats have been reset (database + cache)", deletedCount = -1 });
         }
         else
         {
-            // Reset stats for specific job
+            // Reset stats for specific job in database
             var deletedCount = await dbClient.Ctx.NzbProviderStats
                 .Where(x => x.JobName == jobName)
                 .ExecuteDeleteAsync()
                 .ConfigureAwait(false);
 
-            return Ok(new { message = $"Provider stats reset for job: {jobName}", deletedCount });
+            // Also clear the in-memory cache for this job
+            affinityService.ClearJobStats(jobName);
+
+            return Ok(new { message = $"Provider stats reset for job: {jobName} (database + cache)", deletedCount });
         }
     }
 }

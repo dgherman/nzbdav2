@@ -562,17 +562,17 @@ public class UsenetStreamingClient
     }
 
     /// <summary>
-    /// Gets information about all configured providers (index, host, type).
-    /// Used for displaying provider details in testing tools.
+    /// Gets information about all configured providers (index, host, type, maxConnections).
+    /// Used for displaying provider details in testing tools and benchmarks.
     /// </summary>
-    public IReadOnlyList<(int Index, string Host, string Type)> GetProviderInfo()
+    public IReadOnlyList<(int Index, string Host, string Type, int MaxConnections)> GetProviderInfo()
     {
         if (_client.InnerClient is MultiProviderNntpClient multiProvider)
         {
             return multiProvider.Providers
-                .Select(p => (p.ProviderIndex, p.Host, p.ProviderType.ToString()))
+                .Select(p => (p.ProviderIndex, p.Host, p.ProviderType.ToString(), p.ConnectionPool.MaxConnections))
                 .ToList();
         }
-        return Array.Empty<(int, string, string)>();
+        return Array.Empty<(int, string, string, int)>();
     }
 }

@@ -42,6 +42,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<NzbProviderStats> NzbProviderStats { get; set; }
     public DbSet<AnalysisHistoryItem> AnalysisHistoryItems { get; set; }
     public DbSet<ProviderUsageEvent> ProviderUsageEvents => Set<ProviderUsageEvent>();
+    public DbSet<ProviderBenchmarkResult> ProviderBenchmarkResults { get; set; }
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
@@ -62,6 +63,25 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.Property(i => i.Result).IsRequired();
             e.HasIndex(i => i.CreatedAt);
             e.HasIndex(i => i.DavItemId);
+        });
+
+        // ProviderBenchmarkResult
+        b.Entity<ProviderBenchmarkResult>(e =>
+        {
+            e.ToTable("ProviderBenchmarkResults");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedOnAdd();
+            e.Property(i => i.CreatedAt)
+                .IsRequired()
+                .HasConversion(
+                    x => x.ToUnixTimeSeconds(),
+                    x => DateTimeOffset.FromUnixTimeSeconds(x)
+                );
+            e.Property(i => i.TestFileName).IsRequired();
+            e.Property(i => i.ProviderHost).IsRequired();
+            e.Property(i => i.ProviderType).IsRequired();
+            e.HasIndex(i => i.CreatedAt);
+            e.HasIndex(i => i.RunId);
         });
 
         // LocalLink

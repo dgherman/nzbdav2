@@ -184,6 +184,26 @@ public class NzbProviderAffinityService
     }
 
     /// <summary>
+    /// Clear all in-memory statistics (does not affect database).
+    /// Call this when stats are reset via the API to ensure consistency.
+    /// </summary>
+    public void ClearAllStats()
+    {
+        _stats.Clear();
+        Log.Information("[NzbProviderAffinity] Cleared all in-memory provider stats");
+    }
+
+    /// <summary>
+    /// Refresh benchmark speeds from database (after a benchmark completes).
+    /// Currently a no-op as benchmark speeds aren't yet used for provider selection.
+    /// </summary>
+    public Task RefreshBenchmarkSpeeds()
+    {
+        // TODO: Implement benchmark speed loading when benchmark-based provider selection is added
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
     /// Get providers with success rate below threshold for a specific job.
     /// Used for soft deprioritization - these providers are used as last resort.
     /// </summary>
