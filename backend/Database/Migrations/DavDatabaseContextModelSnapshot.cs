@@ -514,6 +514,66 @@ namespace NzbWebDAV.Database.Migrations
                     b.ToTable("NzbProviderStats", (string)null);
                 });
 
+            modelBuilder.Entity("NzbWebDAV.Database.Models.ProviderBenchmarkResult", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("BytesDownloaded")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("CreatedAt")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<double>("ElapsedSeconds")
+                        .HasColumnType("REAL");
+
+                    b.Property<string>("ErrorMessage")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsLoadBalanced")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProviderHost")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ProviderIndex")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ProviderType")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("RunId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("SpeedMbps")
+                        .HasColumnType("REAL");
+
+                    b.Property<bool>("Success")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TestFileName")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("TestFileSize")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("TestSizeMb")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("RunId");
+
+                    b.ToTable("ProviderBenchmarkResults", (string)null);
+                });
+
             modelBuilder.Entity("NzbWebDAV.Database.Models.ProviderUsageEvent", b =>
                 {
                     b.Property<Guid>("Id")
