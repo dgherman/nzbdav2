@@ -17,7 +17,18 @@ public class GetHealthCheckQueueController(DavDatabaseClient dbClient) : BaseApi
 
         if (request.ShowFailed)
         {
+            // Filter for corrupted items (IsCorrupted flag)
             query = (IOrderedQueryable<DavItem>)query.Where(x => x.IsCorrupted);
+        }
+
+        if (request.ShowUnhealthy)
+        {
+            // Filter for items that have had an unhealthy health check result
+            var unhealthyItemIds = dbClient.Ctx.HealthCheckResults
+                .Where(r => r.Result == HealthCheckResult.HealthResult.Unhealthy)
+                .Select(r => r.DavItemId)
+                .Distinct();
+            query = (IOrderedQueryable<DavItem>)query.Where(x => unhealthyItemIds.Contains(x.Id));
         }
 
         if (!string.IsNullOrWhiteSpace(request.Search))

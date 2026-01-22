@@ -228,12 +228,23 @@ class BackendClient {
         return data.status;
     }
 
-    public async getHealthCheckQueue(pageSize?: number): Promise<HealthCheckQueueResponse> {
-        let url = process.env.BACKEND_URL + "/api/get-health-check-queue";
+    public async getHealthCheckQueue(
+        pageSize?: number,
+        page?: number,
+        search?: string,
+        showAll?: boolean,
+        showFailed?: boolean,
+        showUnhealthy?: boolean
+    ): Promise<HealthCheckQueueResponse> {
+        const params = new URLSearchParams();
+        if (pageSize !== undefined) params.set('pageSize', pageSize.toString());
+        if (page !== undefined) params.set('page', page.toString());
+        if (search) params.set('search', search);
+        if (showAll !== undefined) params.set('showAll', showAll.toString());
+        if (showFailed !== undefined) params.set('showFailed', showFailed.toString());
+        if (showUnhealthy !== undefined) params.set('showUnhealthy', showUnhealthy.toString());
 
-        if (pageSize !== undefined) {
-            url += `?pageSize=${pageSize}`;
-        }
+        const url = process.env.BACKEND_URL + "/api/get-health-check-queue?" + params.toString();
 
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await this.fetchWithTimeout(url, {

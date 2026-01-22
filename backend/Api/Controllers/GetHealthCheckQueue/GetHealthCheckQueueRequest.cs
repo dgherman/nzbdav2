@@ -10,6 +10,7 @@ public class GetHealthCheckQueueRequest
     public string? Search { get; init; }
     public bool ShowAll { get; init; } = false;
     public bool ShowFailed { get; init; } = false;
+    public bool ShowUnhealthy { get; init; } = false;
     public CancellationToken CancellationToken { get; init; }
 
     public GetHealthCheckQueueRequest(HttpContext context)
@@ -19,6 +20,7 @@ public class GetHealthCheckQueueRequest
         var searchParam = context.GetQueryParam("search");
         var showAllParam = context.GetQueryParam("showAll");
         var showFailedParam = context.GetQueryParam("showFailed");
+        var showUnhealthyParam = context.GetQueryParam("showUnhealthy");
         CancellationToken = context.RequestAborted;
 
         if (pageParam is not null)
@@ -50,6 +52,12 @@ public class GetHealthCheckQueueRequest
         {
             bool.TryParse(showFailedParam, out bool showFailed);
             ShowFailed = showFailed;
+        }
+
+        if (showUnhealthyParam is not null)
+        {
+            bool.TryParse(showUnhealthyParam, out bool showUnhealthy);
+            ShowUnhealthy = showUnhealthy;
         }
     }
 }

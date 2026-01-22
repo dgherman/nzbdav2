@@ -14,10 +14,12 @@ export type HealthTableProps = {
     search: string,
     showAll: boolean,
     showFailed: boolean,
+    showUnhealthy: boolean,
     onPageChange: (page: number) => void,
     onSearchChange: (search: string) => void,
     onShowAllChange: (showAll: boolean) => void,
     onShowFailedChange: (showFailed: boolean) => void,
+    onShowUnhealthyChange: (showUnhealthy: boolean) => void,
     onRunHealthCheck: (id: string) => void,
     onRunHeadHealthCheck?: (ids: string[]) => void,
     onRepair?: (ids: string[]) => void,
@@ -34,10 +36,12 @@ export function HealthTable({
     search,
     showAll,
     showFailed,
+    showUnhealthy,
     onPageChange,
     onSearchChange,
     onShowAllChange,
     onShowFailedChange,
+    onShowUnhealthyChange,
     onRunHealthCheck,
     onRunHeadHealthCheck,
     onRepair,
@@ -143,8 +147,15 @@ export function HealthTable({
                     )}
                     <Form.Check
                         type="switch"
+                        id="show-unhealthy-switch"
+                        label="Unhealthy Only"
+                        checked={showUnhealthy}
+                        onChange={(e) => onShowUnhealthyChange(e.target.checked)}
+                    />
+                    <Form.Check
+                        type="switch"
                         id="show-failed-switch"
-                        label="Failed Only"
+                        label="Corrupted Only"
                         checked={showFailed}
                         onChange={(e) => onShowFailedChange(e.target.checked)}
                     />
