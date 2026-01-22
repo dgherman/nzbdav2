@@ -3,8 +3,10 @@ import { type Dispatch, type SetStateAction, useState, useCallback, useEffect, u
 import { Button } from "react-bootstrap";
 import { receiveMessage } from "~/utils/websocket-util";
 import { useToast } from "~/context/ToastContext";
+import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
+import type { FileDetails } from "~/types/backend";
 
-const usenetConnectionsTopic = {'cxs': 'state'};
+const usenetConnectionsTopic = {'cxs': 'state', 'bp': 'state'};
 
 type UsenetSettingsProps = {
     config: Record<string, string>
@@ -37,6 +39,61 @@ type ConnectionCounts = {
 type UsenetProviderConfig = {
     Providers: ConnectionDetails[];
 };
+
+type BenchmarkResult = {
+    providerIndex: number;
+    providerHost: string;
+    providerType: string;
+    isLoadBalanced: boolean;
+    bytesDownloaded: number;
+    elapsedSeconds: number;
+    speedMbps: number;
+    success: boolean;
+    errorMessage?: string;
+}
+
+type BenchmarkResponse = {
+    status: boolean;
+    error?: string;
+    runId?: string;
+    createdAt?: string;
+    testFileName?: string;
+    testFileSize?: number;
+    testSizeMb?: number;
+    results: BenchmarkResult[];
+    isComplete?: boolean;
+    totalProviders?: number;
+    testFileId?: string;
+}
+
+type BenchmarkRunSummary = {
+    runId: string;
+    createdAt: string;
+    testFileName?: string;
+    testFileSize?: number;
+    testSizeMb?: number;
+    results: BenchmarkResult[];
+}
+
+type BenchmarkHistoryResponse = {
+    status: boolean;
+    error?: string;
+    runs: BenchmarkRunSummary[];
+}
+
+type ProviderInfoDto = {
+    index: number;
+    host: string;
+    type: string;
+    maxConnections: number;
+    isDisabled: boolean;
+}
+
+type ProviderListResponse = {
+    status: boolean;
+    error?: string;
+    providers: ProviderInfoDto[];
+}
 
 const PROVIDER_TYPE_LABELS: Record<ProviderType, string> = {
     [ProviderType.Disabled]: "Disabled",
@@ -74,6 +131,25 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     const [hideSamples, setHideSamples] = useState(config["usenet.hide-samples"] === "true");
     const [streamBufferSize, setStreamBufferSize] = useState(config["usenet.stream-buffer-size"] || "100");
     const [operationTimeout, setOperationTimeout] = useState(config["usenet.operation-timeout"] || "90");
+    const [isRunningBenchmark, setIsRunningBenchmark] = useState(false);
+    const [isSelectingFile, setIsSelectingFile] = useState(false);
+    const [benchmarkResults, setBenchmarkResults] = useState<BenchmarkResponse | null>(null);
+    const [benchmarkHistory, setBenchmarkHistory] = useState<BenchmarkRunSummary[]>([]);
+    const [isLoadingHistory, setIsLoadingHistory] = useState(false);
+    const [historyPage, setHistoryPage] = useState(0);
+    const [showCurrentRun, setShowCurrentRun] = useState(true);
+    const [benchmarkProviders, setBenchmarkProviders] = useState<ProviderInfoDto[]>([]);
+    const [selectedProviderIndices, setSelectedProviderIndices] = useState<Set<number>>(new Set());
+    const [includeLoadBalanced, setIncludeLoadBalanced] = useState(true);
+    const [currentBenchmarkRunId, setCurrentBenchmarkRunId] = useState<string | null>(null);
+    const [lastBenchmarkFileId, setLastBenchmarkFileId] = useState<string | null>(null);
+    const [lastBenchmarkFileName, setLastBenchmarkFileName] = useState<string | null>(null);
+    const [reuseSameFile, setReuseSameFile] = useState(false);
+
+    // File details modal state
+    const [showFileDetailsModal, setShowFileDetailsModal] = useState(false);
+    const [selectedFileDetails, setSelectedFileDetails] = useState<FileDetails | null>(null);
+    const [loadingFileDetails, setLoadingFileDetails] = useState(false);
 
     // handlers
     const handleStatsEnableChange = useCallback((checked: boolean) => {
@@ -161,13 +237,209 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
         }}));
     }, [setConnections]);
 
+    // Define fetchBenchmarkHistory BEFORE handleBenchmarkMessage since it's used as a dependency
+    const fetchBenchmarkHistory = useCallback(async () => {
+        setIsLoadingHistory(true);
+        try {
+            const response = await fetch('/api/provider-benchmark', { method: 'GET' });
+            const data: BenchmarkHistoryResponse = await response.json();
+            if (data.status && data.runs) {
+                setBenchmarkHistory(data.runs);
+            }
+        } catch (error) {
+            console.error("Failed to fetch benchmark history:", error);
+        } finally {
+            setIsLoadingHistory(false);
+        }
+    }, []);
+
+    const fetchBenchmarkProviders = useCallback(async () => {
+        try {
+            const response = await fetch('/api/provider-benchmark/providers', { method: 'GET' });
+            const data: ProviderListResponse = await response.json();
+            if (data.status && data.providers) {
+                setBenchmarkProviders(data.providers);
+                // By default, select all non-disabled providers
+                const activeIndices = new Set(
+                    data.providers
+                        .filter(p => !p.isDisabled)
+                        .map(p => p.index)
+                );
+                setSelectedProviderIndices(activeIndices);
+            }
+        } catch (error) {
+            console.error("Failed to fetch benchmark providers:", error);
+        }
+    }, []);
+
+    const handleBenchmarkMessage = useCallback((message: string) => {
+        try {
+            const data: BenchmarkResponse = JSON.parse(message);
+
+            // Only process messages for the current benchmark run
+            // This prevents stale "complete" messages from previous runs from triggering toasts
+            if (currentBenchmarkRunId && data.runId !== currentBenchmarkRunId) {
+                return;
+            }
+
+            if (data.status && data.results) {
+                setBenchmarkResults(data);
+                setShowCurrentRun(true);
+
+                // Check if benchmark is complete
+                if (data.isComplete) {
+                    setIsRunningBenchmark(false);
+                    setCurrentBenchmarkRunId(null);
+                    fetchBenchmarkHistory();
+                    addToast("Provider benchmark completed successfully.", "success", "Benchmark Complete");
+                }
+            } else if (data.isComplete && !data.status) {
+                // Benchmark completed with error
+                setIsRunningBenchmark(false);
+                setCurrentBenchmarkRunId(null);
+                addToast(data.error || "Benchmark failed", "danger", "Benchmark Error");
+            }
+        } catch (error) {
+            console.error("Failed to parse benchmark message:", error);
+        }
+    }, [fetchBenchmarkHistory, addToast, currentBenchmarkRunId]);
+
+    const handleToggleProvider = useCallback((index: number) => {
+        setSelectedProviderIndices(prev => {
+            const newSet = new Set(prev);
+            if (newSet.has(index)) {
+                newSet.delete(index);
+            } else {
+                newSet.add(index);
+            }
+            return newSet;
+        });
+    }, []);
+
+    const handleSelectAllProviders = useCallback(() => {
+        setSelectedProviderIndices(new Set(benchmarkProviders.map(p => p.index)));
+    }, [benchmarkProviders]);
+
+    const handleDeselectAllProviders = useCallback(() => {
+        setSelectedProviderIndices(new Set());
+    }, []);
+
+    const handleRunBenchmark = useCallback(async () => {
+        if (selectedProviderIndices.size === 0) {
+            addToast("Please select at least one provider to test.", "warning", "No Providers Selected");
+            return;
+        }
+
+        setIsSelectingFile(true);
+        setBenchmarkResults(null);
+
+        try {
+            const requestBody: {
+                providerIndices: number[];
+                includeLoadBalanced: boolean;
+                fileId?: string;
+            } = {
+                providerIndices: Array.from(selectedProviderIndices),
+                includeLoadBalanced: includeLoadBalanced && selectedProviderIndices.size > 1
+            };
+
+            // If user wants to reuse the same file and we have a file ID, include it
+            if (reuseSameFile && lastBenchmarkFileId) {
+                requestBody.fileId = lastBenchmarkFileId;
+            }
+
+            const response = await fetch('/api/provider-benchmark', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(requestBody)
+            });
+            const data: BenchmarkResponse = await response.json();
+
+            setIsSelectingFile(false);
+
+            if (data.status) {
+                // Store the file ID and name for potential reuse
+                if (data.testFileId) {
+                    setLastBenchmarkFileId(data.testFileId);
+                }
+                if (data.testFileName) {
+                    setLastBenchmarkFileName(data.testFileName);
+                }
+
+                // Track this run's ID so we only process WebSocket messages for it
+                if (data.runId) {
+                    setCurrentBenchmarkRunId(data.runId);
+                }
+
+                // Benchmark is now running
+                setIsRunningBenchmark(true);
+                addToast(`Benchmark started. Testing ${selectedProviderIndices.size} provider(s) with file: ${data.testFileName || 'unknown'}`, "info", "Benchmark Started");
+
+                // Set initial results (will be updated via WebSocket as providers complete)
+                setBenchmarkResults(data);
+                setShowCurrentRun(true);
+
+                // If already complete (shouldn't happen normally), handle it
+                if (data.isComplete) {
+                    setIsRunningBenchmark(false);
+                    setCurrentBenchmarkRunId(null);
+                    fetchBenchmarkHistory();
+                    addToast("Provider benchmark completed successfully.", "success", "Benchmark Complete");
+                }
+                // Otherwise, keep isRunningBenchmark=true - WebSocket will update when complete
+            } else {
+                // Immediate error (e.g., no test file found)
+                setIsRunningBenchmark(false);
+                addToast(data.error || "Benchmark failed", "danger", "Error");
+            }
+        } catch (error) {
+            setIsSelectingFile(false);
+            setIsRunningBenchmark(false);
+            addToast("Network error during benchmark: " + error, "danger", "Error");
+        }
+        // Note: Don't set isRunningBenchmark=false here - WebSocket handles completion
+    }, [addToast, fetchBenchmarkHistory, selectedProviderIndices, includeLoadBalanced, reuseSameFile, lastBenchmarkFileId]);
+
+    const handleFileClick = useCallback(async (fileId: string | undefined) => {
+        if (!fileId) return;
+
+        setShowFileDetailsModal(true);
+        setLoadingFileDetails(true);
+        setSelectedFileDetails(null);
+
+        try {
+            const response = await fetch(`/api/file-details/${fileId}`);
+            if (response.ok) {
+                const details = await response.json();
+                setSelectedFileDetails(details);
+            } else {
+                console.error('Failed to fetch file details:', await response.text());
+            }
+        } catch (error) {
+            console.error('Error fetching file details:', error);
+        } finally {
+            setLoadingFileDetails(false);
+        }
+    }, []);
+
+    const handleHideFileDetailsModal = useCallback(() => {
+        setShowFileDetailsModal(false);
+        setSelectedFileDetails(null);
+    }, []);
+
     // effects
     useEffect(() => {
         let ws: WebSocket;
         let disposed = false;
         function connect() {
             ws = new WebSocket(window.location.origin.replace(/^http/, 'ws'));
-            ws.onmessage = receiveMessage((_, message) => handleConnectionsMessage(message));
+            ws.onmessage = receiveMessage((topic, message) => {
+                if (topic === 'cxs') {
+                    handleConnectionsMessage(message);
+                } else if (topic === 'bp') {
+                    handleBenchmarkMessage(message);
+                }
+            });
             ws.onopen = () => ws.send(JSON.stringify(usenetConnectionsTopic));
             ws.onerror = () => { ws.close() };
             ws.onclose = onClose;
@@ -178,7 +450,15 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
             setConnections({});
         }
         return connect();
-    }, [setConnections, handleConnectionsMessage]);
+    }, [setConnections, handleConnectionsMessage, handleBenchmarkMessage]);
+
+    // Fetch benchmark history on mount when providers are configured
+    useEffect(() => {
+        if (providerConfig.Providers.length > 0) {
+            fetchBenchmarkHistory();
+            fetchBenchmarkProviders();
+        }
+    }, [providerConfig.Providers.length, fetchBenchmarkHistory, fetchBenchmarkProviders]);
 
     // view
     return (
@@ -470,11 +750,303 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                 )}
             </div>
 
+            {providerConfig.Providers.length > 0 && (
+                <div className={styles.section}>
+                    <div className={styles.sectionHeader}>
+                        <div>Provider Benchmark</div>
+                        <Button
+                            variant="primary"
+                            size="sm"
+                            onClick={handleRunBenchmark}
+                            disabled={isRunningBenchmark || isSelectingFile}
+                        >
+                            {isSelectingFile ? "Selecting File..." : isRunningBenchmark ? "Running..." : "Run Benchmark"}
+                        </Button>
+                    </div>
+                    <div style={{ fontSize: '0.85rem', color: 'var(--bs-secondary-color)', marginBottom: '12px' }}>
+                        Tests download speed by fetching 300MB from each selected provider individually.
+                        Picks a random file (1GB+) from your library. This will consume bandwidth.
+                    </div>
+
+                    {/* Provider Selection */}
+                    {benchmarkProviders.length > 0 && !isRunningBenchmark && !isSelectingFile && (
+                        <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: 'var(--bs-tertiary-bg)', borderRadius: '6px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                                <div style={{ fontWeight: 500, fontSize: '0.9rem' }}>Select Providers to Test</div>
+                                <div style={{ display: 'flex', gap: '8px' }}>
+                                    <Button variant="outline-secondary" size="sm" onClick={handleSelectAllProviders}>
+                                        Select All
+                                    </Button>
+                                    <Button variant="outline-secondary" size="sm" onClick={handleDeselectAllProviders}>
+                                        Deselect All
+                                    </Button>
+                                </div>
+                            </div>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                {benchmarkProviders.map((provider) => (
+                                    <label
+                                        key={provider.index}
+                                        style={{
+                                            display: 'flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            padding: '6px 10px',
+                                            backgroundColor: selectedProviderIndices.has(provider.index) ? 'var(--bs-primary-bg-subtle)' : 'var(--bs-body-bg)',
+                                            border: `1px solid ${selectedProviderIndices.has(provider.index) ? 'var(--bs-primary)' : 'var(--bs-border-color)'}`,
+                                            borderRadius: '4px',
+                                            cursor: 'pointer',
+                                            fontSize: '0.85rem',
+                                            opacity: provider.isDisabled ? 0.7 : 1
+                                        }}
+                                    >
+                                        <input
+                                            type="checkbox"
+                                            checked={selectedProviderIndices.has(provider.index)}
+                                            onChange={() => handleToggleProvider(provider.index)}
+                                            style={{ margin: 0 }}
+                                        />
+                                        <span>{provider.host}</span>
+                                        <span style={{ fontSize: '0.75rem', color: 'var(--bs-secondary-color)' }}>
+                                            ({provider.type})
+                                        </span>
+                                    </label>
+                                ))}
+                            </div>
+                            {selectedProviderIndices.size > 1 && (
+                                <div style={{ marginTop: '10px' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={includeLoadBalanced}
+                                            onChange={(e) => setIncludeLoadBalanced(e.target.checked)}
+                                        />
+                                        <span>Include load-balanced test (tests all selected providers combined)</span>
+                                    </label>
+                                </div>
+                            )}
+                            {lastBenchmarkFileId && (
+                                <div style={{ marginTop: '10px' }}>
+                                    <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.85rem' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={reuseSameFile}
+                                            onChange={(e) => setReuseSameFile(e.target.checked)}
+                                        />
+                                        <span>Re-use same file: <em>{lastBenchmarkFileName || 'previous file'}</em></span>
+                                    </label>
+                                </div>
+                            )}
+                            <div style={{ marginTop: '8px', fontSize: '0.8rem', color: 'var(--bs-secondary-color)' }}>
+                                {selectedProviderIndices.size} provider{selectedProviderIndices.size !== 1 ? 's' : ''} selected
+                            </div>
+                        </div>
+                    )}
+
+                    {isSelectingFile && (
+                        <div className={`${styles.alert} ${styles["alert-info"]}`}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                                <div className={styles.spinner}></div>
+                                <span>Searching for a suitable test file (1GB+ with no missing articles)...</span>
+                            </div>
+                        </div>
+                    )}
+
+                    {isRunningBenchmark && (
+                        <div className={`${styles.alert} ${styles["alert-info"]}`}>
+                            Running benchmark... This may take a few minutes. Results will appear as each provider completes.
+                        </div>
+                    )}
+
+                    {/* Unified Benchmark Results View with Pagination */}
+                    {(() => {
+                        // Determine what to show: current run or historical
+                        const totalRuns = benchmarkHistory.length + (benchmarkResults ? 1 : 0);
+                        const currentRunData = showCurrentRun && benchmarkResults
+                            ? {
+                                runId: benchmarkResults.runId || 'current',
+                                createdAt: benchmarkResults.createdAt || new Date().toISOString(),
+                                testFileName: benchmarkResults.testFileName,
+                                testFileSize: benchmarkResults.testFileSize,
+                                testSizeMb: benchmarkResults.testSizeMb,
+                                results: benchmarkResults.results,
+                                isCurrent: true
+                            }
+                            : null;
+
+                        // Fall back to history if no current run, or if explicitly viewing history
+                        const historyRunData = (!showCurrentRun || !benchmarkResults) && benchmarkHistory[historyPage]
+                            ? { ...benchmarkHistory[historyPage], isCurrent: false }
+                            : null;
+
+                        const displayRun = currentRunData || historyRunData;
+
+                        if (!displayRun && !isLoadingHistory && totalRuns === 0) {
+                            return (
+                                <div style={{ color: 'var(--bs-secondary-color)', fontSize: '0.9rem', fontStyle: 'italic' }}>
+                                    No benchmark results yet. Click "Run Benchmark" to test your providers.
+                                </div>
+                            );
+                        }
+
+                        if (isLoadingHistory) {
+                            return (
+                                <div style={{ color: 'var(--bs-secondary-color)', fontSize: '0.85rem' }}>
+                                    Loading benchmark history...
+                                </div>
+                            );
+                        }
+
+                        if (!displayRun) return null;
+
+                        return (
+                            <div>
+                                {/* Navigation Controls */}
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
+                                    <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                                        <Button
+                                            variant="outline-secondary"
+                                            size="sm"
+                                            disabled={showCurrentRun && !benchmarkResults}
+                                            onClick={() => {
+                                                if (!showCurrentRun && historyPage > 0) {
+                                                    setHistoryPage(historyPage - 1);
+                                                } else if (!showCurrentRun && historyPage === 0 && benchmarkResults) {
+                                                    setShowCurrentRun(true);
+                                                }
+                                            }}
+                                            style={{ padding: '2px 8px' }}
+                                        >
+                                            &larr; Newer
+                                        </Button>
+                                        <span style={{ fontSize: '0.85rem', color: 'var(--bs-secondary-color)' }}>
+                                            {showCurrentRun
+                                                ? `Latest Run${benchmarkHistory.length > 0 ? ` (1 of ${totalRuns})` : ''}`
+                                                : `Run ${historyPage + (benchmarkResults ? 2 : 1)} of ${totalRuns}`
+                                            }
+                                        </span>
+                                        <Button
+                                            variant="outline-secondary"
+                                            size="sm"
+                                            disabled={!showCurrentRun && historyPage >= benchmarkHistory.length - 1}
+                                            onClick={() => {
+                                                if (showCurrentRun && benchmarkHistory.length > 0) {
+                                                    setShowCurrentRun(false);
+                                                    setHistoryPage(0);
+                                                } else if (!showCurrentRun && historyPage < benchmarkHistory.length - 1) {
+                                                    setHistoryPage(historyPage + 1);
+                                                }
+                                            }}
+                                            style={{ padding: '2px 8px' }}
+                                        >
+                                            Older &rarr;
+                                        </Button>
+                                    </div>
+                                    <div style={{ fontSize: '0.8rem', color: 'var(--bs-secondary-color)' }}>
+                                        {displayRun.isCurrent ? 'Just now' : new Date(displayRun.createdAt).toLocaleString()}
+                                    </div>
+                                </div>
+
+                                {/* Results Table */}
+                                <div className={styles["benchmark-results"]}>
+                                    <div style={{ fontSize: '0.9rem', marginBottom: '8px' }}>
+                                        <strong>Test File:</strong>{' '}
+                                        {displayRun.isCurrent && benchmarkResults?.testFileId ? (
+                                            <span
+                                                onClick={() => handleFileClick(benchmarkResults.testFileId)}
+                                                style={{
+                                                    color: 'var(--bs-primary)',
+                                                    cursor: 'pointer',
+                                                    textDecoration: 'underline'
+                                                }}
+                                                title="Click to view file details"
+                                            >
+                                                {displayRun.testFileName}
+                                            </span>
+                                        ) : (
+                                            displayRun.testFileName
+                                        )}
+                                        <span style={{ color: 'var(--bs-secondary-color)', marginLeft: '8px' }}>
+                                            ({(displayRun.testFileSize || 0) / 1024 / 1024 / 1024 > 1
+                                                ? `${((displayRun.testFileSize || 0) / 1024 / 1024 / 1024).toFixed(2)} GB`
+                                                : `${((displayRun.testFileSize || 0) / 1024 / 1024).toFixed(0)} MB`
+                                            })
+                                        </span>
+                                    </div>
+                                    <table className={styles["benchmark-table"]}>
+                                        <thead>
+                                            <tr>
+                                                <th>Provider</th>
+                                                <th>Speed</th>
+                                                <th>Downloaded</th>
+                                                <th>Time</th>
+                                                <th>Status</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody>
+                                            {displayRun.results.map((result, idx) => (
+                                                <tr key={idx} className={result.isLoadBalanced ? styles["benchmark-highlight"] : ""}>
+                                                    <td>
+                                                        {result.isLoadBalanced ? (
+                                                            <strong>{result.providerHost}</strong>
+                                                        ) : (
+                                                            result.providerHost
+                                                        )}
+                                                    </td>
+                                                    <td className={styles["benchmark-speed"]}>
+                                                        {result.success
+                                                            ? `${result.speedMbps.toFixed(2)} MB/s`
+                                                            : "-"
+                                                        }
+                                                    </td>
+                                                    <td>
+                                                        {result.success
+                                                            ? `${(result.bytesDownloaded / 1024 / 1024).toFixed(1)} MB`
+                                                            : "-"
+                                                        }
+                                                    </td>
+                                                    <td>
+                                                        {result.success
+                                                            ? `${result.elapsedSeconds.toFixed(1)}s`
+                                                            : "-"
+                                                        }
+                                                    </td>
+                                                    <td>
+                                                        {result.success ? (
+                                                            <span style={{ color: 'var(--bs-success)' }}>OK</span>
+                                                        ) : (
+                                                            <div>
+                                                                <span style={{ color: 'var(--bs-danger)' }}>Failed</span>
+                                                                {result.errorMessage && (
+                                                                    <div style={{ fontSize: '0.75rem', color: 'var(--bs-secondary-color)', maxWidth: '200px' }}>
+                                                                        {result.errorMessage}
+                                                                    </div>
+                                                                )}
+                                                            </div>
+                                                        )}
+                                                    </td>
+                                                </tr>
+                                            ))}
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        );
+                    })()}
+                </div>
+            )}
+
             <ProviderModal
                 show={showModal}
                 provider={editingIndex !== null ? providerConfig.Providers[editingIndex] : null}
                 onClose={handleCloseModal}
                 onSave={handleSaveProvider}
+            />
+
+            <FileDetailsModal
+                show={showFileDetailsModal}
+                onHide={handleHideFileDetailsModal}
+                fileDetails={selectedFileDetails}
+                loading={loadingFileDetails}
             />
         </div>
     );
