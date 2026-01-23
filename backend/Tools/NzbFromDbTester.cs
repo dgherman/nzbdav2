@@ -104,6 +104,15 @@ public class NzbFromDbTester
             new() { ConfigName = "usenet.total-streaming-connections", ConfigValue = connections.ToString() }
         });
 
+        // Override queue and healthcheck connections to 0 for streaming-only tests
+        // This ensures GlobalOperationLimiter gives all connections to streaming
+        // (otherwise streaming = total - queue - healthcheck = 1 if queue+healthcheck > total)
+        configManager.UpdateValues(new List<Database.Models.ConfigItem>
+        {
+            new() { ConfigName = "api.max-queue-connections", ConfigValue = "0" },
+            new() { ConfigName = "repair.connections", ConfigValue = "0" }
+        });
+
         services.AddSingleton(configManager);
         services.AddSingleton<WebsocketManager>();
         services.AddSingleton<BandwidthService>();
@@ -149,11 +158,11 @@ public class NzbFromDbTester
             Console.WriteLine($"  Connections: {connections}");
             Console.WriteLine("───────────────────────────────────────────────────────────────");
             Console.WriteLine("  Providers:");
-            foreach (var (index, host, type, _) in providers)
+            foreach (var (index, host, type, maxConnections) in providers)
             {
                 var marker = forcedProvider.HasValue && forcedProvider.Value == index ? " ← FORCED" : "";
                 var typeLabel = type == "Pooled" ? "" : $" [{type}]";
-                Console.WriteLine($"    [{index}] {host}{typeLabel}{marker}");
+                Console.WriteLine($"    [{index}] {host}{typeLabel} ({maxConnections} conn){marker}");
             }
             if (forcedProvider.HasValue)
             {
