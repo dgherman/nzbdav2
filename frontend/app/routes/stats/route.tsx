@@ -32,6 +32,7 @@ export async function loader({ request }: Route.LoaderArgs) {
     const range = url.searchParams.get("range") || "1h";
     const tab = url.searchParams.get("tab") || "stats";
     const page = parseInt(url.searchParams.get("page") || "1");
+    const pageSize = parseInt(url.searchParams.get("pageSize") || "10");
     const search = url.searchParams.get("search") || "";
     const blocking = url.searchParams.get("blocking") === "true" ? true : url.searchParams.get("blocking") === "false" ? false : undefined;
     const orphaned = url.searchParams.get("orphaned") === "true" ? true : url.searchParams.get("orphaned") === "false" ? false : undefined;
@@ -58,7 +59,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         deletedFiles = await backendClient.getDeletedFiles(page, 500, search);
     } else if (tab === "missing") {
         const [maData, cbData] = await Promise.all([
-            backendClient.getMissingArticles(page, 10, search, blocking, orphaned, isImported),
+            backendClient.getMissingArticles(page, pageSize, search, blocking, orphaned, isImported),
             backendClient.getCurrentBandwidth(),
         ]);
         missingArticles = maData;

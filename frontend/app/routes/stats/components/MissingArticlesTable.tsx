@@ -40,7 +40,7 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
     const [searchValue, setSearchValue] = useState(search);
     const [selectedItems, setSelectedItems] = useState<Set<string>>(new Set());
     const { addToast } = useToast();
-    const pageSize = 10;
+    const pageSize = parseInt(searchParams.get("pageSize") || "10");
     const totalPages = Math.ceil(totalCount / pageSize);
 
     useEffect(() => {
@@ -85,6 +85,14 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
             else prev.delete("isImported");
 
             prev.set("page", "1"); // Reset page when changing filter
+            return prev;
+        });
+    };
+
+    const handlePageSizeChange = (newSize: number) => {
+        setSearchParams(prev => {
+            prev.set("pageSize", newSize.toString());
+            prev.set("page", "1");
             return prev;
         });
     };
@@ -377,17 +385,32 @@ export function MissingArticlesTable({ items, providers, totalCount, page, searc
                 </Table>
             </div>
 
-            {totalPages > 1 && (
-                <div className="d-flex justify-content-center mt-3">
+            <div className="d-flex justify-content-center align-items-center mt-3 gap-3">
+                <div className="d-flex align-items-center gap-2">
+                    <span className="text-muted small">Show:</span>
+                    <BootstrapForm.Select
+                        size="sm"
+                        value={pageSize}
+                        onChange={(e) => handlePageSizeChange(parseInt(e.target.value))}
+                        style={{ width: "auto" }}
+                        className="bg-dark text-light border-secondary"
+                    >
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                        <option value="50">50</option>
+                        <option value="100">100</option>
+                    </BootstrapForm.Select>
+                </div>
+                {totalPages > 0 && (
                     <Pagination size="sm" className="m-0">
                         <Pagination.First onClick={() => handlePageChange(1)} disabled={page === 1} />
                         <Pagination.Prev onClick={() => handlePageChange(page - 1)} disabled={page === 1} />
-                        <Pagination.Item active>{page}</Pagination.Item>
+                        <Pagination.Item active>{page} / {totalPages}</Pagination.Item>
                         <Pagination.Next onClick={() => handlePageChange(page + 1)} disabled={page === totalPages} />
                         <Pagination.Last onClick={() => handlePageChange(totalPages)} disabled={page === totalPages} />
                     </Pagination>
-                </div>
-            )}
+                )}
+            </div>
         </div>
     );
 }

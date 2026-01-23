@@ -42,14 +42,21 @@ trap terminate TERM INT
 PUID=${PUID:-1000}
 PGID=${PGID:-1000}
 
-# Create group if it doesn't exist
-if ! getent group appgroup >/dev/null; then
+# Determine group name - use existing group if GID is taken, otherwise create appgroup
+EXISTING_GROUP=$(getent group "$PGID" 2>/dev/null | cut -d: -f1)
+if [ -n "$EXISTING_GROUP" ]; then
+    APP_GROUP="$EXISTING_GROUP"
+    echo "Using existing group '$APP_GROUP' for GID $PGID"
+elif ! getent group appgroup >/dev/null; then
     addgroup -g "$PGID" appgroup
+    APP_GROUP="appgroup"
+else
+    APP_GROUP="appgroup"
 fi
 
 # Create user if it doesn't exist
 if ! id appuser >/dev/null 2>&1; then
-    adduser -D -H -u "$PUID" -G appgroup appuser
+    adduser -D -H -u "$PUID" -G "$APP_GROUP" appuser
 fi
 
 # Set environment variables
