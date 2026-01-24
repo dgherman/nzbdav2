@@ -442,4 +442,136 @@ public class StatsController(
             });
         });
     }
+
+    [HttpGet("dashboard")]
+    public Task<IActionResult> GetDashboard([FromQuery] int hours = 24)
+    {
+        return ExecuteSafely(async () =>
+        {
+            var now = DateTimeOffset.UtcNow;
+            var cutoff = now.AddHours(-hours);
+            var providerConfig = configManager.GetUsenetProviderConfig();
+            var providers = providerConfig.Providers;
+
+            // 1. Total Downloaded (period and all-time)
+            var periodBytes = await dbContext.BandwidthSamples
+                .AsNoTracking()
+                .Where(x => x.Timestamp >= cutoff)
+                .SumAsync(x => x.Bytes);
+
+            var allTimeBytes = await dbContext.BandwidthSamples
+                .AsNoTracking()
+                .SumAsync(x => x.Bytes);
+
+            // 2. Bandwidth by provider for the period
+            var bandwidthByProvider = await dbContext.BandwidthSamples
+                .AsNoTracking()
+                .Where(x => x.Timestamp >= cutoff)
+                .GroupBy(x => x.ProviderIndex)
+                .Select(g => new { ProviderIndex = g.Key, Bytes = g.Sum(x => x.Bytes) })
+                .ToListAsync();
+
+            var totalBandwidth = bandwidthByProvider.Sum(x => x.Bytes);
+
+            // 3. Provider stats (operations) from ProviderUsageEvents
+            var operationsByProvider = await dbContext.ProviderUsageEvents
+                .AsNoTracking()
+                .Where(x => x.CreatedAt >= cutoff)
+                .GroupBy(x => x.ProviderHost)
+                .Select(g => new { ProviderHost = g.Key, Count = g.Count() })
+                .ToListAsync();
+
+            var totalOperations = operationsByProvider.Sum(x => x.Count);
+
+            // 4. Provider affinity stats (selection percentage, success rate)
+            var affinityStats = await dbContext.NzbProviderStats
+                .AsNoTracking()
+                .GroupBy(x => x.ProviderIndex)
+                .Select(g => new
+                {
+                    ProviderIndex = g.Key,
+                    TotalSuccessful = g.Sum(x => x.SuccessfulSegments),
+                    TotalFailed = g.Sum(x => x.FailedSegments)
+                })
+                .ToListAsync();
+
+            var totalSegments = affinityStats.Sum(x => x.TotalSuccessful + x.TotalFailed);
+
+            // 5. Benchmark speeds (latest per provider)
+            var benchmarks = await dbContext.ProviderBenchmarkResults
+                .AsNoTracking()
+                .Where(r => r.Success && !r.IsLoadBalanced)
+                .GroupBy(r => r.ProviderIndex)
+                .Select(g => g.OrderByDescending(r => r.CreatedAt).First())
+                .ToListAsync();
+
+            var benchmarkByProvider = benchmarks.ToDictionary(x => x.ProviderIndex, x => x.SpeedMbps);
+
+            // 6. Build provider health/usage list
+            var providerHealth = new List<object>();
+            var providerUsage = new List<object>();
+
+            for (int i = 0; i < providers.Count; i++)
+            {
+                var provider = providers[i];
+                var affinityStat = affinityStats.FirstOrDefault(x => x.ProviderIndex == i);
+                var bandwidth = bandwidthByProvider.FirstOrDefault(x => x.ProviderIndex == i);
+                var operations = operationsByProvider.FirstOrDefault(x => x.ProviderHost == provider.Host);
+
+                var successfulSegments = affinityStat?.TotalSuccessful ?? 0;
+                var failedSegments = affinityStat?.TotalFailed ?? 0;
+                var totalProviderSegments = successfulSegments + failedSegments;
+
+                providerHealth.Add(new
+                {
+                    ProviderIndex = i,
+                    ProviderHost = provider.Host,
+                    ProviderType = provider.Type.ToString(),
+                    SelectionPercentage = totalSegments > 0 ? Math.Round((double)totalProviderSegments / totalSegments * 100, 1) : 0,
+                    SuccessRate = totalProviderSegments > 0 ? Math.Round((double)successfulSegments / totalProviderSegments * 100, 1) : 100,
+                    BenchmarkSpeedMbps = benchmarkByProvider.TryGetValue(i, out var speed) ? (double?)Math.Round(speed, 1) : null
+                });
+
+                providerUsage.Add(new
+                {
+                    ProviderIndex = i,
+                    ProviderHost = provider.Host,
+                    OperationCount = operations?.Count ?? 0,
+                    OperationPercentage = totalOperations > 0 ? Math.Round((double)(operations?.Count ?? 0) / totalOperations * 100, 1) : 0,
+                    BandwidthBytes = bandwidth?.Bytes ?? 0,
+                    BandwidthPercentage = totalBandwidth > 0 ? Math.Round((double)(bandwidth?.Bytes ?? 0) / totalBandwidth * 100, 1) : 0
+                });
+            }
+
+            // 7. Recent completions (last 20)
+            var recentCompletions = await dbContext.HistoryItems
+                .AsNoTracking()
+                .Where(x => x.DownloadStatus == HistoryItem.DownloadStatusOption.Completed)
+                .OrderByDescending(x => x.CompletedAt)
+                .Take(20)
+                .Select(x => new
+                {
+                    x.Id,
+                    x.JobName,
+                    x.Category,
+                    x.CompletedAt,
+                    SizeBytes = x.TotalSegmentBytes,
+                    DurationSeconds = x.DownloadTimeSeconds
+                })
+                .ToListAsync();
+
+            return Ok(new
+            {
+                TimeWindowHours = hours,
+                TotalDownloaded = new
+                {
+                    PeriodBytes = periodBytes,
+                    AllTimeBytes = allTimeBytes
+                },
+                ProviderHealth = providerHealth,
+                ProviderUsage = providerUsage,
+                RecentCompletions = recentCompletions
+            });
+        });
+    }
 }
