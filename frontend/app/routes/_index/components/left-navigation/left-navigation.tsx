@@ -13,6 +13,10 @@ export type LeftNavigationProps = {
 export function LeftNavigation({ version, isFrontendAuthDisabled, statsEnabled }: LeftNavigationProps) {
     return (
         <div className={styles.container}>
+            <Item target="/">
+                <div className={styles["home-icon"]} />
+                <div className={styles.title}>Home</div>
+            </Item>
             <Item target="/queue">
                 <div className={styles["queue-icon"]} />
                 <div className={styles.title}>Queue & History</div>
@@ -67,7 +71,7 @@ function Item({ target, children }: { target: string, children: React.ReactNode 
     const location = useLocation();
     const navigation = useNavigation();
     const pathname = navigation.location?.pathname ?? location.pathname;
-    const isSelected = pathname.startsWith(target);
+    const isSelected = target === "/" ? pathname === "/" : pathname.startsWith(target);
     const classes = [styles.item, isSelected ? styles.selected : null];
     return <>
         <Link {...className(classes)} to={target}>

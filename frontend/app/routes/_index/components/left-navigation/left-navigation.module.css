@@ -50,6 +50,15 @@
     background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath fill='%2393a1a1' d='M10 6h18v2H10zm0 6h18v2H10zm5 6h13v2H15zm-5 6h18v2H10zM4 14l7 5l-7 5z'/%3E%3C/svg%3E");
 }
 
+.home-icon {
+    display: inline-block;
+    width: 22px;
+    height: 22px;
+    background-repeat: no-repeat;
+    background-size: 100% 100%;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%2393a1a1' d='M10 20v-6h4v6h5v-8h3L12 3L2 12h3v8z'/%3E%3C/svg%3E");
+}
+
 .explore-icon {
     display: inline-block;
     width: 22px;
