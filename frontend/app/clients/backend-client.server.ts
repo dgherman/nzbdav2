@@ -1,14 +1,15 @@
 import { type ConnectionUsageContext, ConnectionUsageType } from "~/types/connections";
 import type { BandwidthSample, ProviderBandwidthSnapshot } from "~/types/bandwidth";
 import type { HealthCheckResult, MissingArticleItem, MappedFile } from "~/types/stats";
-import type { 
-    QueueResponse, QueueSlot, HistoryResponse, HistorySlot, 
-    DirectoryItem, SearchResult, ConfigItem, 
-    HealthCheckQueueResponse, HealthCheckQueueItem, 
+import type {
+    QueueResponse, QueueSlot, HistoryResponse, HistorySlot,
+    DirectoryItem, SearchResult, ConfigItem,
+    HealthCheckQueueResponse, HealthCheckQueueItem,
     HealthCheckHistoryResponse, HealthCheckStats,
     AnalysisItem, FileDetails, ProviderStatistic,
-    HealthCheckInfoType, DashboardSummary 
+    HealthCheckInfoType, DashboardSummary
 } from "~/types/backend";
+import type { DashboardData } from "~/types/dashboard";
 
 class BackendClient {
     private async fetchWithTimeout(url: string, options: RequestInit = {}): Promise<Response> {
@@ -344,6 +345,14 @@ class BackendClient {
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get dashboard summary: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async getDashboard(hours: number = 24): Promise<DashboardData> {
+        const url = process.env.BACKEND_URL + `/api/stats/dashboard?hours=${hours}`;
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get dashboard: ${(await response.json()).error}`);
         return response.json();
     }
 
