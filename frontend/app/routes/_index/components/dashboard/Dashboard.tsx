@@ -101,7 +101,7 @@ export function Dashboard({ initialData, initialConnections }: Props) {
         }
 
         setIsLoading(true);
-        fetch(`/api/dashboard-proxy?hours=${selectedHours}`)
+        fetch(`/dashboard-proxy?hours=${selectedHours}`)
             .then(res => res.json())
             .then(newData => {
                 setData(newData);
