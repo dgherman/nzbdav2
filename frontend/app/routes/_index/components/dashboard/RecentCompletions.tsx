@@ -1,6 +1,6 @@
 import { Card, Table } from 'react-bootstrap';
 import type { RecentCompletion } from '~/types/dashboard';
-import { CATEGORY_BADGES } from '~/types/dashboard';
+import { getCategoryBadge } from '~/types/dashboard';
 
 type Props = {
     completions: RecentCompletion[];
@@ -69,7 +69,7 @@ export function RecentCompletions({ completions }: Props) {
                         </thead>
                         <tbody>
                             {completions.map((item) => {
-                                const badge = CATEGORY_BADGES[item.category] || CATEGORY_BADGES.default;
+                                const badge = getCategoryBadge(item.category);
                                 return (
                                     <tr key={item.id}>
                                         <td>
