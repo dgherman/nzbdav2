@@ -72,7 +72,15 @@ public class DatabaseMaintenanceService(IServiceScopeFactory scopeFactory) : Bac
         if (summariesDeleted > 0)
             Log.Information("[DatabaseMaintenance] Pruned {Count} old records from MissingArticleSummaries.", summariesDeleted);
 
-        // 5. Cleanup old hidden history items (> 30 days)
+        // 5. Prune ProviderUsageEvents (> 30 days)
+        var usageCutoff = DateTimeOffset.UtcNow.AddDays(-30).ToUnixTimeSeconds();
+        var usageDeleted = await dbContext.Database.ExecuteSqlRawAsync(
+            $"DELETE FROM \"ProviderUsageEvents\" WHERE \"CreatedAt\" < {usageCutoff}",
+            stoppingToken);
+        if (usageDeleted > 0)
+            Log.Information("[DatabaseMaintenance] Pruned {Count} old records from ProviderUsageEvents.", usageDeleted);
+
+        // 6. Cleanup old hidden history items (> 30 days)
         var dbClient = scope.ServiceProvider.GetRequiredService<DavDatabaseClient>();
         try
         {
@@ -84,7 +92,7 @@ public class DatabaseMaintenanceService(IServiceScopeFactory scopeFactory) : Bac
             Log.Error(ex, "[DatabaseMaintenance] Error cleaning up old hidden history items.");
         }
 
-        // 6. Optimize WAL (Checkpoint)
+        // 7. Optimize WAL (Checkpoint)
         // This merges the WAL file into the main DB and truncates it, keeping disk usage low.
         Log.Information("[DatabaseMaintenance] Checkpointing WAL file...");
         await dbContext.Database.ExecuteSqlRawAsync("PRAGMA wal_checkpoint(TRUNCATE);", stoppingToken);
