@@ -14,7 +14,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
 
     private static readonly Lazy<DbContextOptions<DavDatabaseContext>> Options = new(
         () => new DbContextOptionsBuilder<DavDatabaseContext>()
-            .UseSqlite($"Data Source={DatabaseFilePath};Mode=ReadWriteCreate", options =>
+            .UseSqlite($"Data Source={DatabaseFilePath};Mode=ReadWriteCreate;Cache=Shared;Pooling=True", options =>
             {
                 // Increase timeout for large database migrations (30s -> 300s)
                 options.CommandTimeout(300);

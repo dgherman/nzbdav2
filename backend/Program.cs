@@ -147,8 +147,8 @@ class Program
             Log.Warning("  → Applying PRAGMA temp_store = MEMORY");
             await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA temp_store = MEMORY;").ConfigureAwait(false);
 
-            Log.Warning("  → Applying PRAGMA mmap_size = 268435456 (256MB)");
-            await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 268435456;").ConfigureAwait(false);
+            Log.Warning("  → Applying PRAGMA mmap_size = 1610612736 (1.5GB)");
+            await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 1610612736;").ConfigureAwait(false); // 1.5GB - covers full DB
 
             // Clear stale migration locks from previous failed attempts
             Log.Warning("  → Clearing any stale migration locks...");
@@ -176,7 +176,7 @@ class Program
         await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA synchronous = NORMAL;").ConfigureAwait(false);
         await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA cache_size = -64000;").ConfigureAwait(false);
         await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA temp_store = MEMORY;").ConfigureAwait(false);
-        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 268435456;").ConfigureAwait(false);
+        await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 1610612736;").ConfigureAwait(false); // 1.5GB - covers full DB
         await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA busy_timeout = 5000;").ConfigureAwait(false);
 
         // initialize the config-manager
