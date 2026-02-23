@@ -30,10 +30,6 @@ export function ProviderHealth({ providers }: Props) {
                         <hr className="my-1 border-secondary" />
                         <div className="d-flex justify-content-around small">
                             <div>
-                                <div className="text-info fw-bold">{provider.selectionPercentage}%</div>
-                                <div className="text-muted" style={{ fontSize: '0.65rem' }}>selected</div>
-                            </div>
-                            <div>
                                 <div className={`fw-bold ${provider.successRate >= 99 ? 'text-success' : provider.successRate >= 95 ? 'text-warning' : 'text-danger'}`}>
                                     {provider.successRate}%
                                 </div>
