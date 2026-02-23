@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
+using Serilog;
 
 namespace NzbWebDAV.Api.SabControllers.GetHistory;
 
@@ -110,7 +111,8 @@ public class GetHistoryResponse : SabBaseResponse
                 });
             }
 
-            throw new Exception("Unknown import strategy");
+            Log.Warning("[GetDownloadPath] Unknown import strategy '{Strategy}'. Valid: 'strm', 'symlinks'. Arr client will receive no storage path.", importStrategy);
+            return null; // Unknown strategy: omits 'storage' from history response; valid values are "strm" and "symlinks"
         }
     }
 }
