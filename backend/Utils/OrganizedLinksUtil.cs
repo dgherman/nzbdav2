@@ -345,12 +345,18 @@ public static class OrganizedLinksUtil
 
     private static bool Verify(string linkFromCache, DavItem targetDavItem, ConfigManager configManager)
     {
-        var mountDir = configManager.GetRcloneMountDir();
         var fileInfo = new FileInfo(linkFromCache);
-        if (!fileInfo.Exists) return false; // Basic check
+        if (!fileInfo.Exists) return false; // Basic existence check
 
         var symlinkOrStrmInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(fileInfo);
-        if (symlinkOrStrmInfo == null) return false;
+        if (symlinkOrStrmInfo == null)
+        {
+            // Regular file (e.g. rclone FUSE mount path) — trust LocalLinks, existence is sufficient
+            return true;
+        }
+
+        // Symlink or .strm: verify it actually points to this DavItem
+        var mountDir = configManager.GetRcloneMountDir();
         var davItemLink = GetDavItemLink(symlinkOrStrmInfo, mountDir);
         return davItemLink?.DavItemId == targetDavItem.Id;
     }
