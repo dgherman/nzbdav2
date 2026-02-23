@@ -654,8 +654,13 @@ public class HealthCheckService
 
             // if the unhealthy item is linked within the organized media-library
             // then we must find the corresponding arr instance and trigger a new search.
-            var linkType = symlinkOrStrmPath.ToLower().EndsWith("strm") ? "strm-file"
-                : (new FileInfo(symlinkOrStrmPath).LinkTarget != null ? "symlink" : "file");
+            var resolvedLinkInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(symlinkOrStrmPath));
+            var linkType = resolvedLinkInfo switch
+            {
+                SymlinkAndStrmUtil.StrmInfo    => "strm-file",
+                SymlinkAndStrmUtil.SymlinkInfo => "symlink",
+                _                              => "file"
+            };
 
             foreach (var arrClient in _configManager.GetArrConfig().GetArrClients())
             {
@@ -667,7 +672,7 @@ public class HealthCheckService
 
                 // Safety Check: Ensure the file points to our mount
                 var mountDir = _configManager.GetRcloneMountDir();
-                var linkInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(symlinkOrStrmPath));
+                var linkInfo = resolvedLinkInfo;
                 if (linkInfo is SymlinkAndStrmUtil.SymlinkInfo symInfo && !symInfo.TargetPath.StartsWith(mountDir))
                 {
                     Log.Warning($"[HealthCheck] Safety check failed: Symlink {symlinkOrStrmPath} points to {symInfo.TargetPath}, which is outside mount dir {mountDir}. Skipping Arr delete.");
@@ -675,7 +680,7 @@ public class HealthCheckService
                 }
 
                 // Capture link info before deletion for logging
-                var arrLinkInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(symlinkOrStrmPath));
+                var arrLinkInfo = resolvedLinkInfo;
                 string linkTargetMsg = "";
                 if (arrLinkInfo is SymlinkAndStrmUtil.SymlinkInfo sInfo)
                     linkTargetMsg = $" (Symlink target: '{sInfo.TargetPath}')";
