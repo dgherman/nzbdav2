@@ -278,15 +278,23 @@ public static class OrganizedLinksUtil
                 }
             }
 
+            // Paths registered by arr-path-fixer are outside the library dir and are not
+            // visible from inside this container, so only remove LocalLinks whose paths
+            // are inside the library dir. External paths are cleaned up via FK CASCADE
+            // when their DavItem is deleted.
+            var libraryDir = configManager.GetLibraryDir();
+            var libDirPrefix = string.IsNullOrEmpty(libraryDir)
+                ? null
+                : libraryDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
             foreach (var dbLink in dbLinks)
             {
                 if (!onDiskMap.ContainsKey(dbLink.LinkPath))
                 {
-                    // Don't remove regular-file LocalLinks (e.g. rclone FUSE mount paths).
-                    // They are not symlinks/strm so they never appear in onDiskMap, but they
-                    // are still valid as long as the file exists on the mount.
-                    var fi = new FileInfo(dbLink.LinkPath);
-                    if (fi.Exists && SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(fi) == null)
+                    // Only remove links that live inside the library directory.
+                    // Links outside (e.g. rclone mount paths from arr-path-fixer)
+                    // are invisible to this container and must not be purged here.
+                    if (libDirPrefix == null || !dbLink.LinkPath.StartsWith(libDirPrefix))
                         continue;
 
                     toRemove.Add(dbLink);
