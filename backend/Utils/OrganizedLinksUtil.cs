@@ -361,12 +361,24 @@ public static class OrganizedLinksUtil
     private static bool Verify(string linkFromCache, DavItem targetDavItem, ConfigManager configManager)
     {
         var fileInfo = new FileInfo(linkFromCache);
-        if (!fileInfo.Exists) return false; // Basic existence check
+
+        // Paths outside the library dir (e.g. arr-path-fixer rclone mount paths) are not
+        // mounted inside this container. Skip the existence check and trust the LocalLink;
+        // Repair() will handle stale paths gracefully if the file is already gone.
+        var libraryDir = configManager.GetLibraryDir();
+        var libDirPrefix = string.IsNullOrEmpty(libraryDir)
+            ? null
+            : libraryDir.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        if (libDirPrefix == null || !linkFromCache.StartsWith(libDirPrefix))
+            return true;
+
+        // Library path: must exist on disk
+        if (!fileInfo.Exists) return false;
 
         var symlinkOrStrmInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(fileInfo);
         if (symlinkOrStrmInfo == null)
         {
-            // Regular file (e.g. rclone FUSE mount path) — trust LocalLinks, existence is sufficient
+            // Regular file inside the library dir — existence confirmed above
             return true;
         }
 
