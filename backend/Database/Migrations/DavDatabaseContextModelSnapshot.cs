@@ -601,9 +601,7 @@ namespace NzbWebDAV.Database.Migrations
 
                     b.HasKey("Id");
 
-                    b.HasIndex("CreatedAt");
-
-                    b.HasIndex("OperationType");
+                    b.HasIndex("CreatedAt", "ProviderHost", "ProviderType", "OperationType");
 
                     b.HasIndex("ProviderHost");
 
