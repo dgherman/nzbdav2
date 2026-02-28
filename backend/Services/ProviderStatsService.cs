@@ -36,7 +36,17 @@ public class ProviderStatsService
 
     private async Task StartStatsCalculationLoop()
     {
-        // Calculate all time windows immediately on startup
+        // Delay initial calculation to avoid competing with other startup tasks
+        try
+        {
+            await Task.Delay(TimeSpan.FromSeconds(30), _cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        // Calculate all time windows
         foreach (var hours in _timeWindows)
         {
             await CalculateAndCacheStats(hours).ConfigureAwait(false);
