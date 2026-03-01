@@ -473,31 +473,20 @@ public class StatsController(
 
             var totalBandwidth = bandwidthByProvider.Sum(x => x.Bytes);
 
-            // 3. Provider stats (operations) from ProviderUsageEvents
-            var operationsByProvider = await dbContext.ProviderUsageEvents
+            // 3. Provider stats from NzbProviderStats (affinity data)
+            var nzbProviderStats = await dbContext.NzbProviderStats
                 .AsNoTracking()
-                .Where(x => x.CreatedAt >= cutoff)
-                .GroupBy(x => x.ProviderHost)
-                .Select(g => new { ProviderHost = g.Key, Count = g.Count() })
+                .GroupBy(s => s.ProviderIndex)
+                .Select(g => new
+                {
+                    ProviderIndex = g.Key,
+                    SuccessfulSegments = g.Sum(s => s.SuccessfulSegments),
+                    FailedSegments = g.Sum(s => s.FailedSegments),
+                    TotalBytes = g.Sum(s => s.TotalBytes)
+                })
                 .ToListAsync();
 
-            var totalOperations = operationsByProvider.Sum(x => x.Count);
-
-            // 4. Provider health: successful BODY segment count per provider
-            var bodySuccessByProvider = await dbContext.ProviderUsageEvents
-                .AsNoTracking()
-                .Where(x => x.CreatedAt >= cutoff && x.OperationType == "BODY")
-                .GroupBy(x => x.ProviderHost)
-                .Select(g => new { ProviderHost = g.Key, Count = g.Count() })
-                .ToListAsync();
-
-            // 5. Provider health: failed BODY segment count per provider
-            var bodyFailureByProvider = await dbContext.ProviderUsageEvents
-                .AsNoTracking()
-                .Where(x => x.CreatedAt >= cutoff && x.OperationType == "BODY_FAIL")
-                .GroupBy(x => x.ProviderHost)
-                .Select(g => new { ProviderHost = g.Key, Count = g.Count() })
-                .ToListAsync();
+            var totalOperations = nzbProviderStats.Sum(s => s.SuccessfulSegments + s.FailedSegments);
 
             // 6. Benchmark speeds (latest per provider)
             var benchmarks = await dbContext.ProviderBenchmarkResults
@@ -517,10 +506,10 @@ public class StatsController(
             {
                 var provider = providers[i];
                 var bandwidth = bandwidthByProvider.FirstOrDefault(x => x.ProviderIndex == i);
-                var operations = operationsByProvider.FirstOrDefault(x => x.ProviderHost == provider.Host);
+                var stats = nzbProviderStats.FirstOrDefault(x => x.ProviderIndex == i);
 
-                var successCount = bodySuccessByProvider.FirstOrDefault(x => x.ProviderHost == provider.Host)?.Count ?? 0;
-                var failureCount = bodyFailureByProvider.FirstOrDefault(x => x.ProviderHost == provider.Host)?.Count ?? 0;
+                var successCount = stats?.SuccessfulSegments ?? 0;
+                var failureCount = stats?.FailedSegments ?? 0;
                 var totalProviderSegments = successCount + failureCount;
 
                 providerHealth.Add(new
@@ -540,8 +529,8 @@ public class StatsController(
                 {
                     ProviderIndex = i,
                     ProviderHost = provider.Host,
-                    OperationCount = operations?.Count ?? 0,
-                    OperationPercentage = totalOperations > 0 ? Math.Round((double)(operations?.Count ?? 0) / totalOperations * 100, 1) : 0,
+                    OperationCount = totalProviderSegments,
+                    OperationPercentage = totalOperations > 0 ? Math.Round((double)totalProviderSegments / totalOperations * 100, 1) : 0,
                     BandwidthBytes = bandwidth?.Bytes ?? 0,
                     BandwidthPercentage = totalBandwidth > 0 ? Math.Round((double)(bandwidth?.Bytes ?? 0) / totalBandwidth * 100, 1) : 0
                 });
