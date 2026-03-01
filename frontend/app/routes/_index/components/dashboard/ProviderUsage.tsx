@@ -41,7 +41,7 @@ export function ProviderUsage({ providers }: Props) {
                 <h6 className="text-muted mb-3">Provider Usage</h6>
                 <div className="row">
                     <div className="col-md-6">
-                        <div className="small text-muted mb-2">Operations</div>
+                        <div className="small text-muted mb-2">Segments</div>
                         {providers.map((provider, idx) => (
                             <div key={provider.providerIndex} className="mb-2">
                                 <div className="d-flex justify-content-between small mb-1">
