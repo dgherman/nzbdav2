@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Database;
 
@@ -262,10 +263,14 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.Property(f => f.SegmentIds)
                 .HasConversion(new ValueConverter<string[], string>
                 (
-                    v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<string[]>(System.Text.RegularExpressions.Regex.Replace(v, "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""), (JsonSerializerOptions?)null) ?? Array.Empty<string>()
+                    v => CompressionUtil.Compress(JsonSerializer.Serialize(v, (JsonSerializerOptions?)null)),
+                    v => JsonSerializer.Deserialize<string[]>(
+                        System.Text.RegularExpressions.Regex.Replace(
+                            CompressionUtil.Decompress(v),
+                            "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""),
+                        (JsonSerializerOptions?)null) ?? Array.Empty<string>()
                 ))
-                .HasColumnType("TEXT") // store raw JSON
+                .HasColumnType("TEXT")
                 .IsRequired();
 
             e.HasOne(f => f.DavItem)
@@ -286,11 +291,15 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.Property(f => f.RarParts)
                 .HasConversion(new ValueConverter<DavRarFile.RarPart[], string>
                 (
-                    v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<DavRarFile.RarPart[]>(System.Text.RegularExpressions.Regex.Replace(v, "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""), (JsonSerializerOptions?)null)
+                    v => CompressionUtil.Compress(JsonSerializer.Serialize(v, (JsonSerializerOptions?)null)),
+                    v => JsonSerializer.Deserialize<DavRarFile.RarPart[]>(
+                        System.Text.RegularExpressions.Regex.Replace(
+                            CompressionUtil.Decompress(v),
+                            "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""),
+                        (JsonSerializerOptions?)null)
                          ?? Array.Empty<DavRarFile.RarPart>()
                 ))
-                .HasColumnType("TEXT") // store raw JSON
+                .HasColumnType("TEXT")
                 .IsRequired();
 
             e.HasOne(f => f.DavItem)
@@ -311,11 +320,15 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.Property(f => f.Metadata)
                 .HasConversion(new ValueConverter<DavMultipartFile.Meta, string>
                 (
-                    v => JsonSerializer.Serialize(v, (JsonSerializerOptions?)null),
-                    v => JsonSerializer.Deserialize<DavMultipartFile.Meta>(System.Text.RegularExpressions.Regex.Replace(v, "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""), (JsonSerializerOptions?)null) ??
+                    v => CompressionUtil.Compress(JsonSerializer.Serialize(v, (JsonSerializerOptions?)null)),
+                    v => JsonSerializer.Deserialize<DavMultipartFile.Meta>(
+                        System.Text.RegularExpressions.Regex.Replace(
+                            CompressionUtil.Decompress(v),
+                            "[\x00-\x08\x0B\x0C\x0E-\x1F]", ""),
+                        (JsonSerializerOptions?)null) ??
                          new DavMultipartFile.Meta()
                 ))
-                .HasColumnType("TEXT") // store raw JSON
+                .HasColumnType("TEXT")
                 .IsRequired();
 
             e.HasOne(f => f.DavItem)
@@ -443,6 +456,9 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .ValueGeneratedNever();
 
             e.Property(i => i.NzbContents)
+                .HasConversion(
+                    v => CompressionUtil.Compress(v),
+                    v => CompressionUtil.Decompress(v))
                 .IsRequired();
 
             e.HasOne(f => f.QueueItem)

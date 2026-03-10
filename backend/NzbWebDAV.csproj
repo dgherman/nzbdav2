@@ -18,6 +18,7 @@
       <PackageReference Include="Serilog.AspNetCore" Version="9.0.0" />
       <PackageReference Include="Serilog.Sinks.Console" Version="6.0.1-dev-00953" />
       <PackageReference Include="Usenet" Version="3.1.0" />
+      <PackageReference Include="ZstdSharp.Port" Version="0.8.7" />
     </ItemGroup>
 
     <ItemGroup>
