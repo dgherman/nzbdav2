@@ -6,7 +6,7 @@
     <AssemblyVersion>0.0.0.0</AssemblyVersion>
     <FileVersion>0.0.0.0</FileVersion>
     <Authors>Adam Hathcock</Authors>
-    <TargetFrameworks>net48;netstandard20;net8.0</TargetFrameworks>
+    <TargetFrameworks>net9.0</TargetFrameworks>
     <AssemblyName>SharpCompress</AssemblyName>
     <AssemblyOriginatorKeyFile>../../SharpCompress.snk</AssemblyOriginatorKeyFile>
     <SignAssembly>false</SignAssembly>
@@ -28,27 +28,17 @@
     <EmbedUntrackedSources>true</EmbedUntrackedSources>
     <AllowedOutputExtensionsInPackageBuildOutputFolder>$(AllowedOutputExtensionsInPackageBuildOutputFolder);.pdb</AllowedOutputExtensionsInPackageBuildOutputFolder>
   </PropertyGroup>
-  <PropertyGroup Condition=" '$(TargetFramework)' == 'net8.0' Or '$(TargetFramework)' == 'net10.0' ">
+  <PropertyGroup>
     <IsTrimmable>true</IsTrimmable>
   </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net8.0|AnyCPU'">
-    <DefineConstants>$(DefineConstants);DEBUG_STREAMS</DefineConstants>
-  </PropertyGroup>
-  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net10.0|AnyCPU'">
+  <PropertyGroup Condition="'$(Configuration)|$(TargetFramework)|$(Platform)'=='Debug|net9.0|AnyCPU'">
     <DefineConstants>$(DefineConstants);DEBUG_STREAMS</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="All" />
   </ItemGroup>
-  <ItemGroup Condition=" '$(TargetFramework)' == 'net8.0' Or '$(TargetFramework)' == 'net10.0' ">
+  <ItemGroup>
     <PackageReference Include="Microsoft.NET.ILLink.Tasks" PrivateAssets="All" />
-  </ItemGroup>
-  <ItemGroup Condition=" '$(TargetFramework)' == 'net48' Or '$(TargetFramework)' == 'netstandard20' ">
-    <PackageReference Include="Microsoft.Bcl.AsyncInterfaces" />
-    <PackageReference Include="System.Text.Encoding.CodePages" />
-    <PackageReference Include="System.Buffers" />
-    <PackageReference Include="System.Memory" />
-    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" PrivateAssets="All" />
   </ItemGroup>
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
