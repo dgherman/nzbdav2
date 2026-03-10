@@ -29,6 +29,8 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
+        Log.Warning("[ContentSnapshot] Service starting...");
+
         // Run recovery check on startup before anything else
         try
         {
@@ -73,7 +75,7 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
 
         if (contentChildCount > 0)
         {
-            Log.Information("[ContentSnapshot] /content has {Count} children — no recovery needed", contentChildCount);
+            Log.Warning("[ContentSnapshot] /content has {Count} children — no recovery needed", contentChildCount);
             return;
         }
 
@@ -237,7 +239,7 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
         await File.WriteAllTextAsync(tempPath, json, ct).ConfigureAwait(false);
         File.Move(tempPath, SnapshotPath, overwrite: true);
 
-        Log.Debug("[ContentSnapshot] Saved snapshot: {Items} items, {Nzb} NZB, {Rar} RAR, {Multipart} multipart",
+        Log.Warning("[ContentSnapshot] Saved snapshot: {Items} items, {Nzb} NZB, {Rar} RAR, {Multipart} multipart",
             allItems.Count, nzbFiles.Count, rarFiles.Count, multipartFiles.Count);
     }
 
