@@ -20,6 +20,37 @@ public static class NzbFileExtensions
             .ToArray();
     }
 
+    /// <summary>
+    /// Returns the primary segment IDs (first occurrence per segment number, ordered)
+    /// and a dictionary of fallback candidates for segment numbers that have duplicates.
+    /// The dictionary key is the index in the primary array; the value is an array of
+    /// alternative message-IDs to try if the primary fails.
+    /// </summary>
+    public static (string[] PrimaryIds, Dictionary<int, string[]>? Fallbacks) GetSegmentIdsWithFallbacks(this NzbFile file)
+    {
+        var grouped = file.Segments
+            .GroupBy(s => s.Number)
+            .OrderBy(g => g.Key)
+            .ToList();
+
+        var primaryIds = new string[grouped.Count];
+        Dictionary<int, string[]>? fallbacks = null;
+
+        for (int i = 0; i < grouped.Count; i++)
+        {
+            var candidates = grouped[i].ToList();
+            primaryIds[i] = candidates[0].MessageId.Value;
+
+            if (candidates.Count > 1)
+            {
+                fallbacks ??= new Dictionary<int, string[]>();
+                fallbacks[i] = candidates.Skip(1).Select(c => c.MessageId.Value).ToArray();
+            }
+        }
+
+        return (primaryIds, fallbacks);
+    }
+
     public static long GetTotalYencodedSize(this NzbFile file)
     {
         return file.Size;

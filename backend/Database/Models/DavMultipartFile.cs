@@ -28,5 +28,11 @@ public class DavMultipartFile
         // what byte range contains the file part contents? (relative to the full NzbFile)
         // note: this range should always be fully contained within the SegmentIdByteRange above.
         public LongRange FilePartByteRange { get; set; }
+
+        /// <summary>
+        /// Fallback message-IDs for segments with duplicate segment numbers.
+        /// Key = index in SegmentIds array, Value = alternative message-IDs.
+        /// </summary>
+        public Dictionary<int, string[]>? SegmentFallbacks { get; set; }
     }
 }

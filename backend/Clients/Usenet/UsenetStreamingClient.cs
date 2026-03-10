@@ -230,11 +230,11 @@ public class UsenetStreamingClient
         return new NzbFileStream(nzbFile.GetSegmentIds(), fileSize, _client, concurrentConnections, usageContext, bufferSize: bufferSize, segmentSizes: segmentSizes);
     }
 
-    public NzbFileStream GetFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null, bool useBufferedStreaming = true, int? bufferSize = null, long[]? segmentSizes = null)
+    public NzbFileStream GetFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null, bool useBufferedStreaming = true, int? bufferSize = null, long[]? segmentSizes = null, Dictionary<int, string[]>? segmentFallbacks = null)
     {
         // Use config value if not specified
         var actualBufferSize = bufferSize ?? _configManager.GetStreamBufferSize();
-        return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections, usageContext, useBufferedStreaming, actualBufferSize, segmentSizes);
+        return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections, usageContext, useBufferedStreaming, actualBufferSize, segmentSizes, segmentFallbacks);
     }
 
     public NzbFileStream GetFastFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null)

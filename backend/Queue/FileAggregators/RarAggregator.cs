@@ -66,11 +66,16 @@ public class RarAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, b
                 {
                     AesParams = aesParams,
                     ObfuscationKey = obfuscationKey,
-                    FileParts = fileParts.Select(x => new DavMultipartFile.FilePart()
+                    FileParts = fileParts.Select(x =>
                     {
-                        SegmentIds = x.NzbFile.GetSegmentIds(),
-                        SegmentIdByteRange = LongRange.FromStartAndSize(0, x.PartSize),
-                        FilePartByteRange = x.ByteRangeWithinPart
+                        var (primaryIds, fb) = x.NzbFile.GetSegmentIdsWithFallbacks();
+                        return new DavMultipartFile.FilePart()
+                        {
+                            SegmentIds = primaryIds,
+                            SegmentIdByteRange = LongRange.FromStartAndSize(0, x.PartSize),
+                            FilePartByteRange = x.ByteRangeWithinPart,
+                            SegmentFallbacks = fb,
+                        };
                     }).ToArray(),
                 }
             };

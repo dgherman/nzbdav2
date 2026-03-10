@@ -184,6 +184,8 @@ public class BufferedSegmentStream : Stream
 
     // Track corrupted segments for health check triggering
     private readonly long[]? _segmentSizes;
+    private readonly Dictionary<int, string[]>? _segmentFallbacks;
+    private readonly int _segmentIndexOffset;
     private readonly List<(int Index, string SegmentId)> _corruptedSegments = new();
     private int _lastSuccessfulSegmentSize = 0;
 
@@ -322,10 +324,14 @@ public class BufferedSegmentStream : Stream
         int bufferSegmentCount,
         CancellationToken cancellationToken,
         ConnectionUsageContext? usageContext = null,
-        long[]? segmentSizes = null)
+        long[]? segmentSizes = null,
+        Dictionary<int, string[]>? segmentFallbacks = null,
+        int segmentIndexOffset = 0)
     {
         _usageContext = usageContext;
         _segmentSizes = segmentSizes;
+        _segmentFallbacks = segmentFallbacks;
+        _segmentIndexOffset = segmentIndexOffset;
         _client = client;
         // Ensure buffer is large enough to handle stalls and jitter better.
         bufferSegmentCount = Math.Max(bufferSegmentCount, concurrentConnections * 10);
@@ -1136,10 +1142,40 @@ public class BufferedSegmentStream : Stream
             }
             catch (UsenetArticleNotFoundException ex)
             {
-                // Don't retry for missing articles - this is permanent
-                // Treat as terminal failure and proceed to graceful degradation (zero-fill)
                 lastException = ex;
-                Log.Warning("[BufferedStream] PERMANENT FAILURE: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}): Article not found. Proceeding to zero-fill.",
+
+                // Check for fallback message-IDs (from NZBs with duplicate segment numbers)
+                var originalIndex = index + _segmentIndexOffset;
+                if (_segmentFallbacks != null && _segmentFallbacks.TryGetValue(originalIndex, out var fallbackIds))
+                {
+                    Log.Warning("[BufferedStream] Article not found for primary ID, trying {FallbackCount} fallback(s): Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId})",
+                        fallbackIds.Length, jobName, index, segmentIds.Length, segmentId);
+
+                    foreach (var fallbackId in fallbackIds)
+                    {
+                        try
+                        {
+                            var fbResult = await FetchSingleSegmentAsync(index, fallbackId, segmentIds, client, ct).ConfigureAwait(false);
+                            if (fbResult != null)
+                            {
+                                Log.Information("[BufferedStream] Fallback segment succeeded: Job={Job}, Segment={SegmentIndex}, FallbackID={FallbackId}",
+                                    jobName, index, fallbackId);
+                                return fbResult;
+                            }
+                        }
+                        catch (UsenetArticleNotFoundException)
+                        {
+                            Log.Debug("[BufferedStream] Fallback ID also not found: {FallbackId}", fallbackId);
+                        }
+                        catch (Exception fbEx) when (fbEx is not OperationCanceledException)
+                        {
+                            Log.Debug("[BufferedStream] Fallback ID failed: {FallbackId}: {Error}", fallbackId, fbEx.Message);
+                        }
+                    }
+                }
+
+                // All fallbacks exhausted (or none available) - proceed to graceful degradation
+                Log.Warning("[BufferedStream] PERMANENT FAILURE: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}): Article not found (no fallbacks remaining). Proceeding to zero-fill.",
                     jobName, index, segmentIds.Length, segmentId);
                 break;
             }
@@ -1248,6 +1284,57 @@ public class BufferedSegmentStream : Stream
         }
 
         return new PooledSegmentData(segmentId, zeroBuffer, zeroBufferSize);
+    }
+
+    /// <summary>
+    /// Fetches a single segment by ID without retry logic. Used for fallback attempts.
+    /// Returns null if the segment data is empty/invalid.
+    /// </summary>
+    private async Task<PooledSegmentData?> FetchSingleSegmentAsync(
+        int index,
+        string segmentId,
+        string[] segmentIds,
+        INntpClient client,
+        CancellationToken ct)
+    {
+        Stream? stream = null;
+        try
+        {
+            var multiClient = GetMultiProviderClient(client);
+            stream = multiClient != null
+                ? await multiClient.GetBalancedSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false)
+                : await client.GetSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
+
+            var buffer = ArrayPool<byte>.Shared.Rent(1024 * 1024);
+            var totalRead = 0;
+            try
+            {
+                while (true)
+                {
+                    if (totalRead == buffer.Length)
+                    {
+                        var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
+                        Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
+                        ArrayPool<byte>.Shared.Return(buffer);
+                        buffer = newBuffer;
+                    }
+                    var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
+                    if (read == 0) break;
+                    totalRead += read;
+                }
+                return new PooledSegmentData(segmentId, buffer, totalRead);
+            }
+            catch
+            {
+                ArrayPool<byte>.Shared.Return(buffer);
+                throw;
+            }
+        }
+        finally
+        {
+            if (stream != null)
+                await stream.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)

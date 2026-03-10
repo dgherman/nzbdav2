@@ -32,11 +32,13 @@ public class MultipartMkvProcessor : BaseProcessor
         foreach (var fileInfo in sortedFileInfos)
         {
             var partSize = fileInfo.FileSize ?? await _client.GetFileSizeAsync(fileInfo.NzbFile, _ct).ConfigureAwait(false);
+            var (primaryIds, fb) = fileInfo.NzbFile.GetSegmentIdsWithFallbacks();
             fileParts.Add(new DavMultipartFile.FilePart
             {
-                SegmentIds = fileInfo.NzbFile.GetSegmentIds(),
+                SegmentIds = primaryIds,
                 SegmentIdByteRange = LongRange.FromStartAndSize(0, partSize),
                 FilePartByteRange = LongRange.FromStartAndSize(0, partSize),
+                SegmentFallbacks = fb,
             });
         }
 
