@@ -6,6 +6,7 @@ using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Utils;
 using Serilog;
+using ZstdSharp;
 
 namespace NzbWebDAV.Services;
 
@@ -17,8 +18,12 @@ namespace NzbWebDAV.Services;
 public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : BackgroundService
 {
     private static string ConfigPath => DavDatabaseContext.ConfigPath;
-    private static string SnapshotPath => Path.Combine(ConfigPath, "content-snapshot.json");
-    private static string BackupPath => Path.Combine(ConfigPath, "content-snapshot.backup.json");
+    private static string SnapshotPath => Path.Combine(ConfigPath, "content-snapshot.json.zst");
+    private static string BackupPath => Path.Combine(ConfigPath, "content-snapshot.backup.json.zst");
+
+    // Clean up old uncompressed snapshots from previous versions
+    private static string LegacySnapshotPath => Path.Combine(ConfigPath, "content-snapshot.json");
+    private static string LegacyBackupPath => Path.Combine(ConfigPath, "content-snapshot.backup.json");
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -226,21 +231,31 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
             MultipartFiles = multipartFiles,
         };
 
-        // Write to temp file, then atomically move
+        // Write compressed to temp file, then atomically move
         var tempPath = SnapshotPath + ".tmp";
-        var json = JsonSerializer.Serialize(snapshot, JsonOptions);
+        var jsonBytes = JsonSerializer.SerializeToUtf8Bytes(snapshot, JsonOptions);
 
-        // Rotate: current → backup before writing new
-        if (File.Exists(SnapshotPath))
+        using (var compressor = new Compressor(1))
         {
-            File.Copy(SnapshotPath, BackupPath, overwrite: true);
+            var compressed = compressor.Wrap(jsonBytes);
+
+            // Rotate: current → backup before writing new
+            if (File.Exists(SnapshotPath))
+            {
+                File.Copy(SnapshotPath, BackupPath, overwrite: true);
+            }
+
+            await File.WriteAllBytesAsync(tempPath, compressed.ToArray(), ct).ConfigureAwait(false);
+            File.Move(tempPath, SnapshotPath, overwrite: true);
         }
 
-        await File.WriteAllTextAsync(tempPath, json, ct).ConfigureAwait(false);
-        File.Move(tempPath, SnapshotPath, overwrite: true);
+        // Clean up legacy uncompressed snapshots
+        if (File.Exists(LegacySnapshotPath)) File.Delete(LegacySnapshotPath);
+        if (File.Exists(LegacyBackupPath)) File.Delete(LegacyBackupPath);
 
-        Log.Warning("[ContentSnapshot] Saved snapshot: {Items} items, {Nzb} NZB, {Rar} RAR, {Multipart} multipart",
-            allItems.Count, nzbFiles.Count, rarFiles.Count, multipartFiles.Count);
+        var fileSizeMb = new FileInfo(SnapshotPath).Length / (1024.0 * 1024.0);
+        Log.Warning("[ContentSnapshot] Saved snapshot: {Items} items, {Nzb} NZB, {Rar} RAR, {Multipart} multipart ({SizeMb:F1} MB compressed)",
+            allItems.Count, nzbFiles.Count, rarFiles.Count, multipartFiles.Count, fileSizeMb);
     }
 
     /// <summary>
@@ -261,8 +276,11 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
 
         try
         {
-            var json = await File.ReadAllTextAsync(path).ConfigureAwait(false);
-            var snapshot = JsonSerializer.Deserialize<ContentSnapshot>(json, JsonOptions);
+            var compressed = await File.ReadAllBytesAsync(path).ConfigureAwait(false);
+
+            using var decompressor = new Decompressor();
+            var jsonBytes = decompressor.Unwrap(compressed);
+            var snapshot = JsonSerializer.Deserialize<ContentSnapshot>(jsonBytes, JsonOptions);
 
             if (snapshot?.Items == null)
             {
@@ -270,7 +288,7 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
                 return null;
             }
 
-            Log.Information("[ContentSnapshot] Loaded snapshot from {Path}: {Items} items, created {CreatedAt}",
+            Log.Warning("[ContentSnapshot] Loaded snapshot from {Path}: {Items} items, created {CreatedAt}",
                 path, snapshot.Items.Count, snapshot.CreatedAt);
             return snapshot;
         }
