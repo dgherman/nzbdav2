@@ -28,10 +28,12 @@ public class FileAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, 
                 lastHealthCheck: checkedFullHealth ? DateTimeOffset.UtcNow : null
             );
 
+            var (primaryIds, fallbacks) = result.NzbFile.GetSegmentIdsWithFallbacks();
             var davNzbFile = new DavNzbFile()
             {
                 Id = davItem.Id,
-                SegmentIds = result.NzbFile.GetSegmentIds(),
+                SegmentIds = primaryIds,
+                SegmentFallbacks = fallbacks,
             };
 
             dbClient.Ctx.Items.Add(davItem);

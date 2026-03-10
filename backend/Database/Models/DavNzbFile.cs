@@ -6,6 +6,13 @@ public class DavNzbFile
     public string[] SegmentIds { get; set; } = [];
     public byte[]? SegmentSizes { get; set; }
 
+    /// <summary>
+    /// Fallback message-IDs for segments with duplicate segment numbers in the NZB.
+    /// Key = index in SegmentIds array, Value = array of alternative message-IDs.
+    /// Null when no duplicates exist (the common case).
+    /// </summary>
+    public Dictionary<int, string[]>? SegmentFallbacks { get; set; }
+
     public long[]? GetSegmentSizes()
     {
         if (SegmentSizes == null) return null;

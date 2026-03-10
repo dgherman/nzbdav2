@@ -273,6 +273,17 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .HasColumnType("TEXT")
                 .IsRequired();
 
+            e.Property(f => f.SegmentFallbacks)
+                .HasConversion(new ValueConverter<Dictionary<int, string[]>?, string?>
+                (
+                    v => v == null ? null : CompressionUtil.Compress(JsonSerializer.Serialize(v, (JsonSerializerOptions?)null)),
+                    v => v == null ? null : JsonSerializer.Deserialize<Dictionary<int, string[]>>(
+                        CompressionUtil.Decompress(v),
+                        (JsonSerializerOptions?)null)
+                ))
+                .HasColumnType("TEXT")
+                .IsRequired(false);
+
             e.HasOne(f => f.DavItem)
                 .WithOne()
                 .HasForeignKey<DavNzbFile>(f => f.Id)

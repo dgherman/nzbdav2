@@ -73,7 +73,8 @@ public class DatabaseStoreNzbFile(
             usageContext,
             configManager.UseBufferedStreaming(),
             configManager.GetStreamBufferSize(),
-            file.GetSegmentSizes()
+            file.GetSegmentSizes(),
+            file.SegmentFallbacks
         );
     }
 }

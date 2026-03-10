@@ -15,6 +15,7 @@ public class NzbFileStream : Stream
     private readonly bool _useBufferedStreaming;
     private readonly int _bufferSize;
     private readonly long[]? _segmentOffsets; // Cumulative offsets for instant seeking
+    private readonly Dictionary<int, string[]>? _segmentFallbacks;
 
     private long _position = 0;
     private CombinedStream? _innerStream;
@@ -38,7 +39,8 @@ public class NzbFileStream : Stream
         ConnectionUsageContext? usageContext = null,
         bool useBufferedStreaming = true,
         int bufferSize = 20,  // Increased from 10 for better read-ahead buffering
-        long[]? segmentSizes = null
+        long[]? segmentSizes = null,
+        Dictionary<int, string[]>? segmentFallbacks = null
     )
     {
         _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
@@ -50,6 +52,7 @@ public class NzbFileStream : Stream
         _concurrentConnections = concurrentConnections;
         _useBufferedStreaming = useBufferedStreaming;
         _bufferSize = bufferSize;
+        _segmentFallbacks = segmentFallbacks;
         _streamCts = new CancellationTokenSource();
 
         if (segmentSizes != null && segmentSizes.Length == fileSegmentIds.Length)
@@ -318,7 +321,9 @@ public class NzbFileStream : Stream
                 _bufferSize,
                 bufferedContextCt,
                 bufferedContext,
-                remainingSegmentSizes
+                remainingSegmentSizes,
+                _segmentFallbacks,
+                firstSegmentIndex
             );
 
             // Link cancellation from parent to child manually (one-way, doesn't copy contexts)
