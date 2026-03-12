@@ -80,6 +80,35 @@ export function RepairsSettings({ config, setNewConfig }: RepairsSettingsProps) 
                     The minimum number of days between routine health checks. New files will wait at least this many days before being checked. Default: 7 days. Note: Priority/triggered checks (streaming failures, manual repairs) bypass this setting.
                 </Form.Text>
             </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Label htmlFor="health-check-categories-input">Health Check Categories</Form.Label>
+                <Form.Control
+                    className={styles.input}
+                    type="text"
+                    id="health-check-categories-input"
+                    aria-describedby="health-check-categories-help"
+                    placeholder={"All categories"}
+                    value={config["api.health-check-categories"] || ""}
+                    onChange={e => setNewConfig({ ...config, "api.health-check-categories": e.target.value })} />
+                <Form.Text id="health-check-categories-help" muted>
+                    Comma-separated list of categories to health check (e.g. "movies, tv"). Leave empty to check all categories.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
+                    id="startup-vacuum-checkbox"
+                    aria-describedby="startup-vacuum-help"
+                    label={`Run SQLite VACUUM on Startup`}
+                    checked={config["api.startup-vacuum"] === "true"}
+                    onChange={e => setNewConfig({ ...config, "api.startup-vacuum": "" + e.target.checked })} />
+                <Form.Text id="startup-vacuum-help" muted>
+                    When enabled, runs SQLite VACUUM on startup to reclaim disk space. Useful after large deletions. This may take a while on large databases and only needs to be run occasionally.
+                </Form.Text>
+            </Form.Group>
         </div>
     );
 }
@@ -88,7 +117,9 @@ export function isRepairsSettingsUpdated(config: Record<string, string>, newConf
     return config["repair.enable"] !== newConfig["repair.enable"]
         || config["repair.connections"] !== newConfig["repair.connections"]
         || config["repair.min-check-interval-days"] !== newConfig["repair.min-check-interval-days"]
-        || config["media.library-dir"] !== newConfig["media.library-dir"];
+        || config["media.library-dir"] !== newConfig["media.library-dir"]
+        || config["api.health-check-categories"] !== newConfig["api.health-check-categories"]
+        || config["api.startup-vacuum"] !== newConfig["api.startup-vacuum"];
 }
 
 export function isRepairsSettingsValid(newConfig: Record<string, string>) {

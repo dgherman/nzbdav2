@@ -1,7 +1,6 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using NzbWebDAV.Config;
 using Serilog;
 
@@ -21,7 +20,7 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
         {
             ["recursive"] = "true"
         };
-        
+
         if (!string.IsNullOrEmpty(dir))
         {
             parameters["dir"] = dir;
@@ -37,25 +36,24 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
 
         if (files.Length == 0) return true;
 
-        var allSuccess = true;
+        // Batch all paths in a single request using dir, dir2, dir3, ... keys
+        var parameters = new Dictionary<string, object>();
+        for (var i = 0; i < files.Length; i++)
+        {
+            var key = i == 0 ? "dir" : $"dir{i + 1}";
+            parameters[key] = files[i];
+        }
+
+        Log.Debug("[RcloneRc] Forgetting {Count} paths", files.Length);
+        var success = await SendRequestAsync(config, ForgetEndpoint, parameters).ConfigureAwait(false);
+
+        // Also delete from disk cache if configured
         foreach (var file in files)
         {
-            Log.Information("[RcloneRc] Flushing cache for file: {FilePath}", file);
-            var parameters = new Dictionary<string, object>
-            {
-                ["file"] = file
-            };
-
-            if (!await SendRequestAsync(config, ForgetEndpoint, parameters).ConfigureAwait(false))
-            {
-                allSuccess = false;
-            }
-
-            // Also delete from disk cache if configured
             DeleteFromDiskCache(config.CachePath, file);
         }
 
-        return allSuccess;
+        return success;
     }
 
     /// <summary>
@@ -94,18 +92,17 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
 
             // Search all remote directories under vfs
             var remoteDirectories = Directory.GetDirectories(vfsPath);
-            Log.Information("[RcloneRc] Deleting from disk cache: {RelativePath} (searching {Count} remotes)",
+            Log.Debug("[RcloneRc] Deleting from disk cache: {RelativePath} (searching {Count} remotes)",
                 relativePath, remoteDirectories.Length);
 
             foreach (var remoteDir in remoteDirectories)
             {
                 // Rclone VFS cache mirrors the path directly (no nested structure)
                 var fullCachePath = Path.Combine(remoteDir, relativePath);
-                Log.Debug("[RcloneRc] Checking cache path: {Path}", fullCachePath);
 
                 if (File.Exists(fullCachePath))
                 {
-                    Log.Information("[RcloneRc] Deleting cached file: {Path}", fullCachePath);
+                    Log.Debug("[RcloneRc] Deleting cached file: {Path}", fullCachePath);
                     File.Delete(fullCachePath);
                 }
 
@@ -113,7 +110,7 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
                 var vfsMetaPath = Path.Combine(cacheDir, "vfsMeta", Path.GetFileName(remoteDir), relativePath);
                 if (File.Exists(vfsMetaPath))
                 {
-                    Log.Information("[RcloneRc] Deleting cached metadata: {Path}", vfsMetaPath);
+                    Log.Debug("[RcloneRc] Deleting cached metadata: {Path}", vfsMetaPath);
                     File.Delete(vfsMetaPath);
                 }
             }
@@ -132,36 +129,45 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
             var url = config.Url!.TrimEnd('/') + "/" + command;
 
             var request = new HttpRequestMessage(HttpMethod.Post, url);
-            
-            // Set Authentication if provided
-            if (!string.IsNullOrEmpty(config.Username) && !string.IsNullOrEmpty(config.Password))
+
+            // Set Authentication if provided (user-only auth is valid for rclone)
+            if (!string.IsNullOrEmpty(config.Username) || !string.IsNullOrEmpty(config.Password))
             {
-                var authString = Convert.ToBase64String(Encoding.ASCII.GetBytes($"{config.Username}:{config.Password}"));
+                var credentials = $"{config.Username ?? ""}:{config.Password ?? ""}";
+                var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials));
                 request.Headers.Authorization = new AuthenticationHeaderValue("Basic", authString);
             }
 
             var json = JsonSerializer.Serialize(parameters);
             request.Content = new StringContent(json, Encoding.UTF8, "application/json");
 
-            Log.Information("[RcloneRc] Sending command {Command} to {Url} with parameters: {Json}", command, url, json);
+            Log.Debug("[RcloneRc] {Command}: {Json}", command, json);
 
             var response = await client.SendAsync(request).ConfigureAwait(false);
             var responseBody = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
 
             if (response.IsSuccessStatusCode)
             {
-                Log.Information("[RcloneRc] Command {Command} successful. Response: {Response}", command, responseBody);
+                Log.Debug("[RcloneRc] {Command} succeeded", command);
                 return true;
             }
-            else
-            {
-                Log.Warning("[RcloneRc] Command {Command} failed with status {Status}. Response: {Response}", command, response.StatusCode, responseBody);
-                return false;
-            }
+
+            Log.Warning("[RcloneRc] {Command} failed with status {Status}: {Response}", command, response.StatusCode, responseBody);
+            return false;
+        }
+        catch (TaskCanceledException ex)
+        {
+            Log.Warning(ex, "[RcloneRc] {Command} timed out", command);
+            return false;
+        }
+        catch (HttpRequestException ex)
+        {
+            Log.Warning(ex, "[RcloneRc] {Command} failed: {Message}", command, ex.Message);
+            return false;
         }
         catch (Exception ex)
         {
-            Log.Error(ex, "[RcloneRc] Failed to send command {Command}", command);
+            Log.Error(ex, "[RcloneRc] {Command} unexpected error", command);
             return false;
         }
     }

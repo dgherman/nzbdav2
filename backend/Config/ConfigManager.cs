@@ -417,6 +417,25 @@ public class ConfigManager
         return GetConfigValue("general.base-url") ?? "http://localhost:3000";
     }
 
+    public bool IsStartupVacuumEnabled()
+    {
+        var defaultValue = false;
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("api.startup-vacuum"));
+        return configValue != null ? bool.Parse(configValue) : defaultValue;
+    }
+
+    public List<string> GetHealthCheckCategories()
+    {
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("api.health-check-categories"));
+        if (configValue == null) return [];
+
+        return configValue
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToList();
+    }
+
     public RcloneRcConfig GetRcloneRcConfig()
     {
         var defaultValue = new RcloneRcConfig();

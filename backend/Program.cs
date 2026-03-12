@@ -56,8 +56,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-03-10-DUPLICATE-SEGMENT-FALLBACK");
-        Log.Warning("  FEATURE: Try fallback message-IDs for NZBs with duplicate segment numbers");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-03-12-HISTORY-COMPRESSION");
+        Log.Warning("  FEATURE: Compress HistoryItem NzbContents with Zstd");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -179,6 +179,14 @@ class Program
         // initialize the config-manager
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
+
+        // Optional startup VACUUM (reclaims disk space, useful after large deletions)
+        if (configManager.IsStartupVacuumEnabled())
+        {
+            Log.Warning("Running startup VACUUM (this may take a while for large databases)...");
+            await databaseContext.Database.ExecuteSqlRawAsync("VACUUM;").ConfigureAwait(false);
+            Log.Warning("Startup VACUUM completed.");
+        }
 
         // Sync log level from config
         var configLevel = configManager.GetLogLevel();

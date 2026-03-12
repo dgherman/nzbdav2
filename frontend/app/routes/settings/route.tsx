@@ -56,6 +56,8 @@ const defaultConfig = {
     "analysis.enable": "true",
     "analysis.max-concurrent": "3",
     "provider-affinity.enable": "true",
+    "api.startup-vacuum": "false",
+    "api.health-check-categories": "",
 }
 
 export async function loader({ request }: Route.LoaderArgs) {

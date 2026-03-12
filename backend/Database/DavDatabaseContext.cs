@@ -455,6 +455,12 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
 
             e.HasIndex(i => new { i.Category, i.DownloadDirId })
                 .IsUnique(false);
+
+            e.Property(i => i.NzbContents)
+                .HasConversion(
+                    v => v == null ? null : CompressionUtil.Compress(v),
+                    v => v == null ? null : CompressionUtil.Decompress(v))
+                .IsRequired(false);
         });
 
         // QueueNzbContents
