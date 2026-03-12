@@ -12,7 +12,7 @@ RUN npm run build:server
 RUN npm prune --omit=dev
 
 # -------- Stage 2: Build backend --------
-FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:9.0 AS backend-build
+FROM --platform=$BUILDPLATFORM mcr.microsoft.com/dotnet/sdk:10.0 AS backend-build
 
 WORKDIR /backend
 ARG CACHE_BUST
@@ -29,7 +29,7 @@ RUN case "$TARGETARCH" in \
     dotnet publish -c Release -r linux-musl-$DOTNET_ARCH -o ./publish
 
 # -------- Stage 3: Combined runtime image --------
-FROM mcr.microsoft.com/dotnet/aspnet:9.0-alpine
+FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine
 
 WORKDIR /app
 
