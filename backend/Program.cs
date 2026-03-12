@@ -56,8 +56,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-03-10-DUPLICATE-SEGMENT-FALLBACK");
-        Log.Warning("  FEATURE: Try fallback message-IDs for NZBs with duplicate segment numbers");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-03-12-QUICK-WINS");
+        Log.Warning("  FEATURE: Startup VACUUM + category-specific health checks");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
