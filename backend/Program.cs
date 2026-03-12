@@ -180,6 +180,14 @@ class Program
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
 
+        // Optional startup VACUUM (reclaims disk space, useful after large deletions)
+        if (configManager.IsStartupVacuumEnabled())
+        {
+            Log.Warning("Running startup VACUUM (this may take a while for large databases)...");
+            await databaseContext.Database.ExecuteSqlRawAsync("VACUUM;").ConfigureAwait(false);
+            Log.Warning("Startup VACUUM completed.");
+        }
+
         // Sync log level from config
         var configLevel = configManager.GetLogLevel();
         if (configLevel != null) levelSwitch.MinimumLevel = configLevel.Value;

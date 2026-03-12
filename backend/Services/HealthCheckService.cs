@@ -86,7 +86,8 @@ public class HealthCheckService
                     var currentDateTime = DateTimeOffset.UtcNow;
                     
                     // Fetch a few candidates to skip over ones currently being processed
-                    var candidates = await GetHealthCheckQueueItems(dbClient)
+                    var healthCheckCategories = _configManager.GetHealthCheckCategories();
+                    var candidates = await GetHealthCheckQueueItems(dbClient, healthCheckCategories)
                         .Where(x => x.NextHealthCheck == null || x.NextHealthCheck < currentDateTime)
                         .Take(10)
                         .ToListAsync(_cancellationToken).ConfigureAwait(false);
@@ -296,15 +297,15 @@ public class HealthCheckService
         }
     }
 
-    public static IOrderedQueryable<DavItem> GetHealthCheckQueueItems(DavDatabaseClient dbClient)
+    public static IOrderedQueryable<DavItem> GetHealthCheckQueueItems(DavDatabaseClient dbClient, List<string>? categories = null)
     {
-        return GetHealthCheckQueueItemsQuery(dbClient)
+        return GetHealthCheckQueueItemsQuery(dbClient, categories)
             .OrderBy(x => x.NextHealthCheck)
             .ThenByDescending(x => x.ReleaseDate)
             .ThenBy(x => x.Id);
     }
 
-    public static IQueryable<DavItem> GetHealthCheckQueueItemsQuery(DavDatabaseClient dbClient)
+    public static IQueryable<DavItem> GetHealthCheckQueueItemsQuery(DavDatabaseClient dbClient, List<string>? categories = null)
     {
         // Get parent directory IDs that still have pending (non-imported) history entries.
         // These items haven't been imported by Radarr/Sonarr yet, so health checks
@@ -316,12 +317,21 @@ public class HealthCheckService
                         && h.DownloadStatus == HistoryItem.DownloadStatusOption.Completed)
             .Select(h => h.DownloadDirId!.Value);
 
-        return dbClient.Ctx.Items
+        var query = dbClient.Ctx.Items
             .AsNoTracking()
             .Where(x => (x.Type == DavItem.ItemType.NzbFile
                          || x.Type == DavItem.ItemType.RarFile
                          || x.Type == DavItem.ItemType.MultipartFile)
                         && !pendingHistoryDirIds.Contains(x.ParentId!.Value));
+
+        // Filter by categories if configured (e.g., only health-check "movies,tv")
+        if (categories is { Count: > 0 })
+        {
+            var categoryPrefixes = categories.Select(c => $"/content/{c}/").ToList();
+            query = query.Where(x => categoryPrefixes.Any(prefix => x.Path.StartsWith(prefix)));
+        }
+
+        return query;
     }
 
     private async Task PerformHealthCheck
