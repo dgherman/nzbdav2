@@ -207,7 +207,7 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
             return;
         }
 
-        var itemIds = allItems.Select(x => x.Id.ToString()).ToHashSet();
+        var itemIds = allItems.Select(x => x.Id.ToString().ToUpperInvariant()).ToHashSet();
 
         // Read file metadata using raw SQL to avoid EF value converter decompression
         var nzbFiles = new List<RawNzbFile>();
