@@ -56,8 +56,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-03-12-QUICK-WINS");
-        Log.Warning("  FEATURE: Startup VACUUM + category-specific health checks");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-03-12-HISTORY-COMPRESSION");
+        Log.Warning("  FEATURE: Compress HistoryItem NzbContents with Zstd");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
