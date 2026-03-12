@@ -14,7 +14,8 @@ namespace NzbWebDAV.Services;
 /// <summary>
 /// Persists a snapshot of the /content subtree to disk so it can be restored
 /// if database rows go missing (e.g., after a crash or corruption).
-/// Uses raw SQL to read/write DB values without EF value converter expansion.
+/// Uses raw SQL for file metadata to avoid EF value converter expansion.
+/// Snapshots are Zstd-compressed and stored under /config (~130 MB for large libraries).
 /// </summary>
 public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : BackgroundService
 {
@@ -101,7 +102,6 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
         var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open) await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        // Get existing IDs to avoid duplicates
         var existingItemIds = new HashSet<string>();
         await using (var cmd = conn.CreateCommand())
         {
@@ -113,7 +113,6 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
 
         var restoredItems = 0;
         var restoredFiles = 0;
-
         await using var tx = await conn.BeginTransactionAsync(ct).ConfigureAwait(false);
 
         // Restore DavItems (directories first by path depth)
@@ -122,7 +121,7 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
             if (existingItemIds.Contains(item.Id.ToString())) continue;
 
             await using var cmd = conn.CreateCommand();
-            cmd.Transaction = (System.Data.Common.DbTransaction)tx;
+            cmd.Transaction = (DbTransaction)tx;
             cmd.CommandText = @"INSERT OR IGNORE INTO DavItems
                 (Id, IdPrefix, CreatedAt, ParentId, Name, FileSize, Type, Path, ReleaseDate, LastHealthCheck, NextHealthCheck, MediaInfo, IsCorrupted, CorruptionReason)
                 VALUES (@id, @idPrefix, @createdAt, @parentId, @name, @fileSize, @type, @path, @releaseDate, @lastHealthCheck, @nextHealthCheck, @mediaInfo, @isCorrupted, @corruptionReason)";
@@ -144,11 +143,11 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
             restoredItems++;
         }
 
-        // Restore NzbFiles (raw column values)
+        // Restore NzbFiles (raw column values, already compressed in DB)
         foreach (var nzb in snapshot.NzbFiles)
         {
             await using var cmd = conn.CreateCommand();
-            cmd.Transaction = (System.Data.Common.DbTransaction)tx;
+            cmd.Transaction = (DbTransaction)tx;
             cmd.CommandText = "INSERT OR IGNORE INTO DavNzbFiles (Id, SegmentIds, SegmentSizes, SegmentFallbacks) VALUES (@id, @segmentIds, @segmentSizes, @segmentFallbacks)";
             AddParam(cmd, "@id", nzb.Id);
             AddParam(cmd, "@segmentIds", nzb.SegmentIds);
@@ -158,11 +157,11 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
             restoredFiles++;
         }
 
-        // Restore RarFiles (raw column values)
+        // Restore RarFiles
         foreach (var rar in snapshot.RarFiles)
         {
             await using var cmd = conn.CreateCommand();
-            cmd.Transaction = (System.Data.Common.DbTransaction)tx;
+            cmd.Transaction = (DbTransaction)tx;
             cmd.CommandText = "INSERT OR IGNORE INTO DavRarFiles (Id, RarParts) VALUES (@id, @rarParts)";
             AddParam(cmd, "@id", rar.Id);
             AddParam(cmd, "@rarParts", rar.RarParts);
@@ -170,11 +169,11 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
             restoredFiles++;
         }
 
-        // Restore MultipartFiles (raw column values)
+        // Restore MultipartFiles
         foreach (var mp in snapshot.MultipartFiles)
         {
             await using var cmd = conn.CreateCommand();
-            cmd.Transaction = (System.Data.Common.DbTransaction)tx;
+            cmd.Transaction = (DbTransaction)tx;
             cmd.CommandText = "INSERT OR IGNORE INTO DavMultipartFiles (Id, Metadata) VALUES (@id, @metadata)";
             AddParam(cmd, "@id", mp.Id);
             AddParam(cmd, "@metadata", mp.Metadata);
@@ -195,7 +194,7 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
         var conn = db.Database.GetDbConnection();
         if (conn.State != ConnectionState.Open) await conn.OpenAsync(ct).ConfigureAwait(false);
 
-        // Get all /content item IDs first
+        // Get DavItems via EF (lightweight, no value converters on heavy columns)
         var allItems = await db.Items
             .AsNoTracking()
             .Where(x => x.Path.StartsWith("/content/"))
@@ -209,7 +208,7 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
 
         var itemIds = allItems.Select(x => x.Id.ToString().ToUpperInvariant()).ToHashSet();
 
-        // Read file metadata using raw SQL to avoid EF value converter decompression
+        // Read file metadata via raw SQL — values stay in their already-compressed DB form
         var nzbFiles = new List<RawNzbFile>();
         var rarFiles = new List<RawRarFile>();
         var multipartFiles = new List<RawMultipartFile>();
@@ -292,9 +291,9 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
         if (File.Exists(LegacySnapshotPath)) File.Delete(LegacySnapshotPath);
         if (File.Exists(LegacyBackupPath)) File.Delete(LegacyBackupPath);
 
-        var fileSizeKb = new FileInfo(SnapshotPath).Length / 1024.0;
-        Log.Warning("[ContentSnapshot] Saved snapshot: {Items} items, {Nzb} NZB, {Rar} RAR, {Multipart} multipart ({SizeKb:F0} KB)",
-            allItems.Count, nzbFiles.Count, rarFiles.Count, multipartFiles.Count, fileSizeKb);
+        var fileSizeMb = new FileInfo(SnapshotPath).Length / (1024.0 * 1024.0);
+        Log.Warning("[ContentSnapshot] Saved snapshot: {Items} items, {Nzb} NZB, {Rar} RAR, {Multipart} multipart ({SizeMb:F1} MB)",
+            allItems.Count, nzbFiles.Count, rarFiles.Count, multipartFiles.Count, fileSizeMb);
     }
 
     private static async Task<ContentSnapshot?> LoadSnapshotAsync()
@@ -356,20 +355,20 @@ public class ContentSnapshotService(IServiceScopeFactory scopeFactory) : Backgro
     private class RawNzbFile
     {
         public string Id { get; set; } = "";
-        public string SegmentIds { get; set; } = ""; // raw DB TEXT (Zstd+JSON compressed)
+        public string SegmentIds { get; set; } = "";
         public byte[]? SegmentSizes { get; set; }
-        public string? SegmentFallbacks { get; set; } // raw DB TEXT (Zstd+JSON compressed)
+        public string? SegmentFallbacks { get; set; }
     }
 
     private class RawRarFile
     {
         public string Id { get; set; } = "";
-        public string RarParts { get; set; } = ""; // raw DB TEXT (Zstd+JSON compressed)
+        public string RarParts { get; set; } = "";
     }
 
     private class RawMultipartFile
     {
         public string Id { get; set; } = "";
-        public string Metadata { get; set; } = ""; // raw DB TEXT (Zstd+JSON compressed)
+        public string Metadata { get; set; } = "";
     }
 }
