@@ -66,10 +66,8 @@ public class RemoveFromHistoryController(
 
             try
             {
-                await using var transaction = await dbClient.Ctx.Database.BeginTransactionAsync().ConfigureAwait(false);
                 await dbClient.RemoveHistoryItemsAsync(request.NzoIds, request.DeleteCompletedFiles, request.CancellationToken).ConfigureAwait(false);
                 await dbClient.Ctx.SaveChangesAsync(request.CancellationToken).ConfigureAwait(false);
-                await transaction.CommitAsync(request.CancellationToken).ConfigureAwait(false);
                 _ = websocketManager.SendMessage(WebsocketTopic.HistoryItemRemoved, string.Join(",", request.NzoIds));
             }
             catch (Exception ex)

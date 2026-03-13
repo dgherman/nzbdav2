@@ -208,26 +208,17 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
             return;
         }
 
-        Serilog.Log.Information("[DavDatabaseClient] Removing {Count} history items: {Names}", 
+        Serilog.Log.Information("[DavDatabaseClient] Removing {Count} history items: {Names}",
             historyItems.Count, string.Join(", ", historyItems.Select(h => h.JobName)));
 
-        if (deleteFiles)
+        // Queue cleanup items for HistoryCleanupService to process asynchronously
+        Ctx.HistoryCleanupItems.AddRange(historyItems.Select(x => new Models.HistoryCleanupItem
         {
-            var dirIds = historyItems
-                .Where(h => h.DownloadDirId != null)
-                .Select(h => h.DownloadDirId!)
-                .ToList();
+            Id = x.Id,
+            DeleteMountedFiles = deleteFiles
+        }));
 
-            if (dirIds.Count > 0)
-            {
-                Serilog.Log.Information("[DavDatabaseClient] Deleting associated files for {Count} history items", dirIds.Count);
-                await Ctx.Items
-                    .Where(d => dirIds.Contains(d.Id))
-                    .ExecuteDeleteAsync(ct).ConfigureAwait(false);
-            }
-        }
-
-        // Delete the history items from the database
+        // Remove history items from the database
         Ctx.HistoryItems.RemoveRange(historyItems);
     }
 
