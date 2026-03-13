@@ -40,6 +40,8 @@ public static class SigtermUtil
         return CancellationTokenSource.Token;
     }
 
+    public static bool IsSigtermTriggered() => CancellationTokenSource.IsCancellationRequested;
+
     public static void Cancel()
     {
         CancellationTokenSource.Cancel();

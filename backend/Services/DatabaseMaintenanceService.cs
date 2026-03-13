@@ -23,6 +23,10 @@ public class DatabaseMaintenanceService(IServiceScopeFactory scopeFactory) : Bac
             {
                 await PerformMaintenanceAsync(stoppingToken);
             }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
             catch (Exception ex)
             {
                 Log.Error(ex, "[DatabaseMaintenance] Error occurred during scheduled maintenance.");
