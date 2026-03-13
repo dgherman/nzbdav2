@@ -25,7 +25,8 @@ public class FileAggregator(DavDatabaseClient dbClient, DavItem mountDirectory, 
                 fileSize: result.FileSize,
                 type: DavItem.ItemType.NzbFile,
                 releaseDate: result.ReleaseDate,
-                lastHealthCheck: checkedFullHealth ? DateTimeOffset.UtcNow : null
+                lastHealthCheck: checkedFullHealth ? DateTimeOffset.UtcNow : null,
+                historyItemId: mountDirectory.HistoryItemId
             );
 
             var (primaryIds, fallbacks) = result.NzbFile.GetSegmentIdsWithFallbacks();

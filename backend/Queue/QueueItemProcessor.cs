@@ -487,7 +487,8 @@ public class QueueItemProcessor(
             fileSize: null,
             type: DavItem.ItemType.Directory,
             releaseDate: null,
-            lastHealthCheck: null
+            lastHealthCheck: null,
+            historyItemId: queueItem.Id
         );
         dbClient.Ctx.Items.Add(mountFolder);
         return Task.FromResult(mountFolder);
@@ -508,7 +509,8 @@ public class QueueItemProcessor(
                 fileSize: null,
                 type: DavItem.ItemType.Directory,
                 releaseDate: null,
-                lastHealthCheck: null
+                lastHealthCheck: null,
+                historyItemId: queueItem.Id
             );
             dbClient.Ctx.Items.Add(mountFolder);
             return mountFolder;

@@ -39,7 +39,8 @@ public class MultipartMkvAggregator
                 fileSize: fileParts.Sum(x => x.FilePartByteRange.Count),
                 type: DavItem.ItemType.MultipartFile,
                 releaseDate: multipartMkvFile.ReleaseDate,
-                lastHealthCheck: checkedFullHealth ? DateTimeOffset.UtcNow : null
+                lastHealthCheck: checkedFullHealth ? DateTimeOffset.UtcNow : null,
+                historyItemId: MountDirectory.HistoryItemId
             );
 
             var davMultipartFile = new DavMultipartFile()

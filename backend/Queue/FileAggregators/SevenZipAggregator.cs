@@ -46,7 +46,8 @@ public class SevenZipAggregator(
                     ?? davMultipartFileMeta.FileParts.Sum(x => x.FilePartByteRange.Count),
                 type: DavItem.ItemType.MultipartFile,
                 releaseDate: sevenZipFile.ReleaseDate,
-                lastHealthCheck: checkedFullHealth ? DateTimeOffset.UtcNow : null
+                lastHealthCheck: checkedFullHealth ? DateTimeOffset.UtcNow : null,
+                historyItemId: MountDirectory.HistoryItemId
             );
 
             var davMultipartFile = new DavMultipartFile()
