@@ -20,4 +20,13 @@ public class RcloneController(RcloneRcService rcloneRcService) : ControllerBase
         var success = await rcloneRcService.ForgetAsync(files);
         return success ? Ok() : NotFound(new { error = "Rclone RC command failed. Check logs." });
     }
+
+    [HttpPost("test-connection")]
+    public async Task<IActionResult> TestConnection([FromForm] string host, [FromForm] string? user, [FromForm] string? pass)
+    {
+        var (success, version, error) = await rcloneRcService.TestConnectionAsync(host, user, pass);
+        return success
+            ? Ok(new { success = true, version })
+            : Ok(new { success = false, error });
+    }
 }
