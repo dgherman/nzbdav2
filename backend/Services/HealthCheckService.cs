@@ -307,22 +307,15 @@ public class HealthCheckService
 
     public static IQueryable<DavItem> GetHealthCheckQueueItemsQuery(DavDatabaseClient dbClient, List<string>? categories = null)
     {
-        // Get parent directory IDs that still have pending (non-imported) history entries.
-        // These items haven't been imported by Radarr/Sonarr yet, so health checks
-        // and repairs should not run on them (they'd be incorrectly deleted as "orphaned").
-        var pendingHistoryDirIds = dbClient.Ctx.HistoryItems
-            .Where(h => h.DownloadDirId != null
-                        && !h.IsImported
-                        && !h.IsArchived
-                        && h.DownloadStatus == HistoryItem.DownloadStatusOption.Completed)
-            .Select(h => h.DownloadDirId!.Value);
-
+        // Items with a non-null HistoryItemId are still linked to an active history entry
+        // (not yet imported by Radarr/Sonarr). Skip them to avoid health-checking files
+        // that are still being processed.
         var query = dbClient.Ctx.Items
             .AsNoTracking()
             .Where(x => (x.Type == DavItem.ItemType.NzbFile
                          || x.Type == DavItem.ItemType.RarFile
                          || x.Type == DavItem.ItemType.MultipartFile)
-                        && !pendingHistoryDirIds.Contains(x.ParentId!.Value));
+                        && x.HistoryItemId == null);
 
         // Filter by categories if configured (e.g., only health-check "movies,tv")
         if (categories is { Count: > 0 })
