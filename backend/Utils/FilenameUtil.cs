@@ -7,7 +7,7 @@ public partial class FilenameUtil
     // Group `pw` contains the password,
     // Group `rm` contains the part of the filename that should be removed to create a clean job name
     // Group `br` ensures that the brackets are closed / is used for back reference
-    [GeneratedRegex(@"(?<rm>[\s-]*(?:(?<br>{{)|password=)(?<pw>\w+)(?(br)}}))\.nzb$", RegexOptions.IgnoreCase)]
+    [GeneratedRegex(@"(?<rm>[\s-]*(?:(?<br>{{)|password=)(?<pw>.+)(?(br)}}))\.nzb$", RegexOptions.IgnoreCase)]
     public static partial Regex PasswordRegex();
 
     private static readonly HashSet<string> VideoExtensions =
