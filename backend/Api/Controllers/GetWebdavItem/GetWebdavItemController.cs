@@ -1,4 +1,5 @@
 ﻿using System.Text;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.StaticFiles;
@@ -31,9 +32,10 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
         var stream = await item.GetReadableStreamAsync(HttpContext.RequestAborted).ConfigureAwait(false);
         var fileSize = stream.Length;
 
-        // set the content-typ header
+        // set content headers
         Response.Headers["Content-Type"] = GetContentType(item.Name);
         Response.Headers["Accept-Ranges"] = "bytes";
+        Response.Headers["Content-Disposition"] = GetContentDisposition(item.Name, request.ShouldDownload);
 
         if (request.RangeStart is not null)
         {
@@ -82,6 +84,22 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
             Response.StatusCode = 500;
             await Response.WriteAsync($"Error streaming file: {ex.Message}", HttpContext.RequestAborted).ConfigureAwait(false);
         }
+    }
+
+    private static string GetContentDisposition(string filename, bool shouldDownload)
+    {
+        var disposition = shouldDownload ? "attachment" : "inline";
+
+        // Strip control characters for header safety
+        var safe = Regex.Replace(filename, @"[\x00-\x1f]", "");
+
+        // ASCII fallback: replace non-ASCII, quotes, backslashes, semicolons
+        var ascii = Regex.Replace(safe, @"[^\x20-\x7E]|["";\\]", "_");
+
+        // RFC 5987 UTF-8 encoding for the full filename
+        var utf8 = Uri.EscapeDataString(safe);
+
+        return $"{disposition}; filename=\"{ascii}\"; filename*=UTF-8''{utf8}";
     }
 
     private static string GetContentType(string item)

@@ -140,6 +140,7 @@
 }
 
 .video-icon {
+  flex-shrink: 0;
   display: inline-block;
   width: 40px;
   height: 40px;
@@ -149,6 +150,7 @@
 }
 
 .image-icon {
+  flex-shrink: 0;
   display: inline-block;
   width: 40px;
   height: 35px;

@@ -11,6 +11,7 @@ public class GetWebdavItemRequest
     public string Item { get; init; }
     public long? RangeStart { get; init; }
     public long? RangeEnd { get; init; }
+    public bool ShouldDownload { get; init; }
 
     public GetWebdavItemRequest(HttpContext context)
     {
@@ -20,6 +21,9 @@ public class GetWebdavItemRequest
         if (path.StartsWith("view")) path = path[4..];
         if (path.StartsWith("/")) path = path[1..];
         Item = path;
+
+        // parse download query param
+        ShouldDownload = context.Request.Query["download"].FirstOrDefault()?.ToLower() == "true";
 
         // authenticate the downloadKey
         var downloadKey = context.Request.Query["downloadKey"];
