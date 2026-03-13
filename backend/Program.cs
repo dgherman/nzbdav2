@@ -248,6 +248,11 @@ class Program
 
         // force instantiation of services
         var app = builder.Build();
+
+        // Wire rclone vfs/forget into DavDatabaseContext SaveChangesAsync
+        var rcloneService = app.Services.GetRequiredService<RcloneRcService>();
+        DavDatabaseContext.VfsForgetCallback = paths => rcloneService.ForgetAsync(paths);
+
         app.Services.GetRequiredService<ArrMonitoringService>();
         app.Services.GetRequiredService<HealthCheckService>();
         app.Services.GetRequiredService<BandwidthService>();

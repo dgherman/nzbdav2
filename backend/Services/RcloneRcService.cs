@@ -121,6 +121,48 @@ public class RcloneRcService(ConfigManager configManager, IHttpClientFactory htt
         }
     }
 
+    public async Task<(bool Success, string? Version, string? Error)> TestConnectionAsync(string host, string? user, string? pass)
+    {
+        var config = new RcloneRcConfig
+        {
+            Url = host,
+            Username = user,
+            Password = pass,
+            Enabled = true
+        };
+
+        try
+        {
+            var client = httpClientFactory.CreateClient("RcloneRc");
+            var url = config.Url!.TrimEnd('/') + "/core/version";
+
+            var request = new HttpRequestMessage(HttpMethod.Post, url);
+            if (!string.IsNullOrEmpty(config.Username) || !string.IsNullOrEmpty(config.Password))
+            {
+                var credentials = $"{config.Username ?? ""}:{config.Password ?? ""}";
+                var authString = Convert.ToBase64String(Encoding.UTF8.GetBytes(credentials));
+                request.Headers.Authorization = new AuthenticationHeaderValue("Basic", authString);
+            }
+            request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+
+            var response = await client.SendAsync(request).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+            if (response.IsSuccessStatusCode)
+            {
+                var doc = JsonSerializer.Deserialize<JsonElement>(body);
+                var version = doc.TryGetProperty("version", out var v) ? v.GetString() : null;
+                return (true, version, null);
+            }
+
+            return (false, null, $"HTTP {(int)response.StatusCode}: {body}");
+        }
+        catch (Exception ex)
+        {
+            return (false, null, ex.Message);
+        }
+    }
+
     private async Task<bool> SendRequestAsync(RcloneRcConfig config, string command, Dictionary<string, object> parameters)
     {
         try

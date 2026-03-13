@@ -1,15 +1,22 @@
 ﻿using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using NzbWebDAV.Database.Interceptors;
 using NzbWebDAV.Database.Models;
 using NzbWebDAV.Utils;
+using Serilog;
 
 namespace NzbWebDAV.Database;
 
 public sealed class DavDatabaseContext() : DbContext(Options.Value)
 {
+    /// <summary>
+    /// Static callback for vfs/forget integration. Set during startup
+    /// to fire-and-forget rclone vfs/forget when DavItems change.
+    /// </summary>
+    public static Func<string[], Task>? VfsForgetCallback { get; set; }
     public static string ConfigPath => Environment.GetEnvironmentVariable("CONFIG_PATH") ?? "/config";
     public static string DatabaseFilePath => Path.Join(ConfigPath, "db.sqlite");
 
@@ -613,5 +620,61 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
             e.HasIndex(i => i.LastSeen);
         });
 
+    }
+
+    public override async Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+    {
+        var dirsToForget = GetVfsForgetDirectories();
+        var result = await base.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        if (dirsToForget.Length > 0 && VfsForgetCallback != null)
+            _ = VfsForgetCallback(dirsToForget);
+
+        return result;
+    }
+
+    private string[] GetVfsForgetDirectories()
+    {
+        if (VfsForgetCallback == null) return [];
+
+        var dirs = new HashSet<string>();
+        var hasQueueChanges = false;
+
+        foreach (var entry in ChangeTracker.Entries())
+        {
+            if (entry.State is not (EntityState.Added or EntityState.Deleted)) continue;
+
+            if (entry.Entity is DavItem davItem && !string.IsNullOrEmpty(davItem.Path))
+            {
+                var parentDir = Path.GetDirectoryName(davItem.Path)?.Replace('\\', '/');
+                if (!string.IsNullOrEmpty(parentDir))
+                {
+                    dirs.Add(parentDir);
+
+                    // Mirror under /completed-symlinks if it's a /content path
+                    if (parentDir.StartsWith("/content/"))
+                        dirs.Add("/completed-symlinks" + parentDir["/content".Length..]);
+                }
+            }
+            else if (entry.Entity is QueueItem)
+            {
+                hasQueueChanges = true;
+            }
+        }
+
+        if (hasQueueChanges)
+            dirs.Add("/nzbs");
+
+        return [.. dirs];
+    }
+
+    /// <summary>
+    /// Triggers vfs/forget for the given paths. Use for bulk operations
+    /// that bypass EF change tracking (ExecuteDeleteAsync, raw SQL).
+    /// </summary>
+    public static void TriggerVfsForget(params string[] paths)
+    {
+        if (paths.Length == 0 || VfsForgetCallback == null) return;
+        _ = VfsForgetCallback(paths);
     }
 }
