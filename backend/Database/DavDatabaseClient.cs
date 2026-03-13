@@ -226,17 +226,24 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
     {
         var cutoffDate = DateTime.UtcNow.AddDays(-daysToKeep);
 
-        // Delete files for old hidden items
-        await Ctx.Items
-            .Where(d => Ctx.HistoryItems
-                .Where(h => h.IsHidden && h.HiddenAt != null && h.HiddenAt < cutoffDate && h.DownloadDirId != null)
-                .Select(h => h.DownloadDirId!)
-                .Contains(d.Id))
-            .ExecuteDeleteAsync(ct).ConfigureAwait(false);
+        // Get old hidden history items to clean up
+        var oldHiddenItems = await Ctx.HistoryItems
+            .Where(h => h.IsHidden && h.HiddenAt != null && h.HiddenAt < cutoffDate)
+            .Select(h => h.Id)
+            .ToListAsync(ct).ConfigureAwait(false);
+
+        if (oldHiddenItems.Count == 0) return;
+
+        // Queue cleanup items for HistoryCleanupService to handle DavItem deletion
+        Ctx.HistoryCleanupItems.AddRange(oldHiddenItems.Select(id => new Models.HistoryCleanupItem
+        {
+            Id = id,
+            DeleteMountedFiles = true
+        }));
 
         // Delete old hidden history items
         await Ctx.HistoryItems
-            .Where(h => h.IsHidden && h.HiddenAt != null && h.HiddenAt < cutoffDate)
+            .Where(h => oldHiddenItems.Contains(h.Id))
             .ExecuteDeleteAsync(ct).ConfigureAwait(false);
     }
 

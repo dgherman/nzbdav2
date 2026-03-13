@@ -37,31 +37,50 @@ public class RemoveUnlinkedFilesTask(
     private async Task RemoveUnlinkedFiles()
     {
         Report("Scanning all linked files...");
-        var startTime = DateTime.Now;
+        // Safety buffer: only consider items created at least 1 day ago
+        var startTime = DateTime.Now.AddDays(-1);
         var linkedIdCount = await WriteLinkedIdsToTable();
-        if (linkedIdCount < 5)
+        try
         {
-            Report("Aborted: " +
-                   "There are less than five linked files found in your library. " +
-                   "Cancelling operation to prevent accidental bulk deletion.");
-            return;
-        }
+            if (linkedIdCount < 5)
+            {
+                Report("Aborted: " +
+                       "There are less than five linked files found in your library. " +
+                       "Cancelling operation to prevent accidental bulk deletion.");
+                return;
+            }
 
-        Report("Searching for unlinked webdav items...");
-        var unlinkedItems = await CountUnlinkedItems(startTime);
-        Report($"Found {unlinkedItems} webdav items to remove.");
+            Report("Searching for unlinked webdav items...");
+            var unlinkedItems = await CountUnlinkedItems(startTime);
+            Report($"Found {unlinkedItems} webdav items to remove.");
 
-        if (isDryRun)
-        {
-            await DryRunIdentifyUnlinkedFiles(startTime);
-            Report($"Done. Identified {_allRemovedPaths.Count} unlinked files.");
+            if (isDryRun)
+            {
+                await DryRunIdentifyUnlinkedFiles(startTime);
+                Report($"Done. Identified {_allRemovedPaths.Count} unlinked files.");
+            }
+            else
+            {
+                await RemoveUnlinkedItems(startTime, unlinkedItems);
+                await RemoveEmptyDirectories(startTime);
+                Report($"Done. Removed {_allRemovedPaths.Count} unlinked files.");
+            }
         }
-        else
+        finally
         {
-            await RemoveUnlinkedItems(startTime, unlinkedItems);
-            await RemoveEmptyDirectories(startTime);
-            Report($"Done. Removed {_allRemovedPaths.Count} unlinked files.");
+            await DropTmpTable();
         }
+    }
+
+    private async Task DropTmpTable()
+    {
+        try
+        {
+            using var scope = scopeFactory.CreateScope();
+            var dbContext = scope.ServiceProvider.GetRequiredService<DavDatabaseContext>();
+            await dbContext.Database.ExecuteSqlRawAsync("DROP TABLE IF EXISTS TMP_LINKED_FILES");
+        }
+        catch { /* best effort */ }
     }
 
     private async Task<int> WriteLinkedIdsToTable()
