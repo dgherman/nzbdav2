@@ -21,6 +21,7 @@ public class DavItem
     public string? MediaInfo { get; set; }
     public bool IsCorrupted { get; set; }
     public string? CorruptionReason { get; set; }
+    public Guid? HistoryItemId { get; set; }
 
     public static DavItem New
     (
@@ -30,7 +31,8 @@ public class DavItem
         long? fileSize,
         ItemType type,
         DateTimeOffset? releaseDate,
-        DateTimeOffset? lastHealthCheck
+        DateTimeOffset? lastHealthCheck,
+        Guid? historyItemId = null
     )
     {
         return new DavItem()
@@ -47,7 +49,8 @@ public class DavItem
             LastHealthCheck = lastHealthCheck,
             NextHealthCheck = releaseDate != null && lastHealthCheck != null
                 ? releaseDate.Value + 2 * (lastHealthCheck.Value - releaseDate.Value)
-                : null
+                : null,
+            HistoryItemId = historyItemId
         };
     }
 

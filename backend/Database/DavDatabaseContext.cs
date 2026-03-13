@@ -43,6 +43,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<NzbProviderStats> NzbProviderStats { get; set; }
     public DbSet<AnalysisHistoryItem> AnalysisHistoryItems { get; set; }
     public DbSet<ProviderBenchmarkResult> ProviderBenchmarkResults { get; set; }
+    public DbSet<HistoryCleanupItem> HistoryCleanupItems => Set<HistoryCleanupItem>();
 
     // tables
     protected override void OnModelCreating(ModelBuilder b)
@@ -236,6 +237,10 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                 .IsRequired()
                 .HasDefaultValue(false);
 
+            e.Property(i => i.HistoryItemId)
+                .ValueGeneratedNever()
+                .IsRequired(false);
+
             e.HasOne(i => i.Parent)
                 .WithMany(p => p.Children)
                 .HasForeignKey(i => i.ParentId)
@@ -246,7 +251,9 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
 
             e.HasIndex(i => new { i.IdPrefix, i.Type });
 
-            e.HasIndex(i => new { i.Type, i.NextHealthCheck, i.ReleaseDate, i.Id });
+            e.HasIndex(i => new { i.Type, i.HistoryItemId, i.NextHealthCheck, i.ReleaseDate, i.Id });
+
+            e.HasIndex(i => new { i.HistoryItemId, i.Type, i.CreatedAt });
 
             e.HasIndex(i => i.Path);
         });
@@ -461,6 +468,15 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
                     v => v == null ? null : CompressionUtil.Compress(v),
                     v => v == null ? null : CompressionUtil.Decompress(v))
                 .IsRequired(false);
+        });
+
+        // HistoryCleanupItem
+        b.Entity<HistoryCleanupItem>(e =>
+        {
+            e.ToTable("HistoryCleanupItems");
+            e.HasKey(i => i.Id);
+            e.Property(i => i.Id).ValueGeneratedNever();
+            e.Property(i => i.DeleteMountedFiles).IsRequired();
         });
 
         // QueueNzbContents
