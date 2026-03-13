@@ -83,9 +83,35 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
         }
     };
 
+    const [testConnStatus, setTestConnStatus] = useState<'idle' | 'testing' | 'success' | 'error'>('idle');
+    const [testConnMessage, setTestConnMessage] = useState('');
+
     const updateRcloneConfig = (newRcConfig: Partial<RcloneRcConfig>) => {
         const updated = { ...rcloneRcConfig, ...newRcConfig };
         setNewConfig({ ...config, "rclone.rc": JSON.stringify(updated) });
+        setTestConnStatus('idle');
+    };
+
+    const testRcloneConnection = async () => {
+        setTestConnStatus('testing');
+        try {
+            const form = new FormData();
+            form.append('host', rcloneRcConfig.Url || '');
+            if (rcloneRcConfig.Username) form.append('user', rcloneRcConfig.Username);
+            if (rcloneRcConfig.Password) form.append('pass', rcloneRcConfig.Password);
+            const response = await fetch('/api/rclone/test-connection', { method: 'POST', body: form });
+            const data = await response.json();
+            if (data.success) {
+                setTestConnStatus('success');
+                setTestConnMessage(data.version ? `Connected (${data.version})` : 'Connected');
+            } else {
+                setTestConnStatus('error');
+                setTestConnMessage(data.error || 'Connection failed');
+            }
+        } catch (error) {
+            setTestConnStatus('error');
+            setTestConnMessage('Request failed');
+        }
     };
 
     return (
@@ -198,24 +224,42 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                     className={styles.input}
                     type="checkbox"
                     id="rclone-rc-enabled"
-                    label={`Enable Rclone RC Integration`}
+                    label={`Enable Rclone Server Notifications`}
                     checked={rcloneRcConfig.Enabled ?? false}
                     onChange={e => updateRcloneConfig({ Enabled: e.target.checked })} />
             </Form.Group>
             {rcloneRcConfig.Enabled && (
                 <>
                     <Form.Group>
-                        <Form.Label htmlFor="rclone-rc-url">RC URL</Form.Label>
-                        <Form.Control
-                            className={styles.input}
-                            type="text"
-                            id="rclone-rc-url"
-                            placeholder="http://localhost:5572"
-                            value={rcloneRcConfig.Url || ""}
-                            onChange={e => updateRcloneConfig({ Url: e.target.value })} />
+                        <Form.Label htmlFor="rclone-rc-url">Rclone Server Host</Form.Label>
+                        <InputGroup>
+                            <Form.Control
+                                className={styles.input}
+                                type="text"
+                                id="rclone-rc-url"
+                                placeholder="http://localhost:5572"
+                                value={rcloneRcConfig.Url || ""}
+                                onChange={e => updateRcloneConfig({ Url: e.target.value })} />
+                            <Button
+                                variant={testConnStatus === 'success' ? 'outline-success' : testConnStatus === 'error' ? 'outline-danger' : 'outline-secondary'}
+                                onClick={testRcloneConnection}
+                                disabled={testConnStatus === 'testing' || !rcloneRcConfig.Url}
+                            >
+                                {testConnStatus === 'testing' ? <Spinner size="sm" />
+                                    : testConnStatus === 'success' ? 'Connected'
+                                    : testConnStatus === 'error' ? 'Failed'
+                                    : 'Test'}
+                            </Button>
+                        </InputGroup>
+                        {testConnStatus === 'success' && testConnMessage && (
+                            <Form.Text className="text-success">{testConnMessage}</Form.Text>
+                        )}
+                        {testConnStatus === 'error' && testConnMessage && (
+                            <Form.Text className="text-danger">{testConnMessage}</Form.Text>
+                        )}
                     </Form.Group>
                     <Form.Group>
-                        <Form.Label htmlFor="rclone-rc-user">RC Username</Form.Label>
+                        <Form.Label htmlFor="rclone-rc-user">Rclone Server User</Form.Label>
                         <Form.Control
                             className={styles.input}
                             type="text"
@@ -225,7 +269,7 @@ export function WebdavSettings({ config, setNewConfig }: SabnzbdSettingsProps) {
                             onChange={e => updateRcloneConfig({ Username: e.target.value })} />
                     </Form.Group>
                     <Form.Group>
-                        <Form.Label htmlFor="rclone-rc-pass">RC Password</Form.Label>
+                        <Form.Label htmlFor="rclone-rc-pass">Rclone Server Password</Form.Label>
                         <Form.Control
                             className={styles.input}
                             type="password"
