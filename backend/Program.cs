@@ -230,6 +230,7 @@ class Program
             .AddSingleton<RcloneRcService>()
             .AddSingleton<StreamingConnectionLimiter>()
             .AddHostedService<DatabaseMaintenanceService>()
+            .AddHostedService<HistoryCleanupService>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
