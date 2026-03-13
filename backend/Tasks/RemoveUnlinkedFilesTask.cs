@@ -63,6 +63,15 @@ public class RemoveUnlinkedFilesTask(
             {
                 await RemoveUnlinkedItems(startTime, unlinkedItems);
                 await RemoveEmptyDirectories(startTime);
+
+                // Trigger vfs/forget for all affected directories
+                var dirsToForget = _allRemovedPaths
+                    .Select(p => Path.GetDirectoryName(p)?.Replace('\\', '/'))
+                    .Where(d => !string.IsNullOrEmpty(d))
+                    .Distinct()
+                    .ToArray();
+                DavDatabaseContext.TriggerVfsForget(dirsToForget!);
+
                 Report($"Done. Removed {_allRemovedPaths.Count} unlinked files.");
             }
         }

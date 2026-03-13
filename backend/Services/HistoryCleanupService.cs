@@ -27,6 +27,13 @@ public class HistoryCleanupService(IServiceScopeFactory scopeFactory) : Backgrou
                     continue;
                 }
 
+                // Collect paths before bulk operation (bypasses EF change tracking)
+                var affectedPaths = await dbContext.Items
+                    .Where(x => x.HistoryItemId == cleanupItem.Id)
+                    .Select(x => x.Path)
+                    .ToListAsync(stoppingToken)
+                    .ConfigureAwait(false);
+
                 if (cleanupItem.DeleteMountedFiles)
                 {
                     var deleted = await dbContext.Items
@@ -49,6 +56,14 @@ public class HistoryCleanupService(IServiceScopeFactory scopeFactory) : Backgrou
                     Log.Debug("[HistoryCleanup] Unlinked {Count} DavItems from history item {Id}",
                         updated, cleanupItem.Id);
                 }
+
+                // Trigger vfs/forget for affected directories
+                var dirsToForget = affectedPaths
+                    .Select(p => Path.GetDirectoryName(p)?.Replace('\\', '/'))
+                    .Where(d => !string.IsNullOrEmpty(d))
+                    .Distinct()
+                    .ToArray();
+                DavDatabaseContext.TriggerVfsForget(dirsToForget!);
 
                 dbContext.HistoryCleanupItems.Remove(cleanupItem);
                 await dbContext.SaveChangesAsync(stoppingToken).ConfigureAwait(false);

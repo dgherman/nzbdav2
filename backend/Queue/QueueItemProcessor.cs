@@ -601,6 +601,9 @@ public class QueueItemProcessor(
             }
         }
 
+        // Forget /nzbs since queue item was consumed
+        DavDatabaseContext.TriggerVfsForget("/nzbs");
+
         _ = websocketManager.SendMessage(WebsocketTopic.QueueItemRemoved, queueItem.Id.ToString());
         _ = websocketManager.SendMessage(WebsocketTopic.HistoryItemAdded, historySlot.ToJson());
         _ = RefreshMonitoredDownloads();
