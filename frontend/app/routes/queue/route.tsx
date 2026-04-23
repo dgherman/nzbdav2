@@ -200,20 +200,24 @@ export default function Queue(props: Route.ComponentProps) {
     // websocket
     const onWebsocketMessage = useCallback((topic: string, message: string) => {
         if (disableLiveView) return;
-        if (topic == topicNames.queueItemAdded)
-            onAddQueueSlot(JSON.parse(message));
-        else if (topic == topicNames.queueItemRemoved)
-            onRemoveQueueSlots(new Set<string>(message.split(',')));
-        else if (topic == topicNames.queueItemStatus)
-            onChangeQueueSlotStatus(message);
-        else if (topic == topicNames.queueItemPercentage)
-            onChangeQueueSlotPercentage(message);
-        else if (topic == topicNames.queueItemPriorityChanged)
-            onQueuePriorityChanged();
-        else if (topic == topicNames.historyItemAdded)
-            onAddHistorySlot(JSON.parse(message));
-        else if (topic == topicNames.historyItemRemoved)
-            onRemoveHistorySlots(new Set<string>(message.split(',')));
+        try {
+            if (topic == topicNames.queueItemAdded)
+                onAddQueueSlot(JSON.parse(message));
+            else if (topic == topicNames.queueItemRemoved)
+                onRemoveQueueSlots(new Set<string>(message.split(',').filter(Boolean)));
+            else if (topic == topicNames.queueItemStatus)
+                onChangeQueueSlotStatus(message);
+            else if (topic == topicNames.queueItemPercentage)
+                onChangeQueueSlotPercentage(message);
+            else if (topic == topicNames.queueItemPriorityChanged)
+                onQueuePriorityChanged();
+            else if (topic == topicNames.historyItemAdded)
+                onAddHistorySlot(JSON.parse(message));
+            else if (topic == topicNames.historyItemRemoved)
+                onRemoveHistorySlots(new Set<string>(message.split(',').filter(Boolean)));
+        } catch (error) {
+            console.warn('[Queue] Ignored malformed websocket payload', { topic, error });
+        }
     }, [
         onAddQueueSlot,
         onRemoveQueueSlots,

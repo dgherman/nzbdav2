@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
@@ -28,6 +29,36 @@ public class BufferedSegmentStream : Stream
         // if the config value is 0/negative (same failure class as the v0.7.3 pool-size crash).
         var slots = Math.Max(1, max);
         s_concurrentStreamSlots = new SemaphoreSlim(slots, slots);
+    }
+
+    // Memory-pressure throttle: when an OOM is observed in the fetch path, force GC and
+    // briefly suppress new fetches across all streams to let the heap recover. This avoids
+    // the cascading OOM storms that were observed under sustained streaming load.
+    private static long s_lastOomTicks; // DateTime.UtcNow.Ticks of last OOM event
+    private const int OomCooldownMs = 750;
+
+    private static void HandleOomPressure()
+    {
+        Interlocked.Exchange(ref s_lastOomTicks, DateTime.UtcNow.Ticks);
+        try
+        {
+            // Aggressive collect to release LOH fragments and pipe segments
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+        }
+        catch { /* never let GC issues kill the worker */ }
+    }
+
+    private static async Task WaitForOomCooldownAsync(CancellationToken ct)
+    {
+        var lastTicks = Interlocked.Read(ref s_lastOomTicks);
+        if (lastTicks == 0) return;
+        var elapsed = (DateTime.UtcNow - new DateTime(lastTicks, DateTimeKind.Utc)).TotalMilliseconds;
+        if (elapsed < OomCooldownMs)
+        {
+            try { await Task.Delay((int)(OomCooldownMs - elapsed), ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+        }
     }
 
     public static SemaphoreSlim? TryAcquireSlot()
@@ -1047,6 +1078,10 @@ public class BufferedSegmentStream : Stream
                 baseDetails.ExcludedProviderIndices = excludedProviders.Count > 0 ? excludedProviders : null;
             }
 
+            // Respect global memory-pressure cooldown so we don't pile new allocations
+            // on top of an already OOM-pressured heap.
+            await WaitForOomCooldownAsync(ct).ConfigureAwait(false);
+
             Stream? stream = null;
             try
             {
@@ -1086,8 +1121,12 @@ public class BufferedSegmentStream : Stream
                     }
                 }
 
-                // Rent a buffer and read the segment into it
-                var buffer = new byte[1024 * 1024];
+                // Rent a pooled buffer right-sized to the expected segment size when possible.
+                // Falls back to a 1MB initial size and doubles via re-rent if needed.
+                var initialRentSize = (_segmentSizes != null && index < _segmentSizes.Length && _segmentSizes[index] > 0)
+                    ? (int)Math.Min(_segmentSizes[index] + 4096, int.MaxValue)
+                    : Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
+                var buffer = ArrayPool<byte>.Shared.Rent(initialRentSize);
                 var totalRead = 0;
 
                 // Time network read
@@ -1103,9 +1142,10 @@ public class BufferedSegmentStream : Stream
                     {
                         if (totalRead == buffer.Length)
                         {
-                            // Resize
-                            var newBuffer = new byte[buffer.Length * 2];
+                            // Resize via ArrayPool to avoid LOH churn
+                            var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
                             Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
+                            ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                             buffer = newBuffer;
                         }
 
@@ -1171,10 +1211,12 @@ public class BufferedSegmentStream : Stream
                         baseDetails.ExcludedProviderIndices = null;
                     }
 
-                    return new PooledSegmentData(segmentId, buffer, totalRead);
+                    return new PooledSegmentData(segmentId, buffer, totalRead, pooled: true);
                 }
                 catch
                 {
+                    // Return the rented buffer on failure to avoid pool leaks
+                    ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                     throw;
                 }
             }
@@ -1238,6 +1280,21 @@ public class BufferedSegmentStream : Stream
             catch (OperationCanceledException)
             {
                 throw;
+            }
+            catch (OutOfMemoryException ex)
+            {
+                // OOM is special: don't blame the provider, the process is under memory pressure.
+                // Force GC, throttle, and retry without excluding the provider.
+                lastException = ex;
+                hadTransientFailure = true;
+                HandleOomPressure();
+                Log.Warning("[BufferedStream] OOM during fetch: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Attempt={Attempt}/{MaxRetries}. Forced GC and backing off before retry.",
+                    jobName, index, segmentIds.Length, segmentId, attempt + 1, maxRetries);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(500 + attempt * 500), ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { throw; }
             }
             catch (Exception ex)
             {
@@ -1361,7 +1418,8 @@ public class BufferedSegmentStream : Stream
                 ? await multiClient.GetBalancedSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false)
                 : await client.GetSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
 
-            var buffer = new byte[1024 * 1024];
+            var initialSize = Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
+            var buffer = ArrayPool<byte>.Shared.Rent(initialSize);
             var totalRead = 0;
             try
             {
@@ -1369,18 +1427,20 @@ public class BufferedSegmentStream : Stream
                 {
                     if (totalRead == buffer.Length)
                     {
-                        var newBuffer = new byte[buffer.Length * 2];
+                        var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
                         Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
+                        ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                         buffer = newBuffer;
                     }
                     var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
                     if (read == 0) break;
                     totalRead += read;
                 }
-                return new PooledSegmentData(segmentId, buffer, totalRead);
+                return new PooledSegmentData(segmentId, buffer, totalRead, pooled: true);
             }
             catch
             {
+                ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                 throw;
             }
         }
@@ -1665,21 +1725,28 @@ public class BufferedSegmentStream : Stream
     private class PooledSegmentData : IDisposable
     {
         private byte[]? _buffer;
+        private readonly bool _pooled;
 
         public string SegmentId { get; }
         public byte[] Data => _buffer ?? Array.Empty<byte>();
         public int Length { get; }
 
-        public PooledSegmentData(string segmentId, byte[] buffer, int length)
+        public PooledSegmentData(string segmentId, byte[] buffer, int length, bool pooled = false)
         {
             SegmentId = segmentId;
             _buffer = buffer;
             Length = length;
+            _pooled = pooled;
         }
 
         public void Dispose()
         {
+            var buf = _buffer;
             _buffer = null;
+            if (buf != null && _pooled)
+            {
+                ArrayPool<byte>.Shared.Return(buf, clearArray: false);
+            }
         }
     }
 
