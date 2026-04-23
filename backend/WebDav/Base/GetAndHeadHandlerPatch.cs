@@ -48,6 +48,16 @@ public class GetAndHeadHandlerPatch : IRequestHandler
         // Determine the requested range
         var range = request.GetRange();
 
+        // Propagate the requested range end byte to downstream stream factories so that
+        // BufferedSegmentStream prefetch can be bounded to the requested segment(s)
+        // (plus a small overshoot). Only set when the consumer specified a closed range
+        // bytes=X-Y; open-ended bytes=X- and unbounded requests stay unbounded so streaming
+        // playback (Plex/Jellyfin/rclone full-file pulls) is unaffected.
+        if (range?.End is long requestedRangeEnd)
+        {
+            httpContext.Items["RequestedRangeEnd"] = requestedRangeEnd;
+        }
+
         // Obtain the WebDAV collection
         var entry = await _store.GetItemAsync(request.GetUri(), httpContext.RequestAborted).ConfigureAwait(false);
         if (entry == null)

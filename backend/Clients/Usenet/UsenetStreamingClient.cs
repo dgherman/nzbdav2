@@ -288,12 +288,12 @@ public class UsenetStreamingClient
             sharedStreamBufferSize: _configManager.GetSharedStreamBufferSize(), sharedStreamGracePeriod: _configManager.GetSharedStreamGracePeriod());
     }
 
-    public NzbFileStream GetFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null, bool useBufferedStreaming = true, int? bufferSize = null, long[]? segmentSizes = null, Dictionary<int, string[]>? segmentFallbacks = null)
+    public NzbFileStream GetFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null, bool useBufferedStreaming = true, int? bufferSize = null, long[]? segmentSizes = null, Dictionary<int, string[]>? segmentFallbacks = null, int? sharedStreamGracePeriod = null, long? requestedEndByte = null)
     {
         // Use config value if not specified
         var actualBufferSize = bufferSize ?? _configManager.GetStreamBufferSize();
         return new NzbFileStream(segmentIds, fileSize, _client, concurrentConnections, usageContext, useBufferedStreaming, actualBufferSize, segmentSizes, segmentFallbacks,
-            _configManager.GetSharedStreamBufferSize(), _configManager.GetSharedStreamGracePeriod());
+            _configManager.GetSharedStreamBufferSize(), sharedStreamGracePeriod ?? _configManager.GetSharedStreamGracePeriod(), requestedEndByte);
     }
 
     public NzbFileStream GetFastFileStream(string[] segmentIds, long fileSize, int concurrentConnections, ConnectionUsageContext? usageContext = null)

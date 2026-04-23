@@ -18,6 +18,8 @@ public class NzbFileStream : Stream
     private readonly Dictionary<int, string[]>? _segmentFallbacks;
     private readonly int _sharedStreamBufferSize;
     private readonly int _sharedStreamGracePeriod;
+    private readonly long? _requestedEndByte;
+    private const int RangePrefetchOvershootSegments = 4;
 
     private long _position = 0;
     private CombinedStream? _innerStream;
@@ -44,7 +46,8 @@ public class NzbFileStream : Stream
         long[]? segmentSizes = null,
         Dictionary<int, string[]>? segmentFallbacks = null,
         int sharedStreamBufferSize = 32 * 1024 * 1024,
-        int sharedStreamGracePeriod = 10
+        int sharedStreamGracePeriod = 10,
+        long? requestedEndByte = null
     )
     {
         _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
@@ -59,6 +62,7 @@ public class NzbFileStream : Stream
         _segmentFallbacks = segmentFallbacks;
         _sharedStreamBufferSize = sharedStreamBufferSize;
         _sharedStreamGracePeriod = sharedStreamGracePeriod;
+        _requestedEndByte = requestedEndByte;
         _streamCts = new CancellationTokenSource();
 
         if (segmentSizes != null && segmentSizes.Length == fileSegmentIds.Length)
@@ -201,6 +205,41 @@ public class NzbFileStream : Stream
     }
 
 
+    /// <summary>
+    /// Computes the segment index (relative to a remainingSegments slice starting at firstSegmentIndex)
+    /// that contains _requestedEndByte, plus a small overshoot. Returns null when no Range end is set
+    /// or the end byte falls past EOF.
+    /// </summary>
+    private int? ComputeRelativeEndSegmentIndex(int firstSegmentIndex, int remainingSegmentCount)
+    {
+        if (!_requestedEndByte.HasValue) return null;
+        if (_fileSegmentIds.Length == 0 || remainingSegmentCount <= 0) return null;
+
+        var endByte = Math.Min(_requestedEndByte.Value, _fileSize - 1);
+        if (endByte < 0) return 0;
+
+        int absoluteEndIdx;
+        if (_segmentOffsets != null)
+        {
+            // Find segment where _segmentOffsets[i] <= endByte < _segmentOffsets[i+1]
+            var idx = Array.BinarySearch(_segmentOffsets, endByte);
+            absoluteEndIdx = idx >= 0 ? idx : (~idx - 1);
+        }
+        else
+        {
+            // Approximate using uniform segment size
+            var avg = Math.Max(1, _fileSize / _fileSegmentIds.Length);
+            absoluteEndIdx = (int)(endByte / avg);
+        }
+
+        absoluteEndIdx = Math.Clamp(absoluteEndIdx, 0, _fileSegmentIds.Length - 1);
+        var withOvershoot = absoluteEndIdx + RangePrefetchOvershootSegments;
+        var relative = withOvershoot - firstSegmentIndex;
+        if (relative < 0) return 0;
+        if (relative >= remainingSegmentCount) return null; // No bound needed; covers full remainder
+        return relative;
+    }
+
     private async Task<InterpolationSearch.Result> SeekSegment(long byteOffset, CancellationToken ct)
     {
         if (_segmentOffsets != null)
@@ -288,10 +327,13 @@ public class NzbFileStream : Stream
             : firstSegmentIndex * (_fileSize / _fileSegmentIds.Length);
         var totalBaseOffset = (_usageContext.DetailsObject?.BaseByteOffset ?? 0) + segmentByteOffset;
 
-        // Try shared stream path first (for streaming requests with a DavItemId)
+        // Try shared stream path first (for streaming requests with a DavItemId).
+        // Skip when the request specifies a bounded range end — a discrete ranged read does
+        // not benefit from the shared pump (which prefetches to EOF for streaming continuity)
+        // and would waste Usenet bandwidth filling the shared buffer past the requested bytes.
         var davItemId = _usageContext.DetailsObject?.DavItemId;
         if (shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections
-            && davItemId.HasValue)
+            && davItemId.HasValue && !_requestedEndByte.HasValue)
         {
             // Try to attach to an existing shared stream
             var existingHandle = SharedStreamManager.TryAttach(davItemId.Value, totalBaseOffset);
@@ -416,6 +458,16 @@ public class NzbFileStream : Stream
                     remainingSegments.Length, remainingSize, _concurrentConnections, _bufferSize);
                 _contextScope = _streamCts.Token.SetScopedContext(bufferedContext);
                 var bufferedContextCt = _streamCts.Token;
+
+                // Bound prefetch when the consumer specified a Range end — only fetch up to
+                // the segment containing that byte (plus a small overshoot for adjacent
+                // follow-up reads). Prevents 40 MB over-prefetch per ranged read.
+                int? endSegmentIndexInclusive = ComputeRelativeEndSegmentIndex(firstSegmentIndex, remainingSegments.Length);
+                if (endSegmentIndexInclusive.HasValue)
+                {
+                    Serilog.Log.Debug("[NzbFileStream] Range-bounded prefetch: requestedEndByte={EndByte}, firstSegmentIndex={First}, relativeEndIdx={EndIdx} (of {Total} remaining segments)",
+                        _requestedEndByte, firstSegmentIndex, endSegmentIndexInclusive.Value, remainingSegments.Length);
+                }
                 var bufferedStream = new BufferedSegmentStream(
                     remainingSegments,
                     remainingSize,
@@ -426,7 +478,8 @@ public class NzbFileStream : Stream
                     bufferedContext,
                     remainingSegmentSizes,
                     _segmentFallbacks,
-                    firstSegmentIndex
+                    firstSegmentIndex,
+                    endSegmentIndexInclusive
                 );
                 bufferedStream.SetAcquiredSlot(acquiredSlot);
 

@@ -64,8 +64,14 @@ public class DatabaseStoreNzbFile(
 
         Serilog.Log.Debug("[DatabaseStoreNzbFile] Opening stream for {FileName} ({Id})", Name, id);
 
+        // Honor the consumer's HTTP Range end byte (set by GetAndHeadHandlerPatch when the
+        // request specifies bytes=X-Y). Bounds prefetch to that segment + 4-segment overshoot,
+        // preventing ~40 MB of speculative Usenet reads per ranged request.
+        long? requestedEndByte = null;
+        if (httpContext.Items.TryGetValue("RequestedRangeEnd", out var endObj) && endObj is long endByte)
+            requestedEndByte = endByte;
+
         // Use total streaming connections for worker count - the global semaphore limits actual concurrent fetches
-        // This ensures a single stream can utilize the full connection pool
         return usenetClient.GetFileStream(
             file.SegmentIds,
             FileSize,
@@ -74,7 +80,8 @@ public class DatabaseStoreNzbFile(
             configManager.UseBufferedStreaming(),
             configManager.GetStreamBufferSize(),
             file.GetSegmentSizes(),
-            file.SegmentFallbacks
+            file.SegmentFallbacks,
+            requestedEndByte: requestedEndByte
         );
     }
 }
