@@ -57,8 +57,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-04-13-QUEUE-SPEED-HYBRID-POOL");
-        Log.Warning("  NEW: Hybrid PrioritizedSemaphore pool, article caching, buffered RAR reads");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-05-STREMIO-FIXES");
+        Log.Warning("  FIX: Pool slot leak on doomed connections, range-bounded prefetch, cancellation noise demoted");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

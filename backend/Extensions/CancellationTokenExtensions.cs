@@ -38,11 +38,16 @@ public static class CancellationTokenExtensions
             {
                 if (!removed)
                 {
-                    Serilog.Log.Warning("[CancellationTokenContext] FAILED to remove context: {ContextType} = {ContextValue}. Context was already removed or never existed!",
+                    // Benign: an inner SetScopedContext (e.g. inside AnalyzeNzbAsync) typically disposes
+                    // the entry before this outer using-statement unwinds. ConcurrentDictionary handles
+                    // the double-remove gracefully; we only need this for diagnostics.
+                    Serilog.Log.Debug("[CancellationTokenContext] Context already removed by inner scope: {ContextType} = {ContextValue}",
                         lookupKey.Type.Name, value?.ToString() ?? "null");
                 }
                 else if (heldDuration.TotalMinutes > 2)
                 {
+                    // Genuinely interesting: a context lived longer than any of our timeouts should allow,
+                    // which can indicate a leaked CTS or a stuck operation.
                     Serilog.Log.Warning("[CancellationTokenContext] Removed context after {HeldMinutes:F1} minutes: {ContextType} = {ContextValue}. Remaining contexts: {ContextCount}",
                         heldDuration.TotalMinutes, lookupKey.Type.Name, value?.ToString() ?? "null", Context.Count);
                 }
