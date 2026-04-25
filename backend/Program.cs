@@ -308,10 +308,14 @@ class Program
 
         // run
         app.UseMiddleware<ExceptionMiddleware>();
+        // Expose Prometheus /metrics as middleware BEFORE auth so it short-circuits before
+        // UseWebdavBasicAuthentication/UseNWebDav can challenge unauthenticated callers.
+        // Without this, NWebDav's auth middleware returns 401 for /metrics even though the
+        // endpoint itself has no [Authorize] requirement.
+        app.UseMetricServer("/metrics");
         // ReservedConnectionsMiddleware removed - using GlobalOperationLimiter instead
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
         app.MapHealthChecks("/health");
-        app.MapMetrics("/metrics");
         app.Map("/ws", websocketManager.HandleRoute);
         app.MapControllers();
         app.UseWebdavBasicAuthentication();
