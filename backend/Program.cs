@@ -19,6 +19,7 @@ using NzbWebDAV.WebDav;
 using NzbWebDAV.Streams;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.Websocket;
+using Prometheus;
 using Serilog;
 using Serilog.Core;
 using Serilog.Events;
@@ -249,6 +250,7 @@ class Program
             .AddSingleton<StreamingConnectionLimiter>()
             .AddHostedService<DatabaseMaintenanceService>()
             .AddHostedService<HistoryCleanupService>()
+            .AddHostedService<NzbWebDAV.Metrics.PoolMetricsCollector>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
@@ -309,6 +311,7 @@ class Program
         // ReservedConnectionsMiddleware removed - using GlobalOperationLimiter instead
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
         app.MapHealthChecks("/health");
+        app.MapMetrics("/metrics");
         app.Map("/ws", websocketManager.HandleRoute);
         app.MapControllers();
         app.UseWebdavBasicAuthentication();

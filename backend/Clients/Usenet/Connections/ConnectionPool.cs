@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.Runtime.CompilerServices;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Metrics;
 
 namespace NzbWebDAV.Clients.Usenet.Connections;
 
@@ -18,7 +19,7 @@ namespace NzbWebDAV.Clients.Usenet.Connections;
 /// *  Note: This class was authored by ChatGPT 3o
 /// </para>
 /// </summary>
-public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
+public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetrics.IPoolSnapshotProvider
 {
     /* -------------------------------- configuration -------------------------------- */
 
@@ -30,6 +31,10 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     public int AvailableConnections => _maxConnections - ActiveConnections;
     public int MaxConnections => _maxConnections;
     public int RemainingSemaphoreSlots => _gate.RemainingSemaphoreSlots;
+
+    // -- AppMetrics.IPoolSnapshotProvider extras
+    public int ConsecutiveFailures => _consecutiveConnectionFailures;
+    public bool IsCircuitBreakerTripped => _consecutiveConnectionFailures > 5;
 
     public event EventHandler<ConnectionPoolStats.ConnectionPoolChangedEventArgs>? OnConnectionPoolChanged;
 
@@ -80,6 +85,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         _maxConnections = maxConnections;
         _gate = new CombinedSemaphoreSlim(maxConnections, pooledSemaphore);
         _sweeperTask = Task.Run(SweepLoop); // background idle-reaper
+        AppMetrics.RegisterPool(this);
     }
 
     /* ============================== public API ==================================== */
@@ -525,6 +531,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     {
         if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
 
+        AppMetrics.UnregisterPool(PoolName);
         _sweepCts.Cancel();
 
         try
