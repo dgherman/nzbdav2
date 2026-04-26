@@ -877,11 +877,14 @@ public class BufferedSegmentStream : Stream
                                 // Acquire a streaming connection permit from the global pool
                                 // This ensures total streaming connections are shared across all active streams
                                 var limiter = StreamingConnectionLimiter.Instance;
-                                var hasPermit = false;
+                                StreamingConnectionLimiter.StreamingConnectionLease? permitLease = null;
                                 if (limiter != null)
                                 {
-                                    hasPermit = await limiter.AcquireAsync(TimeSpan.FromSeconds(60), jobCts.Token).ConfigureAwait(false);
-                                    if (!hasPermit)
+                                    permitLease = await limiter.AcquireLeaseAsync(
+                                        TimeSpan.FromSeconds(60),
+                                        jobCts.Token,
+                                        $"segment={job.index}").ConfigureAwait(false);
+                                    if (permitLease == null)
                                     {
                                         Log.Warning("[BufferedStream] Worker {WorkerId} timed out waiting for streaming permit for segment {Index}", workerId, job.index);
                                         continue; // Try again with next job
@@ -944,10 +947,7 @@ public class BufferedSegmentStream : Stream
                                 finally
                                 {
                                     // Release the streaming connection permit
-                                    if (hasPermit && limiter != null)
-                                    {
-                                        limiter.Release();
-                                    }
+                                    permitLease?.Dispose();
                                 }
                             }
                             catch (OperationCanceledException)

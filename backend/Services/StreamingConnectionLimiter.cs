@@ -26,10 +26,11 @@ public class StreamingConnectionLimiter : IDisposable
     private long _totalReleases;
     private long _totalTimeouts;
     private long _totalForcedReleases;
+    private int? _pendingMaxConnections;
 
     // Track active permits for stuck detection
     private readonly ConcurrentDictionary<string, PermitInfo> _activePermits = new();
-    private record PermitInfo(DateTimeOffset AcquiredAt, string? Context);
+    private record PermitInfo(DateTimeOffset AcquiredAt, string? Context, SemaphoreSlim Semaphore);
 
     // Maximum time a permit can be held before being considered stuck (5 minutes)
     // Reduced from 30 minutes to detect stuck permits faster
@@ -93,20 +94,27 @@ public class StreamingConnectionLimiter : IDisposable
     /// <returns>Permit ID if acquired, null if timed out</returns>
     public async Task<string?> AcquireWithTrackingAsync(TimeSpan timeout, CancellationToken ct, string? context = null)
     {
-        // Check if config changed and we need to resize
-        var configuredMax = _configManager.GetTotalStreamingConnections();
-        if (configuredMax != _currentMaxConnections)
-        {
-            ResizeSemaphore(configuredMax);
-        }
+        var lease = await AcquireLeaseAsync(timeout, ct, context).ConfigureAwait(false);
+        return lease?.DetachPermitId();
+    }
 
-        var acquired = await _semaphore.WaitAsync(timeout, ct).ConfigureAwait(false);
+    /// <summary>
+    /// Acquire a streaming connection permit as an owned lease. Prefer this API so the
+    /// release targets the exact semaphore instance that was acquired, even if config
+    /// changes while the permit is held.
+    /// </summary>
+    public async Task<StreamingConnectionLease?> AcquireLeaseAsync(TimeSpan timeout, CancellationToken ct, string? context = null)
+    {
+        RefreshConfiguredMax();
+
+        var semaphore = _semaphore;
+        var acquired = await semaphore.WaitAsync(timeout, ct).ConfigureAwait(false);
         if (acquired)
         {
             var permitId = Guid.NewGuid().ToString("N");
-            _activePermits[permitId] = new PermitInfo(DateTimeOffset.UtcNow, context);
+            _activePermits[permitId] = new PermitInfo(DateTimeOffset.UtcNow, context, semaphore);
             Interlocked.Increment(ref _totalAcquires);
-            return permitId;
+            return new StreamingConnectionLease(this, semaphore, permitId);
         }
         else
         {
@@ -125,8 +133,20 @@ public class StreamingConnectionLimiter : IDisposable
     /// <returns>True if permit was acquired, false if timed out</returns>
     public async Task<bool> AcquireAsync(TimeSpan timeout, CancellationToken ct)
     {
-        var permitId = await AcquireWithTrackingAsync(timeout, ct, "legacy").ConfigureAwait(false);
-        return permitId != null;
+        RefreshConfiguredMax();
+
+        var semaphore = _semaphore;
+        var acquired = await semaphore.WaitAsync(timeout, ct).ConfigureAwait(false);
+        if (acquired)
+        {
+            Interlocked.Increment(ref _totalAcquires);
+            return true;
+        }
+
+        Interlocked.Increment(ref _totalTimeouts);
+        Log.Warning("[StreamingConnectionLimiter] Timeout acquiring legacy streaming permit. Active: {Active}, Available: {Available}/{Total}",
+            _activeStreams, AvailableConnections, TotalConnections);
+        return false;
     }
 
     /// <summary>
@@ -135,11 +155,14 @@ public class StreamingConnectionLimiter : IDisposable
     /// <param name="permitId">The permit ID returned from AcquireWithTrackingAsync</param>
     public void Release(string? permitId)
     {
-        if (permitId != null)
+        if (permitId != null && _activePermits.TryRemove(permitId, out var info))
         {
-            _activePermits.TryRemove(permitId, out _);
+            ReleaseInternal(info.Semaphore);
+            ApplyPendingResizeIfIdle();
+            return;
         }
-        ReleaseInternal();
+        ReleaseInternal(_semaphore);
+        ApplyPendingResizeIfIdle();
     }
 
     /// <summary>
@@ -147,22 +170,41 @@ public class StreamingConnectionLimiter : IDisposable
     /// </summary>
     public void Release()
     {
-        // Legacy release - we can't track which permit this is for
-        // The sweeper will eventually clean up stuck permits if there's a leak
-        ReleaseInternal();
+        // Legacy release - we can't track which permit this is for, so callers
+        // should prefer AcquireLeaseAsync. This path intentionally does not add
+        // entries to _activePermits, otherwise the sweeper could double-release
+        // permits that were already returned through this legacy API.
+        ReleaseInternal(_semaphore);
+        ApplyPendingResizeIfIdle();
     }
 
-    private void ReleaseInternal()
+    private void ReleaseInternal(SemaphoreSlim semaphore)
     {
         try
         {
-            _semaphore.Release();
+            semaphore.Release();
             Interlocked.Increment(ref _totalReleases);
         }
         catch (SemaphoreFullException)
         {
             // This shouldn't happen, but log if it does
             Log.Warning("[StreamingConnectionLimiter] Attempted to release more permits than acquired");
+        }
+    }
+
+    private void ReleaseLease(SemaphoreSlim semaphore, string permitId)
+    {
+        _activePermits.TryRemove(permitId, out _);
+        ReleaseInternal(semaphore);
+        ApplyPendingResizeIfIdle();
+    }
+
+    private void RefreshConfiguredMax()
+    {
+        var configuredMax = _configManager.GetTotalStreamingConnections();
+        if (configuredMax != _currentMaxConnections)
+        {
+            ResizeSemaphore(configuredMax);
         }
     }
 
@@ -177,20 +219,45 @@ public class StreamingConnectionLimiter : IDisposable
             if (newMax == _currentMaxConnections) return;
 
             var oldMax = _currentMaxConnections;
-            var inUse = oldMax - _semaphore.CurrentCount;
+            var available = _semaphore.CurrentCount;
+            var inUse = oldMax - available;
 
             Log.Information("[StreamingConnectionLimiter] Resizing from {Old} to {New} connections. Currently in use: {InUse}",
                 oldMax, newMax, inUse);
 
-            // Create new semaphore with new size
-            var oldSemaphore = _semaphore;
-            var newAvailable = Math.Max(0, newMax - inUse);
-            _semaphore = new SemaphoreSlim(newAvailable, newMax);
-            _currentMaxConnections = newMax;
+            if (inUse > 0 || _activePermits.Count > 0)
+            {
+                _pendingMaxConnections = newMax;
+                Log.Information("[StreamingConnectionLimiter] Deferring resize until active permits drain. Pending max: {New}", newMax);
+                return;
+            }
 
-            // Dispose old semaphore (existing waiters will get exceptions, but that's OK - they'll retry)
-            oldSemaphore.Dispose();
+            ApplyResizeUnderLock(newMax);
         }
+    }
+
+    private void ApplyPendingResizeIfIdle()
+    {
+        lock (_lock)
+        {
+            if (!_pendingMaxConnections.HasValue) return;
+            var inUse = _currentMaxConnections - _semaphore.CurrentCount;
+            if (inUse > 0 || _activePermits.Count > 0) return;
+
+            ApplyResizeUnderLock(_pendingMaxConnections.Value);
+        }
+    }
+
+    private void ApplyResizeUnderLock(int newMax)
+    {
+        var oldMax = _currentMaxConnections;
+        _semaphore = new SemaphoreSlim(newMax, newMax);
+        _currentMaxConnections = newMax;
+        _pendingMaxConnections = null;
+        // Do not dispose the old semaphore here. A concurrent acquire may have
+        // captured it immediately before the resize, and active leases release
+        // back to the exact semaphore instance they acquired.
+        Log.Information("[StreamingConnectionLimiter] Resize applied from {Old} to {New} connections", oldMax, newMax);
     }
 
     /// <summary>
@@ -246,7 +313,7 @@ public class StreamingConnectionLimiter : IDisposable
                     // Force-release the semaphore permit
                     try
                     {
-                        _semaphore.Release();
+                        info.Semaphore.Release();
                         Interlocked.Increment(ref _totalForcedReleases);
                         stuckCount++;
                     }
@@ -267,6 +334,36 @@ public class StreamingConnectionLimiter : IDisposable
         }
 
         return Task.CompletedTask;
+    }
+
+    public sealed class StreamingConnectionLease : IDisposable
+    {
+        private readonly StreamingConnectionLimiter _owner;
+        private readonly SemaphoreSlim _semaphore;
+        private string? _permitId;
+
+        internal StreamingConnectionLease(StreamingConnectionLimiter owner, SemaphoreSlim semaphore, string permitId)
+        {
+            _owner = owner;
+            _semaphore = semaphore;
+            _permitId = permitId;
+        }
+
+        internal string DetachPermitId()
+        {
+            var permitId = _permitId ?? throw new ObjectDisposedException(nameof(StreamingConnectionLease));
+            _permitId = null;
+            return permitId;
+        }
+
+        public void Dispose()
+        {
+            var permitId = Interlocked.Exchange(ref _permitId, null);
+            if (permitId != null)
+            {
+                _owner.ReleaseLease(_semaphore, permitId);
+            }
+        }
     }
 
     public void Dispose()
