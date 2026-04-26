@@ -303,10 +303,16 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         _activeConnections.TryRemove(connectionId, out var info);
         var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
 
-        if (Volatile.Read(ref _disposed) == 1 || _doomedConnections.TryRemove(connection, out _))
+        var poolDisposed = Volatile.Read(ref _disposed) == 1;
+        var isDoomed = _doomedConnections.TryRemove(connection, out _);
+        if (poolDisposed || isDoomed)
         {
             _ = DisposeConnectionSafeAsync(connection, "doomed/disposed return");
             Interlocked.Decrement(ref _live);
+            if (!poolDisposed)
+            {
+                _gate.Release();
+            }
             TriggerConnectionPoolChangedEvent();
             return;
         }
