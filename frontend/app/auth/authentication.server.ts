@@ -1,5 +1,7 @@
 import { createCookieSessionStorage } from "react-router";
 import crypto from "crypto"
+import fs from "fs";
+import path from "path";
 import { backendClient } from "~/clients/backend-client.server";
 import type { IncomingMessage } from "http";
 
@@ -9,6 +11,43 @@ type User = {
   username: string;
 };
 
+const DEFAULT_SESSION_KEY_FILE = "/config/data-protection/frontend-session.key";
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && "code" in error;
+}
+
+function getSessionKey(): string {
+  if (process.env.SESSION_KEY) return process.env.SESSION_KEY;
+  if (IS_FRONTEND_AUTH_DISABLED) return crypto.randomBytes(64).toString("hex");
+
+  const keyPath = process.env.SESSION_KEY_FILE || DEFAULT_SESSION_KEY_FILE;
+  try {
+    const existingKey = fs.readFileSync(keyPath, "utf8").trim();
+    if (existingKey.length > 0) return existingKey;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") {
+      console.warn(`Unable to read persisted session key from ${keyPath}; generating a replacement.`, error);
+    }
+  }
+
+  const generatedKey = crypto.randomBytes(64).toString("hex");
+
+  try {
+    fs.mkdirSync(path.dirname(keyPath), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(keyPath, `${generatedKey}\n`, { mode: 0o600, flag: "wx" });
+    return generatedKey;
+  } catch (error) {
+    if (isNodeError(error) && error.code === "EEXIST") {
+      const existingKey = fs.readFileSync(keyPath, "utf8").trim();
+      if (existingKey.length > 0) return existingKey;
+    }
+
+    console.warn(`Unable to persist generated session key to ${keyPath}; sessions may reset on restart.`, error);
+    return generatedKey;
+  }
+}
+
 const oneYear = 60 * 60 * 24 * 365; // seconds
 const sessionStorage = createCookieSessionStorage({
   cookie: {
@@ -16,7 +55,7 @@ const sessionStorage = createCookieSessionStorage({
     httpOnly: true,
     path: "/",
     sameSite: "strict",
-    secrets: [process?.env?.SESSION_KEY || crypto.randomBytes(64).toString('hex')],
+    secrets: [getSessionKey()],
     secure: ["true", "yes"].includes(process?.env?.SECURE_COOKIES || ""),
     maxAge: oneYear,
   },
