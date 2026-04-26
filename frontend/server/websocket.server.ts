@@ -57,8 +57,8 @@ function initializeWebsocketServer(wss: WebSocketServer) {
 }
 
 export function initializeWebsocketClient(subscriptions: Map<string, Set<WebSocket>>, lastMessage: Map<string, string>) {
-    let reconnectRetryDelay = 1000;
     let reconnectTimeout: NodeJS.Timeout | null = null;
+    const backoff = createReconnectBackoff();
     const url = getBackendWebsocketUrl();
 
     function connect() {
@@ -66,6 +66,7 @@ export function initializeWebsocketClient(subscriptions: Map<string, Set<WebSock
 
         socket.onopen = () => {
             console.info("WebSocket connected");
+            backoff.reset();
             if (reconnectTimeout) {
                 clearTimeout(reconnectTimeout);
                 reconnectTimeout = null;
@@ -101,13 +102,32 @@ export function initializeWebsocketClient(subscriptions: Map<string, Set<WebSock
     function scheduleReconnect() {
         if (reconnectTimeout) clearTimeout(reconnectTimeout);
 
+        const delay = backoff.nextDelayMs();
+        console.info(`WebSocket reconnecting in ${delay}ms...`);
+
         reconnectTimeout = setTimeout(() => {
-            console.info(`WebSocket reconnecting...`);
             connect();
-        }, reconnectRetryDelay);
+        }, delay);
     }
 
     connect();
+}
+
+function createReconnectBackoff(initialDelayMs = 1000, maxDelayMs = 30000, jitterRatio = 0.25) {
+    let attempt = 0;
+
+    return {
+        reset() {
+            attempt = 0;
+        },
+        nextDelayMs() {
+            const baseDelay = Math.min(maxDelayMs, initialDelayMs * Math.pow(2, attempt));
+            attempt += 1;
+            const jitterWindow = Math.round(baseDelay * jitterRatio);
+            const jitter = jitterWindow > 0 ? Math.floor(Math.random() * jitterWindow) : 0;
+            return Math.min(maxDelayMs, baseDelay + jitter);
+        }
+    };
 }
 
 function getBackendWebsocketUrl() {

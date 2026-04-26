@@ -1,7 +1,7 @@
 import styles from "./usenet.module.css"
 import { type Dispatch, type SetStateAction, useState, useCallback, useEffect, useMemo } from "react";
 import { Button } from "react-bootstrap";
-import { receiveMessage } from "~/utils/websocket-util";
+import { createWebsocketBackoff, getBrowserWebsocketUrl, receiveMessage } from "~/utils/websocket-util";
 import { useToast } from "~/context/ToastContext";
 import { FileDetailsModal } from "~/routes/health/components/file-details-modal/file-details-modal";
 import type { FileDetails } from "~/types/backend";
@@ -431,8 +431,17 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
     useEffect(() => {
         let ws: WebSocket;
         let disposed = false;
+        let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+        const backoff = createWebsocketBackoff();
+
+        function scheduleReconnect() {
+            if (disposed) return;
+            const delay = backoff.nextDelayMs();
+            reconnectTimer = setTimeout(() => connect(), delay);
+        }
+
         function connect() {
-            ws = new WebSocket(window.location.origin.replace(/^http/, 'ws'));
+            ws = new WebSocket(getBrowserWebsocketUrl());
             ws.onmessage = receiveMessage((topic, message) => {
                 if (topic === 'cxs') {
                     handleConnectionsMessage(message);
@@ -440,13 +449,17 @@ export function UsenetSettings({ config, setNewConfig }: UsenetSettingsProps) {
                     handleBenchmarkMessage(message);
                 }
             });
-            ws.onopen = () => ws.send(JSON.stringify(usenetConnectionsTopic));
+            ws.onopen = () => { backoff.reset(); ws.send(JSON.stringify(usenetConnectionsTopic)); };
             ws.onerror = () => { ws.close() };
             ws.onclose = onClose;
-            return () => { disposed = true; ws.close(); }
+            return () => {
+                disposed = true;
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                ws.close();
+            }
         }
         function onClose(e: CloseEvent) {
-            !disposed && setTimeout(() => connect(), 1000);
+            scheduleReconnect();
             setConnections({});
         }
         return connect();

@@ -8,6 +8,7 @@ import { TotalDownloaded } from './TotalDownloaded';
 import { ProviderHealth } from './ProviderHealth';
 import { ProviderUsage } from './ProviderUsage';
 import { RecentCompletions } from './RecentCompletions';
+import { createWebsocketBackoff, getBrowserWebsocketUrl, receiveMessage } from '~/utils/websocket-util';
 
 type Props = {
     initialData: DashboardData;
@@ -30,55 +31,58 @@ export function Dashboard({ initialData, initialConnections }: Props) {
     useEffect(() => {
         let ws: WebSocket | null = null;
         let disposed = false;
+        let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+        const backoff = createWebsocketBackoff();
+
+        function scheduleReconnect() {
+            if (disposed) return;
+            const delay = backoff.nextDelayMs();
+            reconnectTimer = setTimeout(() => connect(), delay);
+        }
 
         function connect() {
-            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-            ws = new WebSocket(`${protocol}//${window.location.host}`);
+            ws = new WebSocket(getBrowserWebsocketUrl());
 
             ws.onopen = () => {
+                backoff.reset();
                 ws?.send(JSON.stringify({ 'cxs': 'state' }));
             };
 
-            ws.onmessage = (event) => {
-                const message = event.data as string;
-                if (message.startsWith('cxs|')) {
-                    const parts = message.split('|');
-                    if (parts.length >= 9) {
-                        const providerIndex = parseInt(parts[1]);
-                        const connsJson = parts[8];
-                        try {
-                            const rawConns = JSON.parse(connsJson) as any[];
-                            const transformedConns = rawConns.map(c => ({
-                                usageType: c.t,
-                                details: c.d,
-                                jobName: c.jn,
-                                isBackup: c.b,
-                                isSecondary: c.s,
-                                bufferedCount: c.bc,
-                                bufferWindowStart: c.ws,
-                                bufferWindowEnd: c.we,
-                                totalSegments: c.ts,
-                                davItemId: c.i,
-                                currentBytePosition: c.bp,
-                                fileSize: c.fs
-                            } as ConnectionUsageContext));
+            ws.onmessage = receiveMessage((topic, message) => {
+                if (topic !== 'cxs') return;
 
-                            setConnections(prev => ({
-                                ...prev,
-                                [providerIndex]: transformedConns
-                            }));
-                        } catch (e) {
-                            console.error('Failed to parse connections JSON from websocket', e);
-                        }
+                const parts = message.split('|');
+                if (parts.length >= 9) {
+                    const providerIndex = parseInt(parts[1]);
+                    const connsJson = parts[8];
+                    try {
+                        const rawConns = JSON.parse(connsJson) as any[];
+                        const transformedConns = rawConns.map(c => ({
+                            usageType: c.t,
+                            details: c.d,
+                            jobName: c.jn,
+                            isBackup: c.b,
+                            isSecondary: c.s,
+                            bufferedCount: c.bc,
+                            bufferWindowStart: c.ws,
+                            bufferWindowEnd: c.we,
+                            totalSegments: c.ts,
+                            davItemId: c.i,
+                            currentBytePosition: c.bp,
+                            fileSize: c.fs
+                        } as ConnectionUsageContext));
+
+                        setConnections(prev => ({
+                            ...prev,
+                            [providerIndex]: transformedConns
+                        }));
+                    } catch (e) {
+                        console.error('Failed to parse connections JSON from websocket', e);
                     }
                 }
-            };
+            });
 
-            ws.onclose = () => {
-                if (!disposed) {
-                    setTimeout(() => connect(), 1000);
-                }
-            };
+            ws.onclose = scheduleReconnect;
 
             ws.onerror = () => {
                 ws?.close();
@@ -89,6 +93,7 @@ export function Dashboard({ initialData, initialConnections }: Props) {
 
         return () => {
             disposed = true;
+            if (reconnectTimer) clearTimeout(reconnectTimer);
             ws?.close();
         };
     }, []);

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import styles from "./live-usenet-connections.module.css";
-import { receiveMessage } from "~/utils/websocket-util";
+import { createWebsocketBackoff, getBrowserWebsocketUrl, receiveMessage } from "~/utils/websocket-util";
 import { useNavigate } from "react-router";
 
 const usenetConnectionsTopic = {'cxs': 'state'};
@@ -33,21 +33,34 @@ export function LiveUsenetConnections() {
     useEffect(() => {
         let ws: WebSocket;
         let disposed = false;
+        let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+        const backoff = createWebsocketBackoff();
+
+        function scheduleReconnect() {
+            if (disposed) return;
+            const delay = backoff.nextDelayMs();
+            reconnectTimer = setTimeout(() => connect(), delay);
+        }
+
         function connect() {
-            ws = new WebSocket(window.location.origin.replace(/^http/, 'ws'));
+            ws = new WebSocket(getBrowserWebsocketUrl());
             ws.onmessage = receiveMessage((_, message) => setConnections(message));
-            ws.onopen = () => ws.send(JSON.stringify(usenetConnectionsTopic));
+            ws.onopen = () => { backoff.reset(); ws.send(JSON.stringify(usenetConnectionsTopic)); };
             ws.onerror = () => { ws.close() };
             ws.onclose = onClose;
-            return () => { disposed = true; ws.close(); }
+            return () => {
+                disposed = true;
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                ws.close();
+            }
         }
         function onClose(e: CloseEvent) {
             if (e.code == 1008) navigate('/login');
-            !disposed && setTimeout(() => connect(), 1000);
+            scheduleReconnect();
             setConnections(null);
         }
         return connect();
-    }, [setConnections]);
+    }, [setConnections, navigate]);
 
     return (
         <div className={styles.container}>
