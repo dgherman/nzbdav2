@@ -43,6 +43,32 @@ public class ConnectionUsageDetails
     /// </summary>
     public bool DisableGracefulDegradation { get; init; }
 
+    public ConnectionUsageDetails Clone()
+    {
+        return new ConnectionUsageDetails
+        {
+            Text = Text,
+            JobName = JobName,
+            AffinityKey = AffinityKey,
+            DavItemId = DavItemId,
+            FileDate = FileDate,
+            IsBackup = IsBackup,
+            IsSecondary = IsSecondary,
+            IsImported = IsImported,
+            BufferedCount = BufferedCount,
+            BufferWindowStart = BufferWindowStart,
+            BufferWindowEnd = BufferWindowEnd,
+            TotalSegments = TotalSegments,
+            CurrentBytePosition = CurrentBytePosition,
+            FileSize = FileSize,
+            BaseByteOffset = BaseByteOffset,
+            ForcedProviderIndex = ForcedProviderIndex,
+            ExcludedProviderIndices = ExcludedProviderIndices != null ? new HashSet<int>(ExcludedProviderIndices) : null,
+            CurrentProviderIndex = CurrentProviderIndex,
+            DisableGracefulDegradation = DisableGracefulDegradation
+        };
+    }
+
     public override string ToString()
     {
         if (FileDate.HasValue)
@@ -110,10 +136,21 @@ public readonly struct ConnectionUsageContext
     /// </summary>
     public ConnectionUsageContext WithExcludedProviders(HashSet<int>? excluded)
     {
-        return new ConnectionUsageContext(UsageType, _detailsObj!)
+        return CreateAdjustedContext(
+            excluded,
+            DeprioritizedProviderIndices);
+    }
+
+    private ConnectionUsageContext CreateAdjustedContext(HashSet<int>? excluded, HashSet<int>? deprioritized)
+    {
+        var adjusted = _detailsObj != null
+            ? new ConnectionUsageContext(UsageType, _detailsObj.Clone())
+            : new ConnectionUsageContext(UsageType, _detailsStr);
+
+        return adjusted with
         {
-            ExcludedProviderIndices = excluded,
-            DeprioritizedProviderIndices = this.DeprioritizedProviderIndices
+            ExcludedProviderIndices = excluded != null ? new HashSet<int>(excluded) : null,
+            DeprioritizedProviderIndices = deprioritized != null ? new HashSet<int>(deprioritized) : null
         };
     }
 
@@ -123,11 +160,7 @@ public readonly struct ConnectionUsageContext
     /// </summary>
     public ConnectionUsageContext WithProviderAdjustments(HashSet<int>? excluded, HashSet<int>? deprioritized)
     {
-        return new ConnectionUsageContext(UsageType, _detailsObj!)
-        {
-            ExcludedProviderIndices = excluded,
-            DeprioritizedProviderIndices = deprioritized
-        };
+        return CreateAdjustedContext(excluded, deprioritized);
     }
 
     public override string ToString()
