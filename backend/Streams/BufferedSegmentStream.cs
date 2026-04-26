@@ -258,6 +258,14 @@ public class BufferedSegmentStream : Stream
     // Track failed providers per segment for exclusion on retry
     private readonly ConcurrentDictionary<int, HashSet<int>> _failedProvidersPerSegment = new();
 
+    private sealed class SegmentFetchAttempt(int index, DateTimeOffset startTime, CancellationTokenSource cts, int workerId)
+    {
+        public int Index { get; } = index;
+        public DateTimeOffset StartTime { get; } = startTime;
+        public CancellationTokenSource Cts { get; } = cts;
+        public int WorkerId { get; } = workerId;
+    }
+
     /// <summary>
     /// Per-stream provider performance tracking with rolling window and sticky failure weight.
     /// Used to implement soft deprioritization (cooldown) for slow/unreliable providers.
@@ -502,9 +510,13 @@ public class BufferedSegmentStream : Stream
     {
         try
         {
-            // Priority channel for racing stragglers or retrying preempted segments
-            var urgentChannel = Channel.CreateUnbounded<(int index, string segmentId)>(new UnboundedChannelOptions
+            // Priority channel for racing stragglers or retrying preempted segments.
+            // Keep it bounded and coalesced by segment index so slow providers can't amplify
+            // work faster than workers can drain it.
+            var urgentQueueCapacity = Math.Max(4, concurrentConnections * 2);
+            var urgentChannel = Channel.CreateBounded<(int index, string segmentId)>(new BoundedChannelOptions(urgentQueueCapacity)
             {
+                FullMode = BoundedChannelFullMode.Wait,
                 SingleReader = false,
                 SingleWriter = false // Multiple sources (monitor, workers)
             });
@@ -517,11 +529,19 @@ public class BufferedSegmentStream : Stream
                 SingleWriter = true
             });
 
-            // Track active assignments: Index -> (StartTime, Cts, WorkerId)
-            var activeAssignments = new ConcurrentDictionary<int, (DateTimeOffset StartTime, CancellationTokenSource Cts, int WorkerId)>();
+            // Track active assignments by attempt ID so duplicate races for the same segment
+            // cannot overwrite each other's cancellation/timing state.
+            var activeAssignments = new ConcurrentDictionary<Guid, SegmentFetchAttempt>();
+
+            // Track urgent jobs already queued so each segment has at most one pending urgent job.
+            var queuedUrgentIndices = new ConcurrentDictionary<int, bool>();
             
             // Track which segments are currently being raced to avoid double-racing
             var racingIndices = new ConcurrentDictionary<int, bool>();
+
+            // Lock-free segment ordering: workers write to slots, ordering task reads in order
+            var segmentSlots = new PooledSegmentData?[segmentIds.Length];
+            var nextIndexToWrite = 0;
 
             // Producer: Queue segment IDs up to effectiveSegmentCount (may be < segmentIds.Length
             // when bounded by an HTTP Range end byte to prevent over-prefetching).
@@ -561,11 +581,16 @@ public class BufferedSegmentStream : Stream
                         var stragglerTimeout = GetDynamicStragglerTimeout();
 
                         // Check if the next needed segment is active and running too long
-                        if (activeAssignments.TryGetValue(nextNeeded, out var assignment))
+                        var activeSnapshot = activeAssignments.Values.ToArray();
+                        var assignment = activeSnapshot
+                            .Where(x => x.Index == nextNeeded)
+                            .OrderBy(x => x.StartTime)
+                            .FirstOrDefault();
+                        if (assignment != null)
                         {
                             var duration = DateTimeOffset.UtcNow - assignment.StartTime;
-                            var activeCount = activeAssignments.Count;
-                            var activeIndices = string.Join(",", activeAssignments.Keys.OrderBy(k => k).Take(10));
+                            var activeCount = activeSnapshot.Length;
+                            var activeIndices = string.Join(",", activeSnapshot.Select(x => x.Index).Distinct().OrderBy(k => k).Take(10));
 
                             // Use dynamic timeout instead of fixed 3.0s
                             if (duration.TotalSeconds > stragglerTimeout && !racingIndices.ContainsKey(nextNeeded))
@@ -574,39 +599,39 @@ public class BufferedSegmentStream : Stream
                                     nextNeeded, duration.TotalSeconds, stragglerTimeout, activeCount, activeIndices);
 
                                 // Find a victim to preempt (highest index currently running)
-                                var victim = activeAssignments.Keys.DefaultIfEmpty(-1).Max();
+                                var victimAssignment = activeSnapshot
+                                    .Where(x => x.Index > nextNeeded)
+                                    .OrderByDescending(x => x.Index)
+                                    .ThenByDescending(x => x.StartTime)
+                                    .FirstOrDefault();
 
-                                if (victim > nextNeeded)
+                                if (victimAssignment != null)
                                 {
-                                    if (activeAssignments.TryGetValue(victim, out var victimAssignment))
+                                    // Record which provider failed for the stalled segment (so retry uses different provider)
+                                    var stalledContext = assignment.Cts.Token.GetContext<ConnectionUsageContext>();
+                                    var failedProviderIndex = stalledContext.DetailsObject?.CurrentProviderIndex;
+                                    if (failedProviderIndex.HasValue)
                                     {
-                                        // Record which provider failed for the stalled segment (so retry uses different provider)
-                                        var stalledContext = assignment.Cts.Token.GetContext<ConnectionUsageContext>();
-                                        var failedProviderIndex = stalledContext.DetailsObject?.CurrentProviderIndex;
-                                        if (failedProviderIndex.HasValue)
-                                        {
-                                            Log.Debug("[BufferedStream] Recording failed provider {ProviderIndex} for segment {Index}",
-                                                failedProviderIndex.Value, nextNeeded);
-                                            _failedProvidersPerSegment.AddOrUpdate(
-                                                nextNeeded,
-                                                _ => new HashSet<int> { failedProviderIndex.Value },
-                                                (_, set) => { lock (set) { set.Add(failedProviderIndex.Value); } return set; }
-                                            );
-                                        }
-
-                                        Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Preempting Segment {Victim} to race.",
-                                            nextNeeded, duration.TotalSeconds, stragglerTimeout, victim);
-
-                                        // Cancel victim to free up its worker
-                                        victimAssignment.Cts.Cancel();
-
-                                        // Re-queue victim (high priority to avoid starvation)
-                                        _ = urgentChannel.Writer.WriteAsync((victim, segmentIds[victim]), ct);
-
-                                        // Race the needed segment
-                                        _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
-                                        racingIndices.TryAdd(nextNeeded, true);
+                                        Log.Debug("[BufferedStream] Recording failed provider {ProviderIndex} for segment {Index}",
+                                            failedProviderIndex.Value, nextNeeded);
+                                        _failedProvidersPerSegment.AddOrUpdate(
+                                            nextNeeded,
+                                            _ => new HashSet<int> { failedProviderIndex.Value },
+                                            (_, set) => { lock (set) { set.Add(failedProviderIndex.Value); } return set; }
+                                        );
                                     }
+
+                                    Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Preempting Segment {Victim} to race.",
+                                        nextNeeded, duration.TotalSeconds, stragglerTimeout, victimAssignment.Index);
+
+                                    // Cancel victim to free up its worker
+                                    TryCancelAttempt(victimAssignment);
+
+                                    // Re-queue victim (high priority to avoid starvation)
+                                    await QueueUrgentSegmentAsync(victimAssignment.Index, markRacing: false, "preempted-victim").ConfigureAwait(false);
+
+                                    // Race the needed segment
+                                    await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "blocking-straggler-race").ConfigureAwait(false);
                                 }
                                 else
                                 {
@@ -628,21 +653,19 @@ public class BufferedSegmentStream : Stream
 
                                     Log.Debug("[BufferedStream] STRAGGLER SELF-CANCEL: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Cancelling stalled worker and queueing for retry.",
                                         nextNeeded, duration.TotalSeconds, stragglerTimeout);
-                                    assignment.Cts.Cancel();
-                                    _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
-                                    racingIndices.TryAdd(nextNeeded, true);
+                                    TryCancelAttempt(assignment);
+                                    await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "self-cancel-straggler").ConfigureAwait(false);
                                 }
                             }
                         }
 
                         // Also check ALL active workers for stragglers (not just the blocking one)
                         // This helps detect slow providers earlier and apply cooldown
-                        foreach (var kvp in activeAssignments)
+                        foreach (var segmentAssignment in activeAssignments.Values)
                         {
-                            if (kvp.Key == nextNeeded) continue; // Already handled above
+                            if (segmentAssignment.Index == nextNeeded) continue; // Already handled above
 
-                            var segmentIndex = kvp.Key;
-                            var segmentAssignment = kvp.Value;
+                            var segmentIndex = segmentAssignment.Index;
                             var segmentDuration = DateTimeOffset.UtcNow - segmentAssignment.StartTime;
 
                             // Use a more generous timeout for non-blocking segments (1.5x)
@@ -658,10 +681,6 @@ public class BufferedSegmentStream : Stream
                 }
                 catch { /* Ignore cancellation */ }
             }, ct);
-
-            // Lock-free segment ordering: workers write to slots, ordering task reads in order
-            var segmentSlots = new PooledSegmentData?[segmentIds.Length];
-            var nextIndexToWrite = 0;
 
             // Ordering task: reads slots in order and writes to buffer channel
             var orderingTask = Task.Run(async () =>
@@ -815,8 +834,17 @@ public class BufferedSegmentStream : Stream
                                 }
                             }
 
+                            if (isUrgent)
+                            {
+                                queuedUrgentIndices.TryRemove(job.index, out _);
+                            }
+
                             // Skip if already fetched (race condition handling)
-                            if (Volatile.Read(ref segmentSlots[job.index]) != null) continue;
+                            if (Volatile.Read(ref segmentSlots[job.index]) != null)
+                            {
+                                racingIndices.TryRemove(job.index, out _);
+                                continue;
+                            }
 
                             // Create job-specific CTS for preemption (no hard timeout - straggler monitor handles stuck segments)
                             using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -847,12 +875,11 @@ public class BufferedSegmentStream : Stream
                             );
                             using var _scope = jobCts.Token.SetScopedContext(jobContext);
 
-                            var assignment = (DateTimeOffset.UtcNow, jobCts, workerId);
+                            var attemptId = Guid.NewGuid();
+                            var assignment = new SegmentFetchAttempt(job.index, DateTimeOffset.UtcNow, jobCts, workerId);
                             
                             // Track assignment
-                            // Note: If racing, multiple workers might have same index. We just overwrite or ignore.
-                            // We mainly care about having *at least one* active.
-                            activeAssignments[job.index] = assignment;
+                            activeAssignments[attemptId] = assignment;
 
                             // Track active workers for timing
                             if (EnableDetailedTiming)
@@ -983,8 +1010,12 @@ public class BufferedSegmentStream : Stream
                             }
                             finally
                             {
-                                activeAssignments.TryRemove(job.index, out _);
-                                racingIndices.TryRemove(job.index, out _);
+                                activeAssignments.TryRemove(attemptId, out _);
+                                if (Volatile.Read(ref segmentSlots[job.index]) != null ||
+                                    (!activeAssignments.Values.Any(x => x.Index == job.index) && !queuedUrgentIndices.ContainsKey(job.index)))
+                                {
+                                    racingIndices.TryRemove(job.index, out _);
+                                }
                                 if (EnableDetailedTiming) Interlocked.Decrement(ref _activeWorkers);
                             }
                         }
@@ -1028,6 +1059,46 @@ public class BufferedSegmentStream : Stream
             {
                 var remaining = Interlocked.Exchange(ref segmentSlots[i], null);
                 remaining?.Dispose();
+            }
+
+            async ValueTask<bool> QueueUrgentSegmentAsync(int index, bool markRacing, string reason)
+            {
+                if ((uint)index >= (uint)effectiveSegmentCount) return false;
+                if (Volatile.Read(ref segmentSlots[index]) != null) return false;
+
+                if (markRacing && !racingIndices.TryAdd(index, true)) return false;
+
+                if (!queuedUrgentIndices.TryAdd(index, true))
+                {
+                    if (markRacing) racingIndices.TryRemove(index, out _);
+                    return false;
+                }
+
+                try
+                {
+                    await urgentChannel.Writer.WriteAsync((index, segmentIds[index]), ct).ConfigureAwait(false);
+                    Log.Debug("[BufferedStream] URGENT QUEUED: Segment={SegmentIndex}, Reason={Reason}, Capacity={Capacity}",
+                        index, reason, urgentQueueCapacity);
+                    return true;
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or ChannelClosedException)
+                {
+                    queuedUrgentIndices.TryRemove(index, out _);
+                    if (markRacing) racingIndices.TryRemove(index, out _);
+                    return false;
+                }
+            }
+
+            static void TryCancelAttempt(SegmentFetchAttempt attempt)
+            {
+                try
+                {
+                    attempt.Cts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Attempt finished between the monitor snapshot and cancellation.
+                }
             }
         }
         catch (OperationCanceledException)
