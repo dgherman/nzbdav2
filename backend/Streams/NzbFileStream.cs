@@ -389,13 +389,21 @@ public class NzbFileStream : Stream
                     // Use the entry-scoped CancellationToken, NOT _streamCts.Token!
                     // The pump must survive individual request cancellations — it outlives
                     // the first reader and serves many subsequent readers.
-                    _contextScope = entryCt.SetScopedContext(bufferedContext);
-                    var bufferedStream = new BufferedSegmentStream(
-                        remainingSegments, remainingSize, _client,
-                        _concurrentConnections, _bufferSize, entryCt,
-                        bufferedContext, remainingSegmentSizes, _segmentFallbacks, firstSegmentIndex);
-                    // Do NOT call SetAcquiredSlot — SharedStreamEntry manages the slot
-                    return bufferedStream;
+                    var entryContextScope = entryCt.SetScopedContext(bufferedContext);
+                    try
+                    {
+                        var bufferedStream = new BufferedSegmentStream(
+                            remainingSegments, remainingSize, _client,
+                            _concurrentConnections, _bufferSize, entryCt,
+                            bufferedContext, remainingSegmentSizes, _segmentFallbacks, firstSegmentIndex);
+                        // Do NOT call SetAcquiredSlot — SharedStreamEntry manages the slot
+                        return new SharedStreamManager.SharedStreamFactoryResult(bufferedStream, entryContextScope);
+                    }
+                    catch
+                    {
+                        entryContextScope.Dispose();
+                        throw;
+                    }
                 });
 
             if (sharedHandle != null)
