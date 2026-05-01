@@ -153,8 +153,12 @@ public class ProviderErrorService : IDisposable
                     summary.TotalEvents += group.Count();
                     if (group.Any(x => x.IsImported)) summary.IsImported = true;
 
-                    // Check for blocking (simple check based on current batch + existing state)
-                    if (!summary.HasBlockingMissingArticles)
+                    // Check for blocking (simple check based on current batch + existing state).
+                    // PAR2 files are intentionally excluded: nzbdav only uses PAR2 packets as a
+                    // filename / metadata oracle (see Par2Recovery/), it does not perform
+                    // Reed-Solomon recovery, so a missing PAR2 file never blocks streaming and
+                    // should not be surfaced as "critical" in the UI.
+                    if (!summary.HasBlockingMissingArticles && !IsPar2Filename(normalizedFilename))
                     {
                          // Optimization: Check for blocking within the current batch only.
                          // Since we are not persisting granular events anymore to save space, 
@@ -194,6 +198,20 @@ public class ProviderErrorService : IDisposable
         ".mp3", ".flac", ".wav", ".aac", ".ogg", ".wma", ".m4a",
         ".srt", ".sub", ".idx", ".ass", ".ssa", ".nfo", ".txt", ".jpg", ".png"
     };
+
+    /// <summary>
+    /// Returns true when the filename looks like a PAR2 index or recovery
+    /// volume (e.g. "Foo.par2" or "Foo.vol000+10.par2"). PAR2 files are
+    /// metadata-only in nzbdav (no Reed-Solomon recovery is performed) so
+    /// they should never be flagged as blocking when missing.
+    /// </summary>
+    private static bool IsPar2Filename(string filename)
+    {
+        if (string.IsNullOrEmpty(filename)) return false;
+        var lastSlash = filename.LastIndexOf('/');
+        var name = lastSlash >= 0 ? filename.Substring(lastSlash + 1) : filename;
+        return name.EndsWith(".par2", StringComparison.OrdinalIgnoreCase);
+    }
 
     /// <summary>
     /// Normalizes a filename/path for grouping purposes by stripping media extensions.
@@ -299,8 +317,9 @@ public class ProviderErrorService : IDisposable
                 var operationCounts = events.GroupBy(x => x.Operation ?? "UNKNOWN")
                     .ToDictionary(g => g.Key, g => g.Count());
                 
-                var hasBlocking = events.GroupBy(x => x.SegmentId)
-                    .Any(g => g.Select(p => p.ProviderIndex).Distinct().Count() >= totalProviders);
+                var hasBlocking = !IsPar2Filename(filename)
+                    && events.GroupBy(x => x.SegmentId)
+                        .Any(g => g.Select(p => p.ProviderIndex).Distinct().Count() >= totalProviders);
 
                 var summary = new MissingArticleSummary
                 {
