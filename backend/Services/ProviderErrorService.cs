@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Text;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -214,12 +215,22 @@ public class ProviderErrorService : IDisposable
     }
 
     /// <summary>
-    /// Normalizes a filename/path for grouping purposes by stripping media extensions.
-    /// This ensures "Movie.2024.mkv" and "Movie.2024" are treated as the same logical file.
+    /// Normalizes a filename/path for grouping purposes by stripping media extensions
+    /// and applying Unicode NFC normalization.
+    ///
+    /// NFC matters because the same logical filename can arrive with combining
+    /// characters in different forms (e.g. composed "é" U+00E9 vs decomposed
+    /// "e" U+0065 + U+0301), most often when macOS clients are involved. Without
+    /// normalization the two variants would be grouped as separate summaries and
+    /// the per-segment provider evidence bitsets would never converge.
     /// </summary>
     private static string NormalizeFilenameForGrouping(string filename)
     {
         if (string.IsNullOrEmpty(filename)) return filename;
+
+        // Apply Unicode NFC up-front so all subsequent slicing/matching is
+        // against a single canonical form.
+        filename = filename.Normalize(NormalizationForm.FormC);
 
         // Get just the filename part if it's a path
         var lastSlash = filename.LastIndexOf('/');
