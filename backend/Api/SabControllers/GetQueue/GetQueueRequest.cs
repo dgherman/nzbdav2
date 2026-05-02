@@ -31,7 +31,10 @@ public class GetQueueRequest
         {
             var isValidLimit = int.TryParse(limitParam, out int limit);
             if (!isValidLimit) throw new BadHttpRequestException("Invalid limit parameter");
-            Limit = limit;
+            // SABnzbd clients such as Sonarr/Radarr can request limit=0 to mean
+            // "no limit". Treating it as Take(0) hides every queued item except
+            // the synthetic active item pinned by GetQueueController.
+            Limit = limit <= 0 ? int.MaxValue : limit;
         }
     }
 }
