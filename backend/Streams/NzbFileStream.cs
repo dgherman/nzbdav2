@@ -419,9 +419,14 @@ public class NzbFileStream : Stream
             // Fall through to direct BufferedSegmentStream or unbuffered
         }
 
-        // Direct BufferedSegmentStream path (no DavItemId, or shared stream not available)
-        var canUseDirectBufferedStream = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections;
-        var acquiredSlot = canUseDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot() : null;
+        // Direct BufferedSegmentStream path (no DavItemId, or shared stream not available).
+        // Full direct buffered streams still use the scarce global slot only for streams large
+        // enough to benefit from the normal worker count. Bounded HTTP range reads are handled
+        // separately below so small RAR/multipart part streams do not fall back to raw segment
+        // reads and bypass retry/GD handling.
+        var canUseAnyDirectBufferedStream = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > 0;
+        var shouldUseFullDirectBufferedStream = canUseAnyDirectBufferedStream && _fileSegmentIds.Length > _concurrentConnections;
+        var acquiredSlot = shouldUseFullDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot() : null;
 
         // If a bounded HTTP Range request cannot get one of the scarce full buffered-stream
         // slots, still prefer a tiny direct BufferedSegmentStream over the legacy raw
@@ -429,7 +434,7 @@ public class NzbFileStream : Stream
         // fallback bypasses BufferedSegmentStream's retry/GD logic, so corrupt yEnc segments
         // bubble up as unhandled InvalidDataException and noisy 500s. The fallback below keeps
         // reliability behaviour while capping worker/buffer count to avoid memory blowups.
-        var useRangeReliabilityFallback = canUseDirectBufferedStream
+        var useRangeReliabilityFallback = canUseAnyDirectBufferedStream
             && acquiredSlot == null
             && _requestedEndByte.HasValue
             && _usageContext.UsageType == ConnectionUsageType.Streaming;
@@ -440,7 +445,7 @@ public class NzbFileStream : Stream
             {
                 var directConcurrentConnections = acquiredSlot != null
                     ? _concurrentConnections
-                    : Math.Clamp(Math.Min(_concurrentConnections, 4), 1, 4);
+                    : Math.Clamp(Math.Min(Math.Min(_concurrentConnections, _fileSegmentIds.Length), 4), 1, 4);
                 var directBufferSize = acquiredSlot != null
                     ? _bufferSize
                     : Math.Clamp(_bufferSize, directConcurrentConnections * 2, 16);

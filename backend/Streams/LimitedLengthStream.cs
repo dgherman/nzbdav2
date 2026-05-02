@@ -6,6 +6,7 @@ public class LimitedLengthStream(Stream stream, long length, bool leaveOpen = fa
 {
     private bool _disposed;
     private long _position = 0;
+    private readonly long _basePosition = stream.CanSeek ? stream.Position : 0;
 
     public override void Flush() => stream.Flush();
 
@@ -36,19 +37,35 @@ public class LimitedLengthStream(Stream stream, long length, bool leaveOpen = fa
         return bytesRead;
     }
 
-    public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+    public override long Seek(long offset, SeekOrigin origin)
+    {
+        if (!CanSeek) throw new NotSupportedException();
+
+        var targetPosition = origin switch
+        {
+            SeekOrigin.Begin => offset,
+            SeekOrigin.Current => _position + offset,
+            SeekOrigin.End => length + offset,
+            _ => throw new ArgumentOutOfRangeException(nameof(origin), origin, null)
+        };
+
+        targetPosition = Math.Clamp(targetPosition, 0, length);
+        stream.Seek(_basePosition + targetPosition, SeekOrigin.Begin);
+        _position = targetPosition;
+        return _position;
+    }
     public override void SetLength(long value) => throw new NotSupportedException();
     public override void Write(byte[] buffer, int offset, int count) => stream.Write(buffer, offset, count);
 
     public override bool CanRead => stream.CanRead;
-    public override bool CanSeek => false;
+    public override bool CanSeek => stream.CanSeek;
     public override bool CanWrite => false;
     public override long Length => length;
 
     public override long Position
     {
-        get => stream.Position;
-        set => throw new NotSupportedException();
+        get => _position;
+        set => Seek(value, SeekOrigin.Begin);
     }
 
     protected override void Dispose(bool disposing)
