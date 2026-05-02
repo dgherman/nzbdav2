@@ -420,12 +420,31 @@ public class NzbFileStream : Stream
         }
 
         // Direct BufferedSegmentStream path (no DavItemId, or shared stream not available)
-        var acquiredSlot = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections
-            ? BufferedSegmentStream.TryAcquireSlot() : null;
-        if (acquiredSlot != null)
+        var canUseDirectBufferedStream = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections;
+        var acquiredSlot = canUseDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot() : null;
+
+        // If a bounded HTTP Range request cannot get one of the scarce full buffered-stream
+        // slots, still prefer a tiny direct BufferedSegmentStream over the legacy raw
+        // CombinedStream fallback. rclone vfs-cache issues many bounded range GETs; the raw
+        // fallback bypasses BufferedSegmentStream's retry/GD logic, so corrupt yEnc segments
+        // bubble up as unhandled InvalidDataException and noisy 500s. The fallback below keeps
+        // reliability behaviour while capping worker/buffer count to avoid memory blowups.
+        var useRangeReliabilityFallback = canUseDirectBufferedStream
+            && acquiredSlot == null
+            && _requestedEndByte.HasValue
+            && _usageContext.UsageType == ConnectionUsageType.Streaming;
+
+        if (acquiredSlot != null || useRangeReliabilityFallback)
         {
             try
             {
+                var directConcurrentConnections = acquiredSlot != null
+                    ? _concurrentConnections
+                    : Math.Clamp(Math.Min(_concurrentConnections, 4), 1, 4);
+                var directBufferSize = acquiredSlot != null
+                    ? _bufferSize
+                    : Math.Clamp(_bufferSize, directConcurrentConnections * 2, 16);
+
                 var detailsObj = new ConnectionUsageDetails
                 {
                     Text = _usageContext.Details ?? "",
@@ -460,8 +479,8 @@ public class NzbFileStream : Stream
                     }
                 }
 
-                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}",
-                    remainingSegments.Length, remainingSize, _concurrentConnections, _bufferSize);
+                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}, slotAcquired={SlotAcquired}, rangeReliabilityFallback={RangeFallback}",
+                    remainingSegments.Length, remainingSize, directConcurrentConnections, directBufferSize, acquiredSlot != null, useRangeReliabilityFallback);
                 _contextScope = _streamCts.Token.SetScopedContext(bufferedContext);
                 var bufferedContextCt = _streamCts.Token;
 
@@ -478,8 +497,8 @@ public class NzbFileStream : Stream
                     remainingSegments,
                     remainingSize,
                     _client,
-                    _concurrentConnections,
-                    _bufferSize,
+                    directConcurrentConnections,
+                    directBufferSize,
                     bufferedContextCt,
                     bufferedContext,
                     remainingSegmentSizes,
@@ -487,7 +506,10 @@ public class NzbFileStream : Stream
                     firstSegmentIndex,
                     endSegmentIndexInclusive
                 );
-                bufferedStream.SetAcquiredSlot(acquiredSlot);
+                if (acquiredSlot != null)
+                {
+                    bufferedStream.SetAcquiredSlot(acquiredSlot);
+                }
 
                 _cancellationRegistration = ct.Register(() =>
                 {
@@ -501,7 +523,7 @@ public class NzbFileStream : Stream
             }
             catch
             {
-                acquiredSlot.Release();
+                acquiredSlot?.Release();
                 throw;
             }
         }

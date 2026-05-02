@@ -1125,6 +1125,7 @@ public class BufferedSegmentStream : Stream
     {
         const int maxRetries = 3;
         Exception? lastException = null;
+        int? lastKnownSegmentSize = null;
         var jobName = _usageContext?.DetailsObject?.Text ?? "Unknown";
         var fetchStartTime = Stopwatch.StartNew();
 
@@ -1181,6 +1182,16 @@ public class BufferedSegmentStream : Stream
                 {
                     acquireWatch.Stop();
                     Interlocked.Add(ref s_connectionAcquireTimeMs, acquireWatch.ElapsedMilliseconds);
+                }
+
+                if (stream is YencHeaderStream segmentHeaderStream
+                    && segmentHeaderStream.Header.PartSize > 0
+                    && segmentHeaderStream.Header.PartSize <= int.MaxValue)
+                {
+                    // Even if the read later fails CRC validation, the yEnc header gives us
+                    // the exact decoded segment size. Keep it so graceful degradation can
+                    // zero-fill the failed segment without shifting downstream byte offsets.
+                    lastKnownSegmentSize = (int)segmentHeaderStream.Header.PartSize;
                 }
 
                 if (fetchHeaders && stream is YencHeaderStream yencStream && yencStream.ArticleHeaders != null)
@@ -1447,6 +1458,16 @@ public class BufferedSegmentStream : Stream
             // For the last segment, we cannot guess safely, so we still fail.
             zeroBufferSize = _lastSuccessfulSegmentSize;
             Log.Warning("[BufferedStream] Estimating segment size {Size} for segment {Index}/{Total} based on max observed segment size to allow graceful degradation.", 
+                zeroBufferSize, index, segmentIds.Length);
+        }
+        else if (lastKnownSegmentSize is > 0 && index < segmentIds.Length - 1)
+        {
+            // If the segment itself was corrupt (for example yEnc CRC mismatch), we may not
+            // have any successful segment in this bounded HTTP range yet. The yEnc header was
+            // still parsed before the CRC failure and contains the decoded part size, which is
+            // exact enough to preserve file offsets while zero-filling the failed segment.
+            zeroBufferSize = lastKnownSegmentSize.Value;
+            Log.Warning("[BufferedStream] Using yEnc header size {Size} for corrupted segment {Index}/{Total} to allow graceful degradation without shifting offsets.",
                 zeroBufferSize, index, segmentIds.Length);
         }
         else
