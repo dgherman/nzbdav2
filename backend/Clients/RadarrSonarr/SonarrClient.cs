@@ -30,7 +30,7 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         Get<List<SonarrEpisode>>($"/episode?episodeFileId={episodeFileId}");
 
     public Task<HttpStatusCode> DeleteEpisodeFile(int episodeFileId) =>
-        Delete($"/episodefile/{episodeFileId}");
+        Delete($"/episodefile/{episodeFileId}", new Dictionary<string, string> { ["deleteFiles"] = "true" });
 
     public Task<ArrCommand> SearchEpisodesAsync(List<int> episodeIds) =>
         CommandAsync(new { name = "EpisodeSearch", episodeIds });

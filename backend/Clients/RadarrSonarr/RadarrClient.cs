@@ -20,7 +20,7 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         Get<RadarrQueue>($"/queue?protocol=usenet&pageSize=5000");
 
     public Task<HttpStatusCode> DeleteMovieFile(int id) =>
-        Delete($"/moviefile/{id}");
+        Delete($"/moviefile/{id}", new Dictionary<string, string> { ["deleteFiles"] = "true" });
 
     public Task<ArrCommand> SearchMovieAsync(int id) =>
         CommandAsync(new { name = "MoviesSearch", movieIds = new List<int> { id } });

@@ -764,6 +764,9 @@ public class HealthCheckService
                     {
                         var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
                         Log.Information($"[HealthCheck] {arrActionMessage}");
+                        var linkCleanupMessage = await DeleteSymlinkOrStrmIfStillPresent(symlinkOrStrmPath).ConfigureAwait(false);
+                        if (linkCleanupMessage != null)
+                            Log.Information("[HealthCheck] {LinkCleanupMessage}", linkCleanupMessage);
 
                         dbClient.Ctx.Items.Remove(davItem);
                         OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
@@ -778,7 +781,8 @@ public class HealthCheckService
                             Message = string.Join(" ", [
                                 failureReason,
                                 $"Corresponding {linkType} found within Library Dir.",
-                                arrActionMessage
+                                arrActionMessage,
+                                linkCleanupMessage
                             ]),
                             Operation = operation
                         }));
@@ -887,6 +891,31 @@ public class HealthCheckService
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         }
+    }
+
+    private static async Task<string?> DeleteSymlinkOrStrmIfStillPresent(string symlinkOrStrmPath)
+    {
+        SymlinkAndStrmUtil.ISymlinkOrStrmInfo? currentLinkInfo;
+        try
+        {
+            currentLinkInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(symlinkOrStrmPath));
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+
+        if (currentLinkInfo is null) return null;
+
+        var linkDescription = currentLinkInfo switch
+        {
+            SymlinkAndStrmUtil.SymlinkInfo symInfo => $"symlink '{symlinkOrStrmPath}' (target: '{symInfo.TargetPath}')",
+            SymlinkAndStrmUtil.StrmInfo strmInfo  => $"strm file '{symlinkOrStrmPath}' (target URL: '{strmInfo.TargetUrl}')",
+            _                                     => $"link file '{symlinkOrStrmPath}'"
+        };
+
+        await Task.Run(() => File.Delete(symlinkOrStrmPath)).ConfigureAwait(false);
+        return $"Deleted remaining {linkDescription} after Arr repair.";
     }
 
     private async Task SaveHealthCheckToAnalysisHistoryAsync(Guid davItemId, string fileName, string jobName, string result, string details)
