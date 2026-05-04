@@ -67,7 +67,8 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         
         Log.Information($"[ArrClient] Successfully deleted episode file ID {mediaIds.Value.episodeFileId}.");
 
-        // 3. Try to find the "grab" event in history and mark it as failed (this handles blacklist + search)
+        // 3. Try to find the "grab" event in history and mark it as failed so Arr blocklists this release.
+        // Always trigger an explicit search afterward because Arr's failed-download handling may not auto-search.
         if (!string.IsNullOrEmpty(sceneName))
         {
             try
@@ -89,31 +90,30 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
                     var markFailedResult = await MarkHistoryFailedAsync(grabEvent.Id);
                     if (markFailedResult)
                     {
-                        Log.Information($"[ArrClient] Successfully marked history item {grabEvent.Id} as failed for '{sceneName}' in Sonarr '{Host}'.");
-                        return true;
+                        Log.Information($"[ArrClient] Successfully marked history item {grabEvent.Id} as failed for '{sceneName}' in Sonarr '{Host}'. Triggering explicit replacement search.");
                     }
                     else
                     {
-                        Log.Warning($"[ArrClient] Failed to mark history item {grabEvent.Id} as failed for '{sceneName}' in Sonarr '{Host}'. Proceeding to fallback search.");
+                        Log.Warning($"[ArrClient] Failed to mark history item {grabEvent.Id} as failed for '{sceneName}' in Sonarr '{Host}'. Proceeding to replacement search.");
                     }
                 }
                 else
                 {
-                    Log.Warning($"[ArrClient] Could not find grab event in history for '{sceneName}' in Sonarr '{Host}'. Proceeding to fallback search.");
+                    Log.Warning($"[ArrClient] Could not find grab event in history for '{sceneName}' in Sonarr '{Host}'. Proceeding to replacement search.");
                 }
             }
             catch (Exception ex)
             {
-                Log.Warning($"[ArrClient] Error while attempting to mark history item as failed for '{sceneName}' in Sonarr '{Host}': {ex.Message}. Proceeding to fallback search.");
+                Log.Warning($"[ArrClient] Error while attempting to mark history item as failed for '{sceneName}' in Sonarr '{Host}': {ex.Message}. Proceeding to replacement search.");
             }
         }
         else
         {
-            Log.Warning($"[ArrClient] SceneName was null or empty for file. Cannot perform history lookup/blacklist. Proceeding to fallback search.");
+            Log.Warning($"[ArrClient] SceneName was null or empty for file. Cannot perform history lookup/blacklist. Proceeding to replacement search.");
         }
 
-        // 4. Fallback: Trigger a new search for each episode
-        Log.Information($"[ArrClient] Triggering fallback search for {mediaIds.Value.episodeIds.Count} episode(s)...");
+        // 4. Trigger a new search for each episode
+        Log.Information($"[ArrClient] Triggering replacement search for {mediaIds.Value.episodeIds.Count} episode(s)...");
         await SearchEpisodesAsync(mediaIds.Value.episodeIds);
         return true;
     }
