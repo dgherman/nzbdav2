@@ -351,13 +351,21 @@ public class BufferedSegmentStream : Stream
         ConnectionUsageContext? usageContext = null,
         long[]? segmentSizes = null,
         Dictionary<int, string[]>? segmentFallbacks = null,
-        int segmentIndexOffset = 0)
+        int segmentIndexOffset = 0,
+        int? endSegmentIndexInclusive = null)
     {
         _usageContext = usageContext;
         _segmentSizes = segmentSizes;
         _segmentFallbacks = segmentFallbacks;
         _segmentIndexOffset = segmentIndexOffset;
         _client = client;
+
+        // Effective segment count: when bounded by an HTTP Range end, only fetch up to (and including)
+        // endSegmentIndexInclusive. This prevents over-prefetching ~40 MB per ranged read for clients
+        // (rclone vfs-cache, ffprobe seeks) that issue many small bounded GETs.
+        var effectiveCount = endSegmentIndexInclusive.HasValue
+            ? Math.Min(segmentIds.Length, Math.Max(0, endSegmentIndexInclusive.Value + 1))
+            : segmentIds.Length;
         // Ensure buffer is large enough for concurrent workers, but don't over-allocate.
         // Each buffered segment holds a ~1MB byte array, so large buffers
         // cause significant memory pressure (e.g., 250 segments = ~500MB).
@@ -394,7 +402,7 @@ public class BufferedSegmentStream : Stream
         // Start background fetcher
         _fetchTask = Task.Run(async () =>
         {
-            await FetchSegmentsAsync(segmentIds, client, concurrentConnections, bufferSegmentCount, contextToken)
+            await FetchSegmentsAsync(segmentIds, client, concurrentConnections, bufferSegmentCount, contextToken, effectiveCount)
                 .ConfigureAwait(false);
         }, contextToken);
 
@@ -422,7 +430,7 @@ public class BufferedSegmentStream : Stream
         }, contextToken);
 
         Length = fileSize;
-        _totalSegments = segmentIds.Length;
+        _totalSegments = effectiveCount;
     }
 
     private void UpdateUsageContext()
@@ -455,7 +463,8 @@ public class BufferedSegmentStream : Stream
         INntpClient client,
         int concurrentConnections,
         int bufferSegmentCount,
-        CancellationToken ct)
+        CancellationToken ct,
+        int effectiveSegmentCount)
     {
         try
         {
@@ -480,12 +489,13 @@ public class BufferedSegmentStream : Stream
             // Track which segments are currently being raced to avoid double-racing
             var racingIndices = new ConcurrentDictionary<int, bool>();
 
-            // Producer: Queue all segment IDs
+            // Producer: Queue segment IDs up to effectiveSegmentCount (may be < segmentIds.Length
+            // when bounded by an HTTP Range end byte to prevent over-prefetching).
             var producerTask = Task.Run(async () =>
             {
                 try
                 {
-                    for (int i = 0; i < segmentIds.Length; i++)
+                    for (int i = 0; i < effectiveSegmentCount; i++)
                     {
                         if (ct.IsCancellationRequested) break;
                         await segmentQueue.Writer.WriteAsync((i, segmentIds[i]), ct).ConfigureAwait(false);
@@ -625,7 +635,7 @@ public class BufferedSegmentStream : Stream
                 try
                 {
                     var spinCount = 0;
-                    while (nextIndexToWrite < segmentIds.Length && !ct.IsCancellationRequested)
+                    while (nextIndexToWrite < effectiveSegmentCount && !ct.IsCancellationRequested)
                     {
                         var segment = Volatile.Read(ref segmentSlots[nextIndexToWrite]);
                         if (segment != null)
@@ -970,7 +980,7 @@ public class BufferedSegmentStream : Stream
             catch (TimeoutException)
             {
                 Log.Warning("[BufferedStream] Ordering task timed out. NextIndexToWrite={NextIndex}, TotalSegments={Total}",
-                    nextIndexToWrite, segmentIds.Length);
+                    nextIndexToWrite, effectiveSegmentCount);
             }
             catch (OperationCanceledException)
             {

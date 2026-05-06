@@ -229,8 +229,18 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                     continue;
                 }
 
-                // Log the error with circuit breaker context
-                if (currentFailures > 3)
+                // Log the error with circuit breaker context.
+                // Cancellation is benign here: it almost always means the caller's token fired
+                // (HTTP client disconnect for BufferedStreaming, per-file deadline for QueueAnalysis,
+                // queue cancellation, etc.). Demote those to Debug so logs are usable.
+                var isCancellation = ex is OperationCanceledException
+                                     || cancellationToken.IsCancellationRequested
+                                     || linked.IsCancellationRequested;
+                if (isCancellation)
+                {
+                    Serilog.Log.Debug("[ConnectionPool][{PoolName}] Connection creation for {UsageType} canceled (caller token fired): {Error}", PoolName, usageContext.UsageType, ex.Message);
+                }
+                else if (currentFailures > 3)
                 {
                     Serilog.Log.Error("[ConnectionPool][{PoolName}] Failed to create connection for {UsageType} (Failure #{Failures}). Circuit breaker will activate after 5 failures. Error: {Error}", PoolName, usageContext.UsageType, currentFailures, ex.Message);
                 }
@@ -293,10 +303,16 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         _activeConnections.TryRemove(connectionId, out var info);
         var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
 
-        if (Volatile.Read(ref _disposed) == 1 || _doomedConnections.TryRemove(connection, out _))
+        var poolDisposed = Volatile.Read(ref _disposed) == 1;
+        var isDoomed = _doomedConnections.TryRemove(connection, out _);
+        if (poolDisposed || isDoomed)
         {
             _ = DisposeConnectionSafeAsync(connection, "doomed/disposed return");
             Interlocked.Decrement(ref _live);
+            if (!poolDisposed)
+            {
+                _gate.Release();
+            }
             TriggerConnectionPoolChangedEvent();
             return;
         }

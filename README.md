@@ -116,6 +116,143 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.6.Z (2026-04-24)
+*   **Logging**: Demoted benign cancellation noise. `ConnectionPool` now logs `Connection ... was canceled` at Debug instead of Warning when the caller's `CancellationToken` is the trigger (HTTP client disconnect for `BufferedStreaming`, per-file deadline for `QueueAnalysis`, queue cancellation, etc.). True connection failures still log at Warning/Error and trip the circuit breaker as before. `[CancellationTokenContext]` nested-scope removals (where an inner `SetScopedContext` already cleared the entry) are also Debug now.
+*   **Fix**: Queue Step 3 (smart article probe) per-file timeout bumped from 15s to 30s in `QueueItemProcessor.cs`. The previous 15s deadline was tighter than `UsenetStreamingClient.CreateNewConnection`'s own 60s connection timeout and frequently fired during TCP+TLS+NNTP greeting on geographically distant providers (e.g. Frugal AU for non-AU users), producing `[ConnectionPool][...] Failed to create connection for QueueAnalysis: Connection to usenet host (...) was canceled.` for every file in a queue item touching that provider. The 180s overall Step 3 budget is unchanged.
+*   **Fix**: V1 → v2 blobstore migration no longer dies with `System.OutOfMemoryException` partway through (~6.5k of ~25k items on a 4 GB container). Two leaks were stacked: (1) `BlobStoreReader.TryReadAsync` allocated a second full-size copy of every decompressed payload via `MemoryStream.ToArray()` — now reads directly from `GetBuffer()` so peak transient memory per blob is roughly halved; (2) the migration loop in `Program.cs` Add()ed every recovered `DavNzbFiles`/`DavRarFiles`/`DavMultipartFiles` row to the EF change tracker but never cleared it between batches, so by item 25k the tracker held all 25k entities simultaneously. Now calls `ChangeTracker.Clear()` after each `SaveChangesAsync` and triggers a non-blocking compacting GC between batches to defragment the LOH (every decompressed buffer is >85 KB). Batch size also reduced from 500 → 100 for additional headroom.
+*   **Fix**: V1 blobstore deserialization now uses MemoryPack `[MemoryPackable(GenerateType.VersionTolerant)]` on every shim POCO (`UpstreamDavNzbFile`, `UpstreamDavRarFile`/`UpstreamRarPart`, `UpstreamDavMultipartFile`/`UpstreamMultipartMeta`/`UpstreamFilePart`, `UpstreamAesParams`) and models `UpstreamLongRange` as a `partial record` (not `struct`) — this matches how upstream's `BlobStore.WriteBlob<T>` actually serialised the blobs. Previously every blob read failed with `MemoryPackSerializationException: property count is 2 but binary's header marked as N`, leaving 25k+ items orphaned during migration.
+*   **Fix**: V1 → v2 metadata migration now uses the v1 `db.sqlite` (placed at `{CONFIG_PATH}/backup/db.sqlite` or `{CONFIG_PATH}/v1-backup.sqlite`) to recover the `DavItem.Id → FileBlobId` mapping that this fork lost when the `FileBlobId` column was dropped. Each candidate `DavItem` is resolved via that map → `{CONFIG_PATH}/blobs/{first2}/{next2}/{FileBlobId}` → deserialized via Zstd+MemoryPack into the equivalent `DavNzbFiles` / `DavRarFiles` / `DavMultipartFiles` row. Without the v1 backup file present, items remain orphaned and a clear startup warning explains how to provide it. Resolves the `FileNotFoundException: Could not find nzb file with id: …` errors when streaming symlinks pointing into `.ids/`.
+*   **Reliability**: `NormalizeLegacyDavItemTypesAsync` no longer unconditionally promotes `Type=2 SubType=201/202/203` items to v2 file types — promotion is now gated on the corresponding metadata row existing.
+*   **Logging**: Startup logs now report `[BlobstoreMigration]` progress and an `[OrphanReport]` summary of any remaining unrecoverable items (with sample paths).
+*   **Performance**: Bound `BufferedSegmentStream` prefetch to the requested HTTP `Range` end byte (plus a 4-segment overshoot) instead of always queueing every segment to EOF. Prevents ~40 MB of speculative Usenet reads per ranged request — the root cause of slow Radarr imports, ffprobe seek storms, and backend `OutOfMemoryException` on the SAB `mode=history` endpoint when many bounded reads (rclone vfs-cache fills, HDR ffprobe `GetFrameJson` seeks) were in flight concurrently.
+*   **Performance**: Skip the shared-stream pump for requests with a closed `bytes=X-Y` range — discrete bounded reads now take the direct bounded-prefetch path instead of attaching to a streaming pump that would prefetch to EOF for downstream readers.
+*   **Reliability**: Open-ended (`bytes=X-`) and unbounded GETs are unchanged — Plex/Jellyfin/rclone full-file streaming continues to use the shared streaming pump with full read-ahead.
+
+## v0.6.Z (2026-04-23)
+*   **Fix**: Resolve "NOT NULL constraint failed: DavItems.SubType" error when migrating from v1 databases. The compat layer now recreates the DavItems table with nullable SubType column to allow new item creation during queue processing.
+*   **Fix**: Corrected `DavItems` schema compatibility rebuild to avoid creating an unintended foreign key from `DavItems.HistoryItemId` to `HistoryItems.Id`, which caused queue item saves to fail with `FOREIGN KEY constraint failed`.
+*   **Reliability**: Added pre-migration drift handling for `20260408180402_ChangeQueueItemsFileNameIndexToCategoryFileName` so pre-existing `IX_QueueItems_Category_FileName` no longer crashes startup migrations.
+*   **Reliability**: Added startup self-heal to detect and remove the unintended `DavItems.HistoryItemId -> HistoryItems.Id` foreign key on already-affected databases.
+*   **UI**: Restored queue pagination controls and queue search UI rendering on the Queue page so large queues no longer fall back to the old unpaged "show everything" behavior.
+*   **Logic**: Queue priority-change refresh now preserves current `start`, `limit`, and `search` parameters instead of forcing a `limit=100` snapshot, preventing pagination state resets after moving items.
+*   **Fix**: Queue removals now trigger a paginated server refresh (with page clamping) so deleting an entire page immediately pulls in the next items instead of showing a temporary empty queue until manual reload.
+*   **UI**: Queue empty-state rendering now considers total queue count, preventing false "nothing left" flashes while the next page is being fetched after bulk deletes.
+*   **Reliability**: Queue delete requests from the web UI now use strict mode so backend removal failures are returned as errors instead of being silently reported as success, preventing items from disappearing and then reappearing after refresh.
+*   **Fix**: Hardened WebSocket message parsing in the queue UI to ignore malformed/non-JSON frames instead of throwing client-side runtime errors in production chunks, improving real-time queue stability.
+
+## v0.7.22 (2026-04-23)
+*   **Fix**: Added v1-compatible `DavItems` type normalization for databases that use `Type=2` + `SubType` (`201/202/203`) so files are no longer misclassified as folders in UI/WebDAV/rclone mounts.
+*   **Fix**: Added queue recovery from legacy blob files at startup (`/config/blobs/{firstTwo}/{nextTwo}/{guid}`) to repopulate `QueueNzbContents` before orphan cleanup.
+*   **Reliability**: Extended startup migration self-healing to handle mixed-schema upgrades where both old and new type encodings may coexist.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-23-V1-MIGRATION-FILETYPE-QUEUE-RECOVERY`.
+
+## v0.7.21 (2026-04-22)
+*   **Fix**: Added pre-migration index compatibility checks that recreate legacy indexes before EF migration runs, preventing failures such as `no such index: IX_DavItems_Type_NextHealthCheck_ReleaseDate_Id` on drifted v1 databases.
+*   **Reliability**: Migration bootstrap now safely pre-creates `IX_DavItems_Type_NextHealthCheck_ReleaseDate_Id` and `IX_QueueItems_FileName` only when required tables and columns exist.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-MIGRATION-INDEX-COMPAT`.
+
+## v0.7.20 (2026-04-22)
+*   **Fix**: Added runtime queue migration self-healing to backfill `QueueNzbContents` from legacy `QueueItems.NzbContents` when available and remove orphan queue rows that would otherwise stall processing with "no NZB contents" warnings.
+*   **Fix**: Added runtime normalization for legacy `DavItems` rows incorrectly marked as directories even though they map to file tables (`DavNzbFiles`, `DavRarFiles`, `DavMultipartFiles`).
+*   **Reliability**: Startup compatibility pass now repairs schema/data drift for v1-to-v2 migrations before background services run.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-MIGRATION-COMPAT-PATCHES`.
+
+## v0.7.19 (2026-04-22)
+*   **Fix**: Added runtime schema compatibility checks that automatically add missing `DownloadDirId` columns to `HistoryItems` and `HistoryCleanupItems` when upgrading from legacy databases with migration drift.
+*   **Reliability**: Added startup self-healing index creation for `IX_HistoryItems_Category_DownloadDirId` to keep history cleanup and health-check queries stable after migration from v1.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-SCHEMA-COMPAT-HISTORY`.
+
+## v0.7.18 (2026-04-22)
+*   **Tooling**: Kept Docker publishing repository-derived so GitHub Actions publishes to the current fork owner automatically.
+*   **UI**: Updated in-app GitHub and changelog links to point to FizzWhirl/nzbdav2.
+*   **Docs**: Updated the Quick Start image reference to `ghcr.io/fizzwhirl/nzbdav2:latest`.
+
+## v0.7.17 (2026-04-22)
+*   **Optimization**: Reduced media-analysis decode sample duration from 5 seconds to 2 seconds for Step 5 decode checks to lower analysis data usage.
+*   **Logic**: Disabled buffered segment streaming only for `X-Analysis-Mode` requests, so analysis no longer prefetches extra Usenet data while regular playback keeps existing buffering behavior.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-ANALYSIS-LOW-DATA`.
+
+## v0.7.16 (2026-04-22)
+*   **Fix**: Step 5 media analysis now keeps files (instead of marking them corrupt) when decode check failures are caused by transient provider errors — 5XX responses, NNTP protocol errors, premature EOF, or decode timeouts. Only genuine codec errors (invalid data, CRC failures) result in corruption marking.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-TRANSIENT-DECODE-FIX`.
+
+## v0.7.15 (2026-04-22)
+*   **Reliability**: Hardened `NzbProviderAffinity` stats persistence by preventing overlapping timer writes and reducing write cadence from 5s to 15s.
+*   **Fix**: Added retry handling for transient SQLite write errors (`disk I/O error`, `database is locked`) during affinity stats persistence.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-AFFINITY-PERSIST-FIX`.
+
+## v0.7.14 (2026-04-22)
+*   **Reliability**: Raised default `analysis.max-concurrent` from `1` to `3` in backend and frontend defaults to avoid severe queue-analysis bottlenecks on large packs.
+*   **Logic**: Kept unified analysis fan-out model where both Queue Step 3 smart probe and Step 5 media analysis follow `analysis.max-concurrent`.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-ANALYSIS-DEFAULTS-3`.
+
+## v0.7.13 (2026-04-22)
+*   **Logic**: Queue Step 5 media analysis (`ffprobe` + decode checks) now uses `analysis.max-concurrent` instead of a separate hardcoded parallelism value.
+*   **Logic**: Queue Steps 3 and 5 now share the same frontend-exposed analysis concurrency setting.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-UNIFIED-ANALYSIS-CONCURRENCY`.
+
+## v0.7.12 (2026-04-22)
+*   **Logic**: Queue Step 5 media probing (`ffprobe` + decode checks) now runs only when `api.ensure-article-existence=true`.
+*   **Logic**: Queue Step 3 smart article probe now skips sample files when `usenet.hide-samples=true`.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-PROBE-GATING-SAMPLES`.
+
+## v0.7.11 (2026-04-22)
+*   **Logic**: Removed the smart article probe safety clamp so Queue Step 3 now uses `analysis.max-concurrent` directly.
+*   **Reliability**: Keeps probe concurrency behavior fully aligned with the single analysis tuning setting.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-ANALYSIS-PROBE-UNCAPPED`.
+
+## v0.7.10 (2026-04-22)
+*   **Logic**: Queue Step 3 smart article probe parallelism now follows `analysis.max-concurrent` instead of a separate hardcoded value.
+*   **Reliability**: Applied safety clamp (`1..8`) to probe parallelism to avoid runaway fan-out while still allowing tuning through a single setting.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-ANALYSIS-PROBE-LINK`.
+
+## v0.7.9 (2026-04-22)
+*   **Fix**: Reduced queue Step 3 per-file smart article probe parallelism from 8 to 4 (`Parallel.ForEachAsync MaxDegreeOfParallelism`) to lower concurrent `QueueAnalysis` pressure during large queue processing.
+*   **Reliability**: Helps reduce memory pressure spikes when many files are probed simultaneously in the same NZB job.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-22-QUEUE-PROBE-CAP-4`.
+
+## v0.7.8 (2026-04-21)
+*   **Fix**: Changed media decode integrity sampling points from 75%/90% to 10%/90% so corruption near the start of files is validated earlier.
+*   **Reliability**: Hardened Settings defaults by setting `analysis.max-concurrent` to `1` in the frontend defaults/fallback to match backend safe defaults and reduce OOM risk during mass analysis.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-21-OOM-HARDENING-PASS2`.
+
+## v0.7.7 (2026-04-21)
+*   **Fix**: Reverted configurable `usenet.cleanup-timeout-ms` setting and restored fixed 500ms NNTP cleanup timeout behavior.
+*   **UI**: Removed "Connection Cleanup Timeout (ms)" from Settings → Usenet.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-21-ROLLBACK-CLEANUP-TIMEOUT`.
+
+## v0.7.6 (2026-04-21)
+*   **UI**: Updated Queue page Provider Stats card styling to use Bootstrap theme variables so text/background contrast renders correctly in dark mode.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-21-CLEANUP-TIMEOUT-QUEUE-DARKMODE` for deployment verification.
+
+## v0.7.5 (2026-04-21)
+*   **Feature**: Added configurable `usenet.cleanup-timeout-ms` setting to control how long NNTP connection cleanup waits before force-replacing a draining connection.
+*   **Reliability**: Wired cleanup timeout configuration into both stream-dispose and background cleanup paths to reduce false cleanup cancellation churn on slower providers.
+*   **UI**: Added "Connection Cleanup Timeout (ms)" field to Settings → Usenet with validation and save tracking.
+
+## v0.7.4 (2026-04-21)
+*   **Fix**: Reduced default `analysis.max-concurrent` from 3 to 1, and `usenet.max-concurrent-buffered-streams` from 4 to 2, to prevent OOM crashes under memory pressure when multiple ffprobe analyses and buffered streams run simultaneously.
+*   **Reliability**: Each ffprobe analysis opens a `NzbFileStream` with a 20-segment prefetch buffer; reducing concurrent analyses from 3 to 1 cuts peak streaming RAM by ~60% for containers with limited memory.
+
+## v0.7.3 (2026-04-21)
+*   **Fix**: Added queue-time sample file filtering when `usenet.hide-samples=true`, so sample releases are removed before importable-media validation and ffprobe analysis.
+*   **Reliability**: Replaced narrow `".sample."` matching with centralized filename token detection, improving sample filtering across WebDAV content and completed-symlink views.
+*   **Logging**: Updated backend startup build banner to `BUILD v2026-04-21-SAMPLE-FILTER-HARDENING` for clearer deployment verification.
+
+## v0.7.2 (2026-04-21)
+*   **Fix**: Preview endpoints now reject non-file DavItem IDs up front (directories/roots), preventing HLS/remux requests from targeting invalid `/view` paths.
+*   **Reliability**: HLS and remux preview streaming no longer return empty HTTP 200 responses when `ffmpeg` exits with an error before emitting data; zero-output failures now return explicit 502 errors.
+*   **Maintenance**: Rebased feature/media-analysis-optimization onto latest `origin/main` and retained branch functionality on top of upstream queue/concurrency changes.
+*   **Fix**: Hardened remux stdin handling for early ffmpeg exits (broken pipe/disposed stream paths) to avoid uncontrolled error propagation.
+*   **Reliability**: Migrated media analysis ffprobe/ffmpeg invocations to `ProcessStartInfo.ArgumentList` to eliminate fragile argument-string quoting on unusual file paths.
+*   **Performance**: Refactored queue Step 5 analysis history persistence from per-item locked `SaveChanges()` to batched post-loop async persistence.
+*   **Docs**: Added deep review report plus performance/security addendum in `docs/superpowers/plans/deep-review-report-2026-04-21.md`.
+
+## v0.7.2 (2026-05-05)
+*   **Fix**: `BufferedSegmentStream` prefetch is now bounded to the requested HTTP `Range` end byte (plus a 4-segment overshoot). Stremio, rclone vfs-cache, and ffprobe all issue closed `bytes=X-Y` range requests — previously each one triggered a full file prefetch (~40 MB of speculative Usenet reads), starving the connection pool and causing slow start times and timeouts. (Hat tip to [FizzWhirl](https://github.com/FizzWhirl/nzbdav2) for identifying and fixing this one.)
+*   **Fix**: Connection pool slot was not released when a doomed connection was returned. Over time, each doomed connection permanently shrank the pool by one slot, causing progressive timeout worsening under normal provider turbulence.
+*   **Fix**: Cancellation of streaming connections (`OperationCanceledException`) no longer increments the circuit-breaker failure counter or logs at Warning. Stremio cancels frequently on seeks and player stop — previously this tripped the 2-second circuit-breaker pause on every seek.
+
 ## v0.7.1 (2026-04-13)
 *   **Feature**: Hybrid connection pool — replace hard-partitioned connection semaphores with priority-based shared pool (`PrioritizedSemaphore`). Queue processing uses full connection capacity when not streaming; streaming gets guaranteed reserve slots (configurable via `usenet.streaming-reserve`, default 5) and priority scheduling (configurable via `usenet.streaming-priority`, default 80%).
 *   **Feature**: Buffered multi-connection streaming during RAR header parsing via new `QueueRarProcessing` context — RAR end-of-archive seeks now pre-fetch segments instead of one-at-a-time lazy fetches.
