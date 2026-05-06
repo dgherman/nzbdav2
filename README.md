@@ -248,6 +248,11 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 *   **Performance**: Refactored queue Step 5 analysis history persistence from per-item locked `SaveChanges()` to batched post-loop async persistence.
 *   **Docs**: Added deep review report plus performance/security addendum in `docs/superpowers/plans/deep-review-report-2026-04-21.md`.
 
+## v0.7.2 (2026-05-05)
+*   **Fix**: `BufferedSegmentStream` prefetch is now bounded to the requested HTTP `Range` end byte (plus a 4-segment overshoot). Stremio, rclone vfs-cache, and ffprobe all issue closed `bytes=X-Y` range requests — previously each one triggered a full file prefetch (~40 MB of speculative Usenet reads), starving the connection pool and causing slow start times and timeouts. (Hat tip to [FizzWhirl](https://github.com/FizzWhirl/nzbdav2) for identifying and fixing this one.)
+*   **Fix**: Connection pool slot was not released when a doomed connection was returned. Over time, each doomed connection permanently shrank the pool by one slot, causing progressive timeout worsening under normal provider turbulence.
+*   **Fix**: Cancellation of streaming connections (`OperationCanceledException`) no longer increments the circuit-breaker failure counter or logs at Warning. Stremio cancels frequently on seeks and player stop — previously this tripped the 2-second circuit-breaker pause on every seek.
+
 ## v0.7.1 (2026-04-13)
 *   **Feature**: Hybrid connection pool — replace hard-partitioned connection semaphores with priority-based shared pool (`PrioritizedSemaphore`). Queue processing uses full connection capacity when not streaming; streaming gets guaranteed reserve slots (configurable via `usenet.streaming-reserve`, default 5) and priority scheduling (configurable via `usenet.streaming-priority`, default 80%).
 *   **Feature**: Buffered multi-connection streaming during RAR header parsing via new `QueueRarProcessing` context — RAR end-of-archive seeks now pre-fetch segments instead of one-at-a-time lazy fetches.
