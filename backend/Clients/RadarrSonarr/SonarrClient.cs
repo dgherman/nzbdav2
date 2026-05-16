@@ -29,6 +29,9 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
     public Task<List<SonarrEpisode>> GetEpisodesFromEpisodeFileId(int episodeFileId) =>
         Get<List<SonarrEpisode>>($"/episode?episodeFileId={episodeFileId}");
 
+    public Task<List<SonarrEpisode>> GetEpisodes(int seriesId) =>
+        Get<List<SonarrEpisode>>($"/episode?seriesId={seriesId}");
+
     public Task<HttpStatusCode> DeleteEpisodeFile(int episodeFileId) =>
         Delete($"/episodefile/{episodeFileId}", new Dictionary<string, string> { ["deleteFiles"] = "true" });
 
@@ -62,7 +65,8 @@ public class SonarrClient(string host, string apiKey) : ArrClient(host, apiKey)
 
         // 2. Delete the episode-file
         Log.Information($"[ArrClient] Deleting episode file ID {mediaIds.Value.episodeFileId} from Sonarr...");
-        if (await DeleteEpisodeFile(mediaIds.Value.episodeFileId) != HttpStatusCode.OK)
+        var deleteStatus = await DeleteEpisodeFile(mediaIds.Value.episodeFileId);
+        if ((int)deleteStatus is < 200 or >= 300)
             throw new Exception($"Failed to delete episode file `{symlinkOrStrmPath}` from sonarr instance `{Host}`.");
         
         Log.Information($"[ArrClient] Successfully deleted episode file ID {mediaIds.Value.episodeFileId}.");

@@ -10,6 +10,9 @@ public class ArrQueueRecord
     [JsonPropertyName("title")]
     public string? Title { get; set; }
 
+    [JsonPropertyName("downloadId")]
+    public string? DownloadId { get; set; }
+
     [JsonPropertyName("protocol")]
     public string? Protocol { get; set; }
 

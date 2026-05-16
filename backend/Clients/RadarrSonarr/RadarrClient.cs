@@ -43,7 +43,8 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
 
         // 2. Delete the movie file
         Log.Information($"[ArrClient] Deleting movie file ID {mediaIds.Value.movieFileId} from Radarr...");
-        if (await DeleteMovieFile(mediaIds.Value.movieFileId) != System.Net.HttpStatusCode.OK)
+        var deleteStatus = await DeleteMovieFile(mediaIds.Value.movieFileId);
+        if ((int)deleteStatus is < 200 or >= 300)
             throw new Exception($"Failed to delete movie file '{symlinkOrStrmPath}' from Radarr instance '{Host}'.");
 
         Log.Information($"[ArrClient] Successfully deleted movie file ID {mediaIds.Value.movieFileId}.");

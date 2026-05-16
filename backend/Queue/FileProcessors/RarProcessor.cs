@@ -132,7 +132,7 @@ public class RarProcessor(
             var partIds = fileInfo.NzbFile.GetSegmentIds();
             if (partIds.Length > 0)
             {
-                var computed = await usenet.AnalyzeNzbAsync(partIds, RarHeaderConnections, null, ct, useSmartAnalysis: true).ConfigureAwait(false);
+                var computed = await usenet.AnalyzeNzbAsync(partIds, MaxRarHeaderConnectionsPerPart, null, ct, useSmartAnalysis: true).ConfigureAwait(false);
                 if (SegmentOffsetTable.TryBuild(computed, partIds.Length, stream.Length, out _))
                     partSegmentSizes = computed;
             }

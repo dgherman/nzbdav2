@@ -238,6 +238,7 @@ class Program
             .AddSingleton<BandwidthService>()
             .AddSingleton<NzbProviderAffinityService>()
             .AddSingleton<ProviderErrorService>()
+            .AddSingleton<ArrReplacementSearchService>()
             .AddSingleton<UsenetStreamingClient>()
             .AddSingleton<QueueManager>()
             .AddSingleton<ArrMonitoringService>()

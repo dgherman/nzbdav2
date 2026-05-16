@@ -27,6 +27,7 @@ public class HealthCheckService
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly ProviderErrorService _providerErrorService;
     private readonly NzbAnalysisService _nzbAnalysisService;
+    private readonly ArrReplacementSearchService _arrReplacementSearchService;
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
     private readonly ConcurrentDictionary<string, byte> _missingSegmentIds = new();
@@ -41,7 +42,8 @@ public class HealthCheckService
         WebsocketManager websocketManager,
         IServiceScopeFactory serviceScopeFactory,
         ProviderErrorService providerErrorService,
-        NzbAnalysisService nzbAnalysisService
+        NzbAnalysisService nzbAnalysisService,
+        ArrReplacementSearchService arrReplacementSearchService
     )
     {
         _configManager = configManager;
@@ -50,6 +52,7 @@ public class HealthCheckService
         _serviceScopeFactory = serviceScopeFactory;
         _providerErrorService = providerErrorService;
         _nzbAnalysisService = nzbAnalysisService;
+        _arrReplacementSearchService = arrReplacementSearchService;
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -681,6 +684,10 @@ public class HealthCheckService
             var symlinkOrStrmPath = OrganizedLinksUtil.GetLink(davItem, _configManager);
             if (symlinkOrStrmPath == null)
             {
+                await NotifyArrReplacementSearchForDeletedItemAsync(
+                    davItem,
+                    "Health check deleted an unhealthy file that no longer had a library link.",
+                    ct).ConfigureAwait(false);
                 dbClient.Ctx.Items.Remove(davItem);
                 OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
                 dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
@@ -823,6 +830,10 @@ public class HealthCheckService
             }
 
             Log.Warning($"[HealthCheck] Could not find corresponding Radarr/Sonarr media-item for file: {davItem.Name}. {deleteMessage}");
+            await NotifyArrReplacementSearchForDeletedItemAsync(
+                davItem,
+                "Health check deleted an unhealthy file after Arr path-based remove/search did not match any media item.",
+                ct).ConfigureAwait(false);
             // Only delete symlinks and strm files; regular rclone mount paths must not be deleted directly.
             if (linkInfoToDelete is SymlinkAndStrmUtil.SymlinkInfo or SymlinkAndStrmUtil.StrmInfo)
                 await Task.Run(() => File.Delete(symlinkOrStrmPath)).ConfigureAwait(false);
@@ -891,6 +902,19 @@ public class HealthCheckService
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         }
+    }
+
+    private async Task NotifyArrReplacementSearchForDeletedItemAsync(DavItem davItem, string reason, CancellationToken ct)
+    {
+        if (!davItem.HistoryItemId.HasValue || !FilenameUtil.IsImportantFileType(davItem.Name)) return;
+
+        var jobName = JobNameUtil.FromDavPath(davItem.Path) ?? davItem.Name;
+        await _arrReplacementSearchService.NotifyQueueFilesDeletedAsync(
+            davItem.HistoryItemId.Value,
+            jobName,
+            [davItem.Name],
+            reason,
+            ct).ConfigureAwait(false);
     }
 
     private static async Task<string?> DeleteSymlinkOrStrmIfStillPresent(string symlinkOrStrmPath)
