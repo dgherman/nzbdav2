@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Queue;
@@ -17,6 +18,22 @@ public class GetQueueController(
     {
         // get in progress item
         var (inProgressQueueItem, progressPercentage) = queueManager.GetInProgressQueueItem();
+        if (inProgressQueueItem != null)
+        {
+            var inProgressStillQueued = await dbClient.Ctx.QueueItems
+                .AsNoTracking()
+                .AnyAsync(x => x.Id == inProgressQueueItem.Id
+                               && (request.Category == null || x.Category == request.Category)
+                               && (string.IsNullOrWhiteSpace(request.Search) || x.JobName.Contains(request.Search) || x.FileName.Contains(request.Search)),
+                    request.CancellationToken)
+                .ConfigureAwait(false);
+
+            if (!inProgressStillQueued)
+            {
+                inProgressQueueItem = null;
+                progressPercentage = null;
+            }
+        }
 
         // get total count
         var ct = request.CancellationToken;

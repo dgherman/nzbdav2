@@ -19,12 +19,10 @@ public partial class ArrReplacementSearchService(ConfigManager configManager)
         {
             try
             {
-                handled |= arrClient switch
-                {
-                    SonarrClient sonarrClient => await NotifySonarrQueueItemFailedAsync(sonarrClient, queueItemId, jobName).ConfigureAwait(false),
-                    RadarrClient radarrClient => await NotifyRadarrQueueItemFailedAsync(radarrClient, queueItemId, jobName).ConfigureAwait(false),
-                    _ => false
-                };
+                await arrClient.RefreshMonitoredDownloads().ConfigureAwait(false);
+                handled = true;
+                Log.Information("[ArrReplacement] Requested Arr instance {Host} to refresh monitored downloads for failed queue item {JobName} ({QueueItemId}). Arr will apply its own failed-download removal/blocklist/search settings.",
+                    arrClient.Host, jobName, queueItemId);
             }
             catch (Exception ex)
             {
@@ -35,7 +33,7 @@ public partial class ArrReplacementSearchService(ConfigManager configManager)
 
         if (!handled)
         {
-            Log.Warning("[ArrReplacement] No Arr instance accepted failed queue item {JobName} ({QueueItemId}); replacement search could not be forced. Reason: {Reason}",
+            Log.Warning("[ArrReplacement] No Arr instance accepted failed queue item {JobName} ({QueueItemId}); Arr failed-download handling could not be refreshed. Reason: {Reason}",
                 jobName, queueItemId, reason);
         }
     }
