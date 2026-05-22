@@ -11,15 +11,13 @@ public class AddUrlRequest() : AddFileRequest
     private static readonly HttpClient HttpClient = GetHttpClient();
 
     private const int MaxAutomaticRedirections = 10;
-    private const string UserAgentHeader =
-        "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/134.0.6998.166 Safari/537.36";
 
     public static async Task<AddUrlRequest> New(HttpContext context, ConfigManager configManager)
     {
         var nzbUrl = context.GetQueryParam("name");
         var nzbName = context.GetQueryParam("nzbname");
-        var nzbFile = await GetNzbFile(nzbUrl, nzbName).ConfigureAwait(false);
+        var userAgent = configManager.GetUserAgent();
+        var nzbFile = await GetNzbFile(nzbUrl, nzbName, userAgent).ConfigureAwait(false);
         return new AddUrlRequest()
         {
             FileName = nzbFile.FileName,
@@ -32,7 +30,7 @@ public class AddUrlRequest() : AddFileRequest
         };
     }
 
-    private static async Task<NzbFileResponse> GetNzbFile(string? url, string? nzbName)
+    private static async Task<NzbFileResponse> GetNzbFile(string? url, string? nzbName, string userAgent)
     {
         try
         {
@@ -41,7 +39,7 @@ public class AddUrlRequest() : AddFileRequest
                 throw new Exception($"The url is invalid.");
 
             // fetch url
-            var response = await GetAsync(url).ConfigureAwait(false);
+            var response = await GetAsync(url, userAgent).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode)
                 throw new Exception($"Received status code {response.StatusCode}.");
 
@@ -102,9 +100,9 @@ public class AddUrlRequest() : AddFileRequest
             : $"{nzbName}.nzb";
     }
 
-    private static async Task<HttpResponseMessage> GetAsync(string url)
+    private static async Task<HttpResponseMessage> GetAsync(string url, string userAgent)
     {
-        var response = await HttpClient.GetAsync(url);
+        var response = await SendAsync(url, userAgent);
         var remainingRedirects = MaxAutomaticRedirections;
         while
         (
@@ -116,11 +114,21 @@ public class AddUrlRequest() : AddFileRequest
         {
             var redirect = response.Headers.Location;
             var redirectUri = redirect.IsAbsoluteUri ? redirect : new Uri(new Uri(url), redirect);
-            response = await HttpClient.GetAsync(redirectUri);
+            response = await SendAsync(redirectUri.ToString(), userAgent);
             remainingRedirects--;
         }
 
         return response;
+    }
+
+    // Set the User-Agent per-request rather than on the shared HttpClient's default
+    // headers, so concurrent addurl requests with different configured user-agents
+    // do not race on a single mutable header collection.
+    private static Task<HttpResponseMessage> SendAsync(string url, string userAgent)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("User-Agent", userAgent);
+        return HttpClient.SendAsync(request);
     }
 
     private static HttpClient GetHttpClient()
@@ -130,9 +138,7 @@ public class AddUrlRequest() : AddFileRequest
             AllowAutoRedirect = true,
             MaxAutomaticRedirections = MaxAutomaticRedirections,
         };
-        var httpClient = new HttpClient(handler);
-        httpClient.DefaultRequestHeaders.Add("User-Agent", UserAgentHeader);
-        return httpClient;
+        return new HttpClient(handler);
     }
 
     private class NzbFileResponse

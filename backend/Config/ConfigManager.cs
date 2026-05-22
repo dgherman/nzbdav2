@@ -141,6 +141,22 @@ public class ConfigManager
                ?? "uncategorized";
     }
 
+    // Default User-Agent for the SABnzbd `addurl` api when fetching NZB files over HTTP.
+    // A generic browser string is used by default so the request is not flagged as a
+    // usenet streamer / nzbdav by indexers that are leery of them. Override via the
+    // `api.user-agent` config value or the NZB_GRAB_USER_AGENT environment variable
+    // (e.g. set a SABnzbd or NZBGet string for indexers that expect a known client).
+    public const string DefaultUserAgent =
+        "Mozilla/5.0 (Windows NT 11.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/134.0.6998.166 Safari/537.36";
+
+    public string GetUserAgent()
+    {
+        return StringUtil.EmptyToNull(GetConfigValue("api.user-agent"))
+               ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("NZB_GRAB_USER_AGENT"))
+               ?? DefaultUserAgent;
+    }
+
     public int GetConnectionsPerStream()
     {
         return int.Parse(
