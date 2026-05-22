@@ -57,8 +57,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-05-STREMIO-FIXES");
-        Log.Warning("  FIX: Pool slot leak on doomed connections, range-bounded prefetch, cancellation noise demoted");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-22-STARTUP-NOPROVIDER-FIX");
+        Log.Warning("  FIX: Backend no longer crashes on startup when no usenet provider is configured (0-size semaphore)");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

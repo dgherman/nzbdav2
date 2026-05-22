@@ -116,6 +116,10 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.7.3 (2026-05-22)
+*   **Fix**: Backend crashed on startup with `SemaphoreSlim` `maximumCount must be a positive number` when no usenet provider was configured (e.g. a fresh install). With 0 provider connections, `GlobalOperationLimiter` computed a low-priority gate size of 0 and threw before the config page could be served, leaving users unable to reach configuration. The connection pool size is now floored at 1 and the limiter floors total connections at 2, so the backend always boots and the config page is reachable. (Reported in [#8](https://github.com/dgherman/nzbdav2/issues/8).)
+*   **Build**: Image version is now sourced from a single `VERSION` file at the repo root instead of a hardcoded `0.6.<run_number>` in CI. The Docker tag, changelog, and `Program.cs` BUILD string now stay in sync.
+
 ## v0.7.2 (2026-05-05)
 *   **Fix**: `BufferedSegmentStream` prefetch is now bounded to the requested HTTP `Range` end byte (plus a 4-segment overshoot). Stremio, rclone vfs-cache, and ffprobe all issue closed `bytes=X-Y` range requests — previously each one triggered a full file prefetch (~40 MB of speculative Usenet reads), starving the connection pool and causing slow start times and timeouts. (Hat tip to [FizzWhirl](https://github.com/FizzWhirl/nzbdav2) for identifying and fixing this one.)
 *   **Fix**: Connection pool slot was not released when a doomed connection was returned. Over time, each doomed connection permanently shrank the pool by one slot, causing progressive timeout worsening under normal provider turbulence.
