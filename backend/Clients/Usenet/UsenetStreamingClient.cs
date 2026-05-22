@@ -498,7 +498,9 @@ public class UsenetStreamingClient
         // 1. What providers support (TotalPooledConnections)
         // 2. What user configured (GetTotalStreamingConnections)
         var userStreamingLimit = _configManager.GetTotalStreamingConnections();
-        var effectivePoolSize = Math.Min(totalPooledConnectionCount, userStreamingLimit);
+        // Floor at 1: with no provider configured (fresh start) totalPooledConnectionCount
+        // is 0, which would propagate a 0-sized pool into GlobalOperationLimiter and crash boot.
+        var effectivePoolSize = Math.Max(1, Math.Min(totalPooledConnectionCount, userStreamingLimit));
 
         Serilog.Log.Information(
             "[UsenetStreamingClient] Connection pool sizing: Providers={ProviderTotal}, UserLimit={UserLimit}, Effective={Effective}",

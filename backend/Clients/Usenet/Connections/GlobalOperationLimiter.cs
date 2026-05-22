@@ -29,14 +29,19 @@ public class GlobalOperationLimiter : IDisposable
         ConfigManager? configManager = null)
     {
         _configManager = configManager;
-        _totalConnections = Math.Max(1, totalConnections);
+        // Floor at 2 so there is always room for at least 1 streaming reserve slot
+        // AND 1 low-priority slot. With totalConnections <= 1 (e.g. fresh start with no
+        // provider configured), lowPriorityMax would compute to 0 and crash the
+        // SemaphoreSlim ctor ("maximumCount argument must be a positive number"),
+        // taking down the backend before the config page can be served.
+        _totalConnections = Math.Max(2, totalConnections);
         _streamingReserve = Math.Max(1, Math.Min(streamingReserve, _totalConnections - 1));
 
         _sharedPool = new PrioritizedSemaphore(_totalConnections, _totalConnections, priorityOdds);
 
         // Low-priority gate: allows up to (total - reserve) concurrent low-priority operations.
         // This guarantees that 'streamingReserve' slots are always available for High-priority.
-        var lowPriorityMax = _totalConnections - _streamingReserve;
+        var lowPriorityMax = Math.Max(1, _totalConnections - _streamingReserve);
         _lowPriorityGate = new SemaphoreSlim(lowPriorityMax, lowPriorityMax);
 
         // Initialize usage tracking for all known types
