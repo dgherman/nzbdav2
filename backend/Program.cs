@@ -57,8 +57,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-22-STARTUP-NOPROVIDER-FIX");
-        Log.Warning("  FIX: Backend no longer crashes on startup when no usenet provider is configured (0-size semaphore)");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-22-CONFIGURABLE-USER-AGENT");
+        Log.Warning("  FEATURE: NZB-fetch User-Agent is now configurable (api.user-agent / NZB_GRAB_USER_AGENT)");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

@@ -116,6 +116,9 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.7.4 (2026-05-22)
+*   **Feature**: The User-Agent used to fetch NZB files over HTTP (SABnzbd `addurl` api) is now configurable, via the new **User Agent** field under Settings → SABnzbd, the `api.user-agent` config value, or the `NZB_GRAB_USER_AGENT` environment variable. Set a SABnzbd/NZBGet string for indexers that expect a known download client. The default remains a generic browser user-agent — unlike upstream's `nzbdav/<version>` default, this does not self-identify as a usenet streamer to indexers that are leery of them. The user-agent is now applied per-request rather than on the shared `HttpClient`, avoiding a header race under concurrent grabs. (Requested in [#9](https://github.com/dgherman/nzbdav2/issues/9).)
+
 ## v0.7.3 (2026-05-22)
 *   **Fix**: Backend crashed on startup with `SemaphoreSlim` `maximumCount must be a positive number` when no usenet provider was configured (e.g. a fresh install). With 0 provider connections, `GlobalOperationLimiter` computed a low-priority gate size of 0 and threw before the config page could be served, leaving users unable to reach configuration. The connection pool size is now floored at 1 and the limiter floors total connections at 2, so the backend always boots and the config page is reachable. (Reported in [#8](https://github.com/dgherman/nzbdav2/issues/8).)
 *   **Build**: Image version is now sourced from a single `VERSION` file at the repo root instead of a hardcoded `0.6.<run_number>` in CI. The Docker tag, changelog, and `Program.cs` BUILD string now stay in sync.

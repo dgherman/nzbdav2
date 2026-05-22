@@ -66,6 +66,23 @@ export function SabnzbdSettings({ config, setNewConfig }: SabnzbdSettingsProps) 
             </Form.Group>
             <hr />
             <Form.Group>
+                <Form.Label htmlFor="user-agent-input">User Agent</Form.Label>
+                <Form.Control
+                    className={styles.input}
+                    type="text"
+                    id="user-agent-input"
+                    aria-describedby="user-agent-help"
+                    value={config["api.user-agent"]}
+                    placeholder="Mozilla/5.0 (Windows NT 11.0; Win64; x64) ... Chrome/134 Safari/537.36"
+                    onChange={e => setNewConfig({ ...config, "api.user-agent": e.target.value })} />
+                <Form.Text id="user-agent-help" muted>
+                    The user-agent used when fetching NZB files over HTTP via the SABnzbd <code>addurl</code> api.
+                    Leave blank to use the default browser user-agent. Set a SABnzbd or NZBGet
+                    string (e.g. <code>SABnzbd/4.5.0</code>) for indexers that expect a known download client.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
                 <Form.Label htmlFor="import-strategy-input">Import Strategy</Form.Label>
                 <Form.Select
                     className={styles.input}
