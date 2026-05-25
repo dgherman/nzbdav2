@@ -112,6 +112,25 @@ public class RarProcessor(
 
         var offset = Math.Max(0, fileInfo.MagicOffset);
 
+        // Precompute exact decoded per-segment sizes for this volume so streaming gets fast, precise
+        // seeking. Uniform volumes resolve in ~3 yEnc-header fetches; on any failure leave null and
+        // let the lazy stream-time path handle it.
+        long[]? partSegmentSizes = null;
+        try
+        {
+            var partIds = fileInfo.NzbFile.GetSegmentIds();
+            if (partIds.Length > 0)
+            {
+                var computed = await usenet.AnalyzeNzbAsync(partIds, RarHeaderConnections, null, ct, useSmartAnalysis: true).ConfigureAwait(false);
+                if (SegmentOffsetTable.TryBuild(computed, partIds.Length, stream.Length, out _))
+                    partSegmentSizes = computed;
+            }
+        }
+        catch (Exception ex)
+        {
+            Log.Debug(ex, "[RarProcessor] Could not precompute segment sizes for {FileName}; lazy path will handle it.", fileInfo.FileName);
+        }
+
         var results = new List<StoredFileSegment>();
         foreach (var x in headers.Where(h => h.HeaderType == HeaderType.File))
         {
@@ -155,6 +174,7 @@ public class RarProcessor(
                 AesParams = x.GetAesParams(password),
                 ObfuscationKey = obfuscationKey,
                 ReleaseDate = fileInfo.ReleaseDate,
+                SegmentSizes = partSegmentSizes,
             });
         }
 
@@ -289,5 +309,8 @@ public class RarProcessor(
         public required LongRange ByteRangeWithinPart { get; init; }
         public required AesParams? AesParams { get; init; }
         public byte[]? ObfuscationKey { get; init; }
+
+        /// <summary>Decoded per-segment sizes of the volume's segments (sum to PartSize), or null if unknown.</summary>
+        public long[]? SegmentSizes { get; init; }
     }
 }

@@ -189,19 +189,10 @@ public class GetFileDetailsController(
             }
             else
             {
-                // Check Rar/Multipart
-                var isRar = await dbClient.Ctx.RarFiles.AsNoTracking().AnyAsync(x => x.Id == itemGuid).ConfigureAwait(false);
-                if (isRar)
+                var isMultipart = await dbClient.Ctx.MultipartFiles.AsNoTracking().AnyAsync(x => x.Id == itemGuid).ConfigureAwait(false);
+                if (isMultipart)
                 {
                     nzbDownloadUrl = $"/api/download-nzb/{davItem.Id}";
-                }
-                else
-                {
-                    var isMultipart = await dbClient.Ctx.MultipartFiles.AsNoTracking().AnyAsync(x => x.Id == itemGuid).ConfigureAwait(false);
-                    if (isMultipart)
-                    {
-                        nzbDownloadUrl = $"/api/download-nzb/{davItem.Id}";
-                    }
                 }
             }
         }

@@ -456,10 +456,6 @@ public class ProviderBenchmarkController(
         var multipartResult = await GetMultipartFileData(id).ConfigureAwait(false);
         if (multipartResult != null) return multipartResult;
 
-        // Try RAR
-        var rarResult = await GetRarFileData(id).ConfigureAwait(false);
-        if (rarResult != null) return rarResult;
-
         return null;
     }
 
@@ -527,31 +523,7 @@ public class ProviderBenchmarkController(
             return await GetMultipartFileData(validMultipart.Id).ConfigureAwait(false);
         }
 
-        // 3. Try RarFiles
-        var rarCandidates = await dbContext.RarFiles
-            .Include(r => r.DavItem)
-            .Where(r => r.DavItem != null &&
-                        r.DavItem.FileSize >= MinFileSizeBytes &&
-                        !r.DavItem.IsCorrupted)
-            .Take(50)
-            .Select(r => new { r.Id, r.DavItem!.Name, r.DavItem.FileSize, Type = "Rar" })
-            .ToListAsync()
-            .ConfigureAwait(false);
-
-        var validRar = rarCandidates
-            .Where(f => !excludeIds.Contains(f.Id))
-            .OrderBy(f => idsWithErrorsSet.Contains(f.Id) ? 1 : 0)
-            .ThenBy(_ => Random.Shared.Next())
-            .FirstOrDefault();
-
-        if (validRar != null && !idsWithErrorsSet.Contains(validRar.Id))
-        {
-            Log.Information("[Benchmark] Selected RAR file: {Name} ({Size:F2} GB, 0 errors)",
-                validRar.Name, (validRar.FileSize ?? 0) / 1024.0 / 1024.0 / 1024.0);
-            return await GetRarFileData(validRar.Id).ConfigureAwait(false);
-        }
-
-        // 4. If no error-free files found, fall back to any valid file (preferring fewer errors)
+        // 3. If no error-free files found, fall back to any valid file (preferring fewer errors)
         // Use the first valid file we found from any type
         if (validNzb != null)
         {
@@ -564,12 +536,6 @@ public class ProviderBenchmarkController(
             Log.Information("[Benchmark] Selected Multipart file (with errors): {Name} ({Size:F2} GB)",
                 validMultipart.Name, (validMultipart.FileSize ?? 0) / 1024.0 / 1024.0 / 1024.0);
             return await GetMultipartFileData(validMultipart.Id).ConfigureAwait(false);
-        }
-        if (validRar != null)
-        {
-            Log.Information("[Benchmark] Selected RAR file (with errors): {Name} ({Size:F2} GB)",
-                validRar.Name, (validRar.FileSize ?? 0) / 1024.0 / 1024.0 / 1024.0);
-            return await GetRarFileData(validRar.Id).ConfigureAwait(false);
         }
 
         return null;
@@ -616,33 +582,6 @@ public class ProviderBenchmarkController(
                     multipartFile.DavItem?.FileSize ?? 0,
                     multipartFile.Id,
                     null // Multipart files don't store segment sizes separately
-                );
-            }
-        }
-        return null;
-    }
-
-    private async Task<(string FileName, string[] SegmentIds, long FileSize, Guid FileId, long[]? SegmentSizes)?> GetRarFileData(Guid id)
-    {
-        var rarFile = await dbContext.RarFiles
-            .Include(r => r.DavItem)
-            .FirstOrDefaultAsync(r => r.Id == id)
-            .ConfigureAwait(false);
-
-        if (rarFile != null)
-        {
-            var segmentIds = rarFile.RarParts?
-                .SelectMany(p => p.SegmentIds)
-                .ToArray() ?? [];
-
-            if (segmentIds.Length > 0)
-            {
-                return (
-                    rarFile.DavItem?.Name ?? "Unknown",
-                    segmentIds,
-                    rarFile.DavItem?.FileSize ?? 0,
-                    rarFile.Id,
-                    null // RAR files don't store segment sizes separately
                 );
             }
         }

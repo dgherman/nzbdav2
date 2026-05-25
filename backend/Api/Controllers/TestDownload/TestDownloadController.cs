@@ -41,8 +41,7 @@ public class TestDownloadController(
 
         Log.Information("[BytePerfectTest] Starting test for file: {FileName} ({DavItemId}, Type: {Type})", davItem.Name, davItem.Id, davItem.Type);
 
-        if (davItem.Type != DavItem.ItemType.NzbFile && 
-            davItem.Type != DavItem.ItemType.RarFile && 
+        if (davItem.Type != DavItem.ItemType.NzbFile &&
             davItem.Type != DavItem.ItemType.MultipartFile)
         {
             Log.Warning("[BytePerfectTest] Aborted: File type {Type} is not supported for testing.", davItem.Type);
@@ -149,17 +148,6 @@ public class TestDownloadController(
                     true,
                     configManager.GetStreamBufferSize(),
                     segmentSizes
-                );
-
-            case DavItem.ItemType.RarFile:
-                var rarFile = await dbClient.Ctx.RarFiles.Where(x => x.Id == id).FirstOrDefaultAsync(HttpContext.RequestAborted).ConfigureAwait(false);
-                if (rarFile is null) throw new FileNotFoundException($"RAR file metadata not found for {id}");
-                return new DavMultipartFileStream
-                (
-                    rarFile.ToDavMultipartFileMeta().FileParts,
-                    usenetClient,
-                    configManager.GetConnectionsPerStream(),
-                    usageContext
                 );
 
             case DavItem.ItemType.MultipartFile:

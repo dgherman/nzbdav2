@@ -24,6 +24,10 @@ public class NzbFileStream : Stream
     private long _position = 0;
     private CombinedStream? _innerStream;
     private bool _disposed;
+    // Set after a premature EOF (reader fell behind a shared stream's ring-buffer window).
+    // Forces subsequent inner streams to skip the shared-stream attach and use a private
+    // buffered/unbuffered stream, so we can't loop re-attaching to the same lagging entry.
+    private bool _avoidSharedStream;
     private readonly ConnectionUsageContext _usageContext;
     private readonly CancellationTokenSource _streamCts;
     private IDisposable? _contextScope;
@@ -67,20 +71,11 @@ public class NzbFileStream : Stream
 
         if (segmentSizes != null && segmentSizes.Length == fileSegmentIds.Length)
         {
-            _segmentOffsets = new long[segmentSizes.Length + 1];
-            long current = 0;
-            for (int i = 0; i < segmentSizes.Length; i++)
+            // Only use the offset cache if the sizes sum EXACTLY to the file size; an approximate
+            // or yEnc-encoded array is rejected so a seek can never discard to the wrong byte.
+            if (!SegmentOffsetTable.TryBuild(segmentSizes, fileSegmentIds.Length, _fileSize, out _segmentOffsets))
             {
-                _segmentOffsets[i] = current;
-                current += segmentSizes[i];
-            }
-            _segmentOffsets[segmentSizes.Length] = current;
-            
-            // Validate cached size matches expected size
-            if (current != _fileSize)
-            {
-                Serilog.Log.Warning("[NzbFileStream] Cached segment sizes total {CachedSize} but expected {FileSize}. Ignoring cache.", current, _fileSize);
-                _segmentOffsets = null;
+                Serilog.Log.Warning("[NzbFileStream] Cached segment sizes total {CachedSize} but expected {FileSize}. Ignoring cache.", segmentSizes.Sum(), _fileSize);
             }
         }
     }
@@ -119,9 +114,12 @@ public class NzbFileStream : Stream
         // (fell behind ring buffer window). Recreate inner stream — will fall back to unbuffered.
         if (read == 0 && _position < _fileSize)
         {
-            Serilog.Log.Debug("[NzbFileStream] Premature EOF at position {Position}/{FileSize}, recreating inner stream", _position, _fileSize);
+            Serilog.Log.Debug("[NzbFileStream] Premature EOF at position {Position}/{FileSize}, recreating inner stream (private, no shared attach)", _position, _fileSize);
             _innerStream?.Dispose();
             _innerStream = null;
+            // Avoid re-attaching to the lagging shared stream that just returned 0 — otherwise we
+            // loop forever recreating + re-attaching to the same advanced entry. Use a private stream.
+            _avoidSharedStream = true;
             // Re-attempt the read with a new inner stream
             _innerStream = await GetFileStream(_position, cancellationToken).ConfigureAwait(false);
             read = await _innerStream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
@@ -332,7 +330,7 @@ public class NzbFileStream : Stream
         // not benefit from the shared pump (which prefetches to EOF for streaming continuity)
         // and would waste Usenet bandwidth filling the shared buffer past the requested bytes.
         var davItemId = _usageContext.DetailsObject?.DavItemId;
-        if (shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections
+        if (shouldUseBufferedStreaming && !_avoidSharedStream && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections
             && davItemId.HasValue && !_requestedEndByte.HasValue)
         {
             // Try to attach to an existing shared stream

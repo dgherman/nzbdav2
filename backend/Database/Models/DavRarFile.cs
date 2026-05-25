@@ -2,6 +2,8 @@
 
 namespace NzbWebDAV.Database.Models;
 
+// LEGACY (remove in follow-up release after rollout): no longer created. Retained only so
+// LegacyRarFileMigration can convert pre-v0.8.0 rows to DavMultipartFile. Do not add new usages.
 public class DavRarFile
 {
     public Guid Id { get; set; } // foreign key to DavItem.Id

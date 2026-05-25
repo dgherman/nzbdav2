@@ -104,6 +104,7 @@ public class DavMultipartFileStream(
                         concurrentConnections,
                         partContext,
                         useBufferedStreaming: true,
+                        segmentSizes: capturedPart.SegmentSizes,
                         segmentFallbacks: capturedPart.SegmentFallbacks
                     );
                     // Seek to the start of this part within the RAR file

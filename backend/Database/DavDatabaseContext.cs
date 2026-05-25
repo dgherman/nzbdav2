@@ -10,8 +10,13 @@ using Serilog;
 
 namespace NzbWebDAV.Database;
 
-public sealed class DavDatabaseContext() : DbContext(Options.Value)
+public sealed class DavDatabaseContext : DbContext
 {
+    public DavDatabaseContext() : base(Options.Value) { }
+
+    // Used by tests (and any caller needing an explicit provider, e.g. SQLite in-memory).
+    public DavDatabaseContext(DbContextOptions<DavDatabaseContext> options) : base(options) { }
+
     /// <summary>
     /// Static callback for vfs/forget integration. Set during startup
     /// to fire-and-forget rclone vfs/forget when DavItems change.
@@ -35,6 +40,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
     public DbSet<Account> Accounts => Set<Account>();
     public DbSet<DavItem> Items => Set<DavItem>();
     public DbSet<DavNzbFile> NzbFiles => Set<DavNzbFile>();
+    // LEGACY (remove in follow-up release): retained only for LegacyRarFileMigration. No new usages.
     public DbSet<DavRarFile> RarFiles => Set<DavRarFile>();
     public DbSet<DavMultipartFile> MultipartFiles => Set<DavMultipartFile>();
     public DbSet<QueueItem> QueueItems => Set<QueueItem>();
@@ -305,6 +311,7 @@ public sealed class DavDatabaseContext() : DbContext(Options.Value)
         });
 
         // DavRarFile
+        // LEGACY (remove in follow-up release): table kept only for LegacyRarFileMigration.
         b.Entity<DavRarFile>(e =>
         {
             e.ToTable("DavRarFiles");

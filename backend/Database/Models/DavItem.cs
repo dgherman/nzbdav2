@@ -61,7 +61,7 @@ public class DavItem
         Directory = 1,
         SymlinkRoot = 2,
         NzbFile = 3,
-        RarFile = 4,
+        RarFile = 4, // LEGACY: migrated to MultipartFile (v0.8.0). Enum value kept for int stability.
         IdsRoot = 5,
         MultipartFile = 6,
     }

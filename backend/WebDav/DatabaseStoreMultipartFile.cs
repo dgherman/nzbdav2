@@ -55,6 +55,40 @@ public class DatabaseStoreMultipartFile(
         var id = davMultipartFile.Id;
         var multipartFile = await dbClient.Ctx.MultipartFiles.Where(x => x.Id == id).FirstOrDefaultAsync(ct).ConfigureAwait(false);
         if (multipartFile is null) throw new FileNotFoundException($"Could not find nzb file with id: {id}");
+
+        // Lazily compute + persist exact decoded per-segment sizes so NzbFileStream can seek precisely.
+        // Covers items created before this field existed and any aggregator that did not populate them.
+        if (SegmentSizePopulation.NeedsPopulation(multipartFile.Metadata))
+        {
+            var changed = false;
+            foreach (var part in multipartFile.Metadata.FileParts)
+            {
+                if (part.SegmentSizes != null && part.SegmentSizes.Length == part.SegmentIds.Length) continue;
+                if (part.SegmentIds.Length == 0) continue;
+                try
+                {
+                    var sizes = await usenetClient.AnalyzeNzbAsync(
+                        part.SegmentIds, configManager.GetTotalStreamingConnections(),
+                        progress: null, ct, useSmartAnalysis: true).ConfigureAwait(false);
+
+                    if (SegmentSizePopulation.IsValidForPart(part, sizes)) { part.SegmentSizes = sizes; changed = true; }
+                    else Serilog.Log.Warning("[DatabaseStoreMultipartFile] Computed sizes for '{File}' did not sum to part size; will interpolate.", davMultipartFile.Name);
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Warning(ex, "[DatabaseStoreMultipartFile] Failed to compute segment sizes for '{File}'; will interpolate.", davMultipartFile.Name);
+                }
+            }
+
+            if (changed)
+            {
+                dbClient.Ctx.MultipartFiles.Update(multipartFile);
+                dbClient.Ctx.Entry(multipartFile).Property(x => x.Metadata).IsModified = true;
+                await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
+                Serilog.Log.Information("[DatabaseStoreMultipartFile] Persisted segment sizes for '{File}'.", davMultipartFile.Name);
+            }
+        }
+
         var packedStream = new DavMultipartFileStream(
             multipartFile.Metadata.FileParts,
             usenetClient,

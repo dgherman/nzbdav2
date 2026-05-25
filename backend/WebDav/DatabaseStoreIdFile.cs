@@ -35,8 +35,6 @@ public class DatabaseStoreIdFile(
         {
             DavItem.ItemType.NzbFile =>
                 new DatabaseStoreNzbFile(davItem, httpContext, dbClient, usenetClient, configManager, nzbAnalysisService),
-            DavItem.ItemType.RarFile =>
-                new DatabaseStoreRarFile(davItem, httpContext, dbClient, usenetClient, configManager),
             DavItem.ItemType.MultipartFile =>
                 new DatabaseStoreMultipartFile(davItem, httpContext, dbClient, usenetClient, configManager),
             _ => throw new ArgumentException("Unrecognized id child type.")

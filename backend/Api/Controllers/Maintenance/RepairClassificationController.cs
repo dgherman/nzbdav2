@@ -85,12 +85,12 @@ public class RepairClassificationController(
             Log.Information("[RepairClassification] NZB XML not found in history for {JobName}. Attempting to regenerate from database segments...", jobName);
             
             var nzbFile = await dbClient.Ctx.NzbFiles.AsNoTracking().FirstOrDefaultAsync(x => x.Id == itemGuid).ConfigureAwait(false);
-            var rarFile = nzbFile == null ? await dbClient.Ctx.RarFiles.AsNoTracking().FirstOrDefaultAsync(x => x.Id == itemGuid).ConfigureAwait(false) : null;
-            var multipartFile = (nzbFile == null && rarFile == null) ? await dbClient.Ctx.MultipartFiles.AsNoTracking().FirstOrDefaultAsync(x => x.Id == itemGuid).ConfigureAwait(false) : null;
+            var multipartFile = nzbFile == null ? await dbClient.Ctx.MultipartFiles.AsNoTracking().FirstOrDefaultAsync(x => x.Id == itemGuid).ConfigureAwait(false) : null;
 
-            if (nzbFile != null || rarFile != null || multipartFile != null)
+            if (nzbFile != null || multipartFile != null)
             {
-                nzbContents = GenerateNzbXml(davItem, nzbFile, rarFile, multipartFile);
+                // rarFile is always null: legacy RarFile items are migrated to MultipartFile.
+                nzbContents = GenerateNzbXml(davItem, nzbFile, null, multipartFile);
                 Log.Information("[RepairClassification] Successfully regenerated NZB XML for {JobName}", jobName);
             }
         }

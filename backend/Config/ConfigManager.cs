@@ -199,9 +199,12 @@ public class ConfigManager
 
     public int GetMaxConcurrentBufferedStreams()
     {
+        // Default 8 (was 2): a single multipart/RAR playback needs a buffered-stream slot per active
+        // part, plus the player's parallel head/tail probes — 2 caused "No semaphore slot available"
+        // and stalls. Each slot holds a ~32 MB ring buffer (see shared-stream buffer size).
         return int.Parse(
             StringUtil.EmptyToNull(GetConfigValue("usenet.max-concurrent-buffered-streams"))
-            ?? "2"
+            ?? "8"
         );
     }
 

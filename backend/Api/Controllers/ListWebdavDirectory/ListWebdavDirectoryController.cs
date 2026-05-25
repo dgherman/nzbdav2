@@ -39,10 +39,6 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
             {
                 davItemId = multipartFile.DavItem.Id.ToString();
             }
-            else if (child is DatabaseStoreRarFile rarFile)
-            {
-                davItemId = rarFile.DavItem.Id.ToString();
-            }
 
             children.Add(new ListWebdavDirectoryResponse.DirectoryItem()
             {

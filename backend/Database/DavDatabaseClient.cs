@@ -19,7 +19,6 @@ public sealed class DavDatabaseClient(DavDatabaseContext ctx)
         return ctx.Items.AsNoTracking()
             .Where(i => i.IdPrefix == prefix)
             .Where(i => i.Type == DavItem.ItemType.NzbFile
-                        || i.Type == DavItem.ItemType.RarFile
                         || i.Type == DavItem.ItemType.MultipartFile)
             .ToListAsync();
     }

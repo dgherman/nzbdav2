@@ -74,12 +74,16 @@ public class SevenZipProcessor : BaseProcessor
                 throw new NonRetryableDownloadException(message);
             }
 
+            // Precompute exact decoded per-segment sizes per part (uniform parts resolve in ~3 yEnc
+            // header fetches) so streaming gets fast, precise seeking without a first-play size fetch.
+            var partSegmentSizes = await ComputePartSegmentSizes(multipartFile).ConfigureAwait(false);
+
             return new Result()
             {
                 SevenZipFiles = sevenZipEntries.Select(x => new SevenZipFile()
                 {
                     PathWithinArchive = x.PathWithinArchive,
-                    DavMultipartFileMeta = GetDavMultipartFileMeta(x, multipartFile, firstPartOffset > 0 ? firstPartOffset : 0),
+                    DavMultipartFileMeta = GetDavMultipartFileMeta(x, multipartFile, firstPartOffset > 0 ? firstPartOffset : 0, partSegmentSizes),
                     ReleaseDate = _fileInfos.First().ReleaseDate,
                 }).ToList(),
             };
@@ -123,11 +127,38 @@ public class SevenZipProcessor : BaseProcessor
         return string.IsNullOrEmpty(match.Groups[2].Value) ? -1 : int.Parse(match.Groups[2].Value);
     }
 
+    /// <summary>
+    /// Computes exact decoded per-segment sizes for each part's NzbFile (indexed by part), or null
+    /// for a part whose sizes can't be resolved or don't sum to the part size — the stream-time path
+    /// then falls back to interpolation for that part.
+    /// </summary>
+    private async Task<long[]?[]> ComputePartSegmentSizes(MultipartFile multipartFile)
+    {
+        var result = new long[multipartFile.FileParts.Count][];
+        for (int i = 0; i < multipartFile.FileParts.Count; i++)
+        {
+            try
+            {
+                var ids = multipartFile.FileParts[i].NzbFile.GetSegmentIds();
+                if (ids.Length == 0) continue;
+                var computed = await _client.AnalyzeNzbAsync(ids, 5, null, _ct, useSmartAnalysis: true).ConfigureAwait(false);
+                if (SegmentOffsetTable.TryBuild(computed, ids.Length, multipartFile.FileParts[i].PartSize, out _))
+                    result[i] = computed;
+            }
+            catch (Exception ex)
+            {
+                Log.Debug(ex, "[SevenZipProcessor] Could not precompute segment sizes for part {Index}; lazy path will handle it.", i);
+            }
+        }
+        return result;
+    }
+
     private DavMultipartFile.Meta GetDavMultipartFileMeta
     (
         SevenZipUtil.SevenZipEntry sevenZipEntry,
         MultipartFile multipartFile,
-        int baseOffset
+        int baseOffset,
+        long[]?[] partSegmentSizes
     )
     {
         // Adjust archive-relative range to absolute-stream-relative range
@@ -167,6 +198,7 @@ public class SevenZipProcessor : BaseProcessor
                     SegmentIds = multipartFile.FileParts[index].NzbFile.GetSegmentIds(),
                     SegmentIdByteRange = LongRange.FromStartAndSize(0, multipartFile.FileParts[index].PartSize),
                     FilePartByteRange = LongRange.FromStartAndSize(partStartInclusive, partByteCount),
+                    SegmentSizes = partSegmentSizes[index],
                 };
             })
             .ToArray();

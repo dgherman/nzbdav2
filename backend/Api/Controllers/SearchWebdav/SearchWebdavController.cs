@@ -64,10 +64,6 @@ public class SearchWebdavController(DatabaseStore store, ConfigManager configMan
                 {
                     davItemId = multipartFile.DavItem.Id.ToString();
                 }
-                else if (child is DatabaseStoreRarFile rarFile)
-                {
-                    davItemId = rarFile.DavItem.Id.ToString();
-                }
 
                 results.Add(new SearchWebdavResponse.SearchResult()
                 {

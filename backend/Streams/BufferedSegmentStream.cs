@@ -24,7 +24,10 @@ public class BufferedSegmentStream : Stream
 
     public static void SetMaxConcurrentStreams(int max)
     {
-        s_concurrentStreamSlots = new SemaphoreSlim(max, max);
+        // Floor at 1: SemaphoreSlim throws on a maximumCount of 0, which would crash startup
+        // if the config value is 0/negative (same failure class as the v0.7.3 pool-size crash).
+        var slots = Math.Max(1, max);
+        s_concurrentStreamSlots = new SemaphoreSlim(slots, slots);
     }
 
     public static SemaphoreSlim? TryAcquireSlot()

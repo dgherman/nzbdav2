@@ -75,7 +75,7 @@ public class DatabaseStoreCollection(
         if (davItem is null) return DavStatusCode.NotFound;
 
         // If the item is a file, simply delete it and we're done.
-        if (davItem.Type is DavItem.ItemType.NzbFile or DavItem.ItemType.RarFile or DavItem.ItemType.MultipartFile)
+        if (davItem.Type is DavItem.ItemType.NzbFile or DavItem.ItemType.MultipartFile)
         {
             dbClient.Ctx.Items.Remove(davItem);
             await dbClient.Ctx.SaveChangesAsync().ConfigureAwait(false);
@@ -113,9 +113,6 @@ public class DatabaseStoreCollection(
             DavItem.ItemType.NzbFile =>
                 new DatabaseStoreNzbFile(
                     davItem, httpContext, dbClient, usenetClient, configManager, nzbAnalysisService),
-            DavItem.ItemType.RarFile =>
-                new DatabaseStoreRarFile(
-                    davItem, httpContext, dbClient, usenetClient, configManager),
             DavItem.ItemType.MultipartFile =>
                 new DatabaseStoreMultipartFile(
                     davItem, httpContext, dbClient, usenetClient, configManager),

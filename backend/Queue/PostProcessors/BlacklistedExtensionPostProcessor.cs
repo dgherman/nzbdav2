@@ -32,15 +32,6 @@ public class BlacklistedExtensionPostProcessor(ConfigManager configManager, DavD
             dbClient.Ctx.NzbFiles.Remove(file);
         }
 
-        else if (davItem.Type == DavItem.ItemType.RarFile)
-        {
-            var file = dbClient.Ctx.ChangeTracker.Entries<DavRarFile>()
-                .Where(x => x.State == EntityState.Added)
-                .Select(x => x.Entity)
-                .First(x => x.Id == davItem.Id);
-            dbClient.Ctx.RarFiles.Remove(file);
-        }
-
         else if (davItem.Type == DavItem.ItemType.MultipartFile)
         {
             var file = dbClient.Ctx.ChangeTracker.Entries<DavMultipartFile>()

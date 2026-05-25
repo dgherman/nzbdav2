@@ -57,7 +57,7 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-22-CONFIGURABLE-USER-AGENT");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-25-MULTIPART-STREAMING");
         Log.Warning("  FEATURE: NZB-fetch User-Agent is now configurable (api.user-agent / NZB_GRAB_USER_AGENT)");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
@@ -176,6 +176,10 @@ class Program
         await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA temp_store = MEMORY;").ConfigureAwait(false);
         await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA mmap_size = 1610612736;").ConfigureAwait(false); // 1.5GB - covers full DB
         await databaseContext.Database.ExecuteSqlRawAsync("PRAGMA busy_timeout = 5000;").ConfigureAwait(false);
+
+        // One-time legacy data migration: convert any pre-v0.8.0 DavRarFile rows to DavMultipartFile.
+        // Idempotent; no-op once converted. Runs before the WebDAV server starts serving.
+        await NzbWebDAV.Database.LegacyRarFileMigration.RunAsync(databaseContext).ConfigureAwait(false);
 
         // initialize the config-manager
         var configManager = new ConfigManager();

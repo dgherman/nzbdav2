@@ -322,7 +322,6 @@ public class HealthCheckService
         var query = dbClient.Ctx.Items
             .AsNoTracking()
             .Where(x => (x.Type == DavItem.ItemType.NzbFile
-                         || x.Type == DavItem.ItemType.RarFile
                          || x.Type == DavItem.ItemType.MultipartFile)
                         && x.HistoryItemId == null);
 
@@ -529,15 +528,6 @@ public class HealthCheckService
         {
             var nzbFile = await dbClient.GetNzbFileAsync(davItem.Id, ct).ConfigureAwait(false);
             return nzbFile?.SegmentIds?.ToList() ?? [];
-        }
-
-        if (davItem.Type == DavItem.ItemType.RarFile)
-        {
-            var rarFile = await dbClient.Ctx.RarFiles
-                .AsNoTracking()
-                .Where(x => x.Id == davItem.Id)
-                .FirstOrDefaultAsync(ct).ConfigureAwait(false);
-            return rarFile?.RarParts?.SelectMany(x => x.SegmentIds)?.ToList() ?? [];
         }
 
         if (davItem.Type == DavItem.ItemType.MultipartFile)

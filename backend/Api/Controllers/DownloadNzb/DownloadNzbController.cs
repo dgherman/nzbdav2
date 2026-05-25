@@ -74,19 +74,15 @@ public class DownloadNzbController(DavDatabaseClient dbClient) : BaseApiControll
                 .FirstOrDefaultAsync(x => x.Id == itemGuid)
                 .ConfigureAwait(false);
 
-            var rarFile = nzbFile == null ? await dbClient.Ctx.RarFiles
+            var multipartFile = nzbFile == null ? await dbClient.Ctx.MultipartFiles
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.Id == itemGuid)
                 .ConfigureAwait(false) : null;
 
-            var multipartFile = (nzbFile == null && rarFile == null) ? await dbClient.Ctx.MultipartFiles
-                .AsNoTracking()
-                .FirstOrDefaultAsync(x => x.Id == itemGuid)
-                .ConfigureAwait(false) : null;
-
-            if (nzbFile != null || rarFile != null || multipartFile != null)
+            if (nzbFile != null || multipartFile != null)
             {
-                nzbContentString = GenerateNzbXml(davItem, nzbFile, rarFile, multipartFile);
+                // rarFile is always null: legacy RarFile items are migrated to MultipartFile.
+                nzbContentString = GenerateNzbXml(davItem, nzbFile, null, multipartFile);
             }
         }
 
