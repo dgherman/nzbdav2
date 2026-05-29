@@ -57,8 +57,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-25-MULTIPART-STREAMING");
-        Log.Warning("  FEATURE: NZB-fetch User-Agent is now configurable (api.user-agent / NZB_GRAB_USER_AGENT)");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-29-PROVIDER-STATS");
+        Log.Warning("  FIX: Provider stats record even with affinity disabled; card moved to System Monitor");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

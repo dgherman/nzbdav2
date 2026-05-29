@@ -7,6 +7,7 @@ import type { HealthCheckResult, MissingArticleItem, MappedFile } from "~/types/
 import type { ConnectionUsageContext } from "~/types/connections";
 import { BandwidthTable } from "./components/BandwidthTable";
 import { ProviderStatus } from "./components/ProviderStatus";
+import { ProviderStats } from "./components/provider-stats/provider-stats";
 import { DeletedFilesTable } from "./components/DeletedFilesTable";
 import { MissingArticlesTable } from "./components/MissingArticlesTable";
 import { MappedFilesTable } from "./components/MappedFilesTable";
@@ -45,15 +46,17 @@ export async function loader({ request }: Route.LoaderArgs) {
     let connections: Record<number, ConnectionUsageContext[]> | null = null;
     let bandwidthHistory: BandwidthSample[] | null = null;
     let currentBandwidth: ProviderBandwidthSnapshot | null = null;
+    let providerStats: Awaited<ReturnType<typeof backendClient.getProviderStats>> | null = null;
     let deletedFiles: { items: any[], totalCount: number } | null = null;
     let missingArticles: { items: MissingArticleItem[], totalCount: number } | null = null;
     let mappedFiles: { items: MappedFile[], totalCount: number } | null = null;
 
     if (tab === "stats") {
-        [connections, bandwidthHistory, currentBandwidth] = await Promise.all([
+        [connections, bandwidthHistory, currentBandwidth, providerStats] = await Promise.all([
             backendClient.getActiveConnections(),
             backendClient.getBandwidthHistory(range),
             backendClient.getCurrentBandwidth(),
+            backendClient.getProviderStats().catch(() => null), // Don't fail the page if stats unavailable
         ]);
     } else if (tab === "deleted") {
         deletedFiles = await backendClient.getDeletedFiles(page, 500, search);
@@ -68,7 +71,7 @@ export async function loader({ request }: Route.LoaderArgs) {
         mappedFiles = await backendClient.getMappedFiles(page, 10, search, hasMediaInfo, missingVideo, sortBy, sortDirection);
     }
 
-    return { connections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking, orphaned, isImported, sortBy, sortDirection };
+    return { connections, bandwidthHistory, currentBandwidth, providerStats, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking, orphaned, isImported, sortBy, sortDirection };
 }
 
 export async function action({ request }: Route.ActionArgs) {
@@ -105,7 +108,7 @@ export async function action({ request }: Route.ActionArgs) {
 }
 
 export default function StatsPage({ loaderData }: Route.ComponentProps) {
-    const { connections: initialConnections, bandwidthHistory, currentBandwidth, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking } = loaderData;
+    const { connections: initialConnections, bandwidthHistory, currentBandwidth, providerStats, deletedFiles, missingArticles, mappedFiles, range, tab, page, search, blocking } = loaderData;
     const [searchParams, setSearchParams] = useSearchParams();
     const revalidator = useRevalidator();
     const [connections, setConnections] = useState<Record<number, ConnectionUsageContext[]>>(initialConnections || {});
@@ -359,6 +362,7 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
                     {activeTab === 'stats' && connections && bandwidthHistory && currentBandwidth && (
                         <>
                             <ProviderStatus bandwidth={currentBandwidth} connections={connections} />
+                            <ProviderStats stats={providerStats} />
                             <div className="row">
                                 <div className="col-12">
                                     <BandwidthTable data={bandwidthHistory} range={range} providers={currentBandwidth} />

@@ -56,7 +56,9 @@ public class NzbProviderAffinityService
     /// </summary>
     public void RecordSuccess(string jobName, int providerIndex, long bytes, long elapsedMs)
     {
-        if (!_configManager.IsProviderAffinityEnabled()) return;
+        // Note: recording is intentionally NOT gated behind IsProviderAffinityEnabled().
+        // Per-provider usage stats feed the Provider Stats card and must populate even when
+        // affinity-based provider *selection* is disabled. Only GetPreferredProvider is gated.
         if (string.IsNullOrEmpty(jobName)) return;
 
         var jobStats = _stats.GetOrAdd(jobName, _ => new ConcurrentDictionary<int, ProviderPerformance>());
@@ -70,7 +72,8 @@ public class NzbProviderAffinityService
     /// </summary>
     public void RecordFailure(string jobName, int providerIndex)
     {
-        if (!_configManager.IsProviderAffinityEnabled()) return;
+        // Not gated behind IsProviderAffinityEnabled() — see RecordSuccess. Stats must record
+        // regardless of whether affinity-based selection is enabled.
         if (string.IsNullOrEmpty(jobName)) return;
 
         var jobStats = _stats.GetOrAdd(jobName, _ => new ConcurrentDictionary<int, ProviderPerformance>());
@@ -384,8 +387,10 @@ public class NzbProviderAffinityService
 
     private async void PersistStats(object? state)
     {
-        if (!_configManager.IsProviderAffinityEnabled()) return;
-
+        // Not gated behind IsProviderAffinityEnabled(): RecordSuccess/RecordFailure populate
+        // the in-memory _stats dict regardless of the selection flag, so this timer must flush
+        // it to NzbProviderStats regardless too — otherwise the Provider Stats card never
+        // populates when affinity-based selection is disabled. Only GetPreferredProvider is gated.
         try
         {
             await _dbWriteLock.WaitAsync();

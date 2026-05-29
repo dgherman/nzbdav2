@@ -116,6 +116,13 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.8.1 (2026-05-29)
+Provider Stats card fixes (reported in [#10](https://github.com/dgherman/nzbdav2/issues/10)).
+
+*   **Fix (stats now record with affinity disabled)**: Per-provider usage stats were gated behind `provider-affinity.enable` in **two** places — both `RecordSuccess`/`RecordFailure` (in-memory counters) and `PersistStats` (the 5s timer that flushes them to the `NzbProviderStats` table). With affinity-based provider *selection* turned off, both no-op'd, so the table stayed empty and the Provider Stats card showed "No provider stats available" no matter how much was downloaded or streamed. Both recording and persistence are now decoupled from the affinity flag (only `GetPreferredProvider`, the selection logic, remains gated), so the card populates regardless of the selection setting.
+*   **Change (moved to System Monitor)**: The Provider Stats card moved off the Queue page to **System Monitor → Statistics**, directly under Real-time Provider Status, alongside the other provider/bandwidth panels — no more scrolling past long queue/history lists to reach it. On its new home it now refreshes live with the tab's 2s revalidation; previously the component snapshotted its data with `useState` at mount and never updated until a full page reload.
+*   **Fix (dark theme / visual consistency)**: The card's hardcoded light colors overrode the app's dark theme and looked out of place. It's now restyled to match the adjacent Real-time Provider Status panel exactly — same black translucent container, `bg="dark"` bordered provider cards in a 2-up grid, and the same Bootstrap metric typography (`fs-4 fw-bold` values, `text-muted small text-uppercase` labels, semantic colors) — dropping the bespoke CSS module entirely.
+
 ## v0.8.0 (2026-05-25)
 Fixes RAR/7z (multipart) streaming, which could fail to play, stall on "loading", or serve 0 bytes (`Response Content-Length mismatch: too few bytes written (0 of …)`) — most visibly on RAR/7z-packed TV episodes that upstream played fine.
 
