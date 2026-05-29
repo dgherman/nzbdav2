@@ -99,7 +99,7 @@ public class SharedStreamHandle : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+        return Task.Run(() => ReadAsync(buffer, offset, count)).GetAwaiter().GetResult();
     }
 
     public override void Flush() { }

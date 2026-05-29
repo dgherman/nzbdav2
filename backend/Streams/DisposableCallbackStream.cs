@@ -37,17 +37,16 @@ public class DisposableCallbackStream : Stream
             
             // Fallback: If only async callback is provided but we are disposing synchronously,
             // we MUST execute the callback to avoid resource leaks (e.g. global permits).
-            // This is sync-over-async, which is risky, but leaking global permits is fatal.
+            // Use Task.Run to avoid sync-over-async deadlocks on the calling thread.
             if (_onDispose == null && _onDisposeAsync != null)
             {
                 try
                 {
-                    _onDisposeAsync().AsTask().GetAwaiter().GetResult();
+                    Task.Run(() => _onDisposeAsync().AsTask()).GetAwaiter().GetResult();
                 }
                 catch (Exception ex)
                 {
-                    // Swallow exception during dispose to prevent crashing, but log it if possible?
-                    // Since we can't easily log here, we just ensure the callback runs.
+                    // Swallow exceptions during dispose to prevent crashing.
                     System.Diagnostics.Debug.WriteLine($"Error in DisposableCallbackStream sync dispose fallback: {ex}");
                 }
             }

@@ -194,9 +194,14 @@ public class StreamingConnectionLimiter : IDisposable
 
     private void ReleaseLease(SemaphoreSlim semaphore, string permitId)
     {
-        _activePermits.TryRemove(permitId, out _);
-        ReleaseInternal(semaphore);
-        ApplyPendingResizeIfIdle();
+        // Guard against double-release: if the sweeper already removed and
+        // force-released this permit, TryRemove returns false and we must
+        // NOT release the semaphore again (semaphore count corruption).
+        if (_activePermits.TryRemove(permitId, out _))
+        {
+            ReleaseInternal(semaphore);
+            ApplyPendingResizeIfIdle();
+        }
     }
 
     private void RefreshConfiguredMax()

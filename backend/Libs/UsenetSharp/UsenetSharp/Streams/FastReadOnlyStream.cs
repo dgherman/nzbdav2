@@ -16,8 +16,8 @@ public abstract class FastReadOnlyStream : ReadOnlyStream
     // All other read methods call into ReadAsync
     public override int Read(byte[] buffer, int offset, int count)
     {
-        return ReadAsync(new Memory<byte>(buffer, offset, count), CancellationToken.None)
-            .AsTask().GetAwaiter().GetResult();
+        return Task.Run(() => ReadAsync(new Memory<byte>(buffer, offset, count), CancellationToken.None).AsTask())
+            .GetAwaiter().GetResult();
     }
 
     public override int Read(Span<byte> buffer)
@@ -26,8 +26,8 @@ public abstract class FastReadOnlyStream : ReadOnlyStream
         try
         {
             var memory = new Memory<byte>(rentedArray, 0, buffer.Length);
-            var bytesRead = ReadAsync(memory, CancellationToken.None)
-                .AsTask().GetAwaiter().GetResult();
+            var bytesRead = Task.Run(() => ReadAsync(memory, CancellationToken.None).AsTask())
+                .GetAwaiter().GetResult();
             memory.Span.Slice(0, bytesRead).CopyTo(buffer);
             return bytesRead;
         }

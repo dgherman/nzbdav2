@@ -11,7 +11,7 @@ public class LimitedLengthStream(Stream stream, long length, bool leaveOpen = fa
     public override void Flush() => stream.Flush();
 
     public override int Read(byte[] buffer, int offset, int count) =>
-        ReadAsync(buffer, offset, count, SigtermUtil.GetCancellationToken()).GetAwaiter().GetResult();
+        Task.Run(() => ReadAsync(buffer, offset, count, SigtermUtil.GetCancellationToken())).GetAwaiter().GetResult();
 
     public override async Task<int>
         ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>

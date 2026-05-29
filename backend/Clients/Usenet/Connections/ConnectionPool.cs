@@ -300,7 +300,11 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
     private void Return(T connection, string connectionId)
     {
-        _activeConnections.TryRemove(connectionId, out var info);
+        // Try to remove from active tracking. If it was already removed by the
+        // stuck-connection sweeper (SweepOnce), we must NOT release _gate again —
+        // the sweeper already released it. Double-release would corrupt the
+        // semaphore count and allow more than _maxConnections concurrent connections.
+        var wasActive = _activeConnections.TryRemove(connectionId, out var info);
         var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
 
         var poolDisposed = Volatile.Read(ref _disposed) == 1;
@@ -308,10 +312,15 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         if (poolDisposed || isDoomed)
         {
             _ = DisposeConnectionSafeAsync(connection, "doomed/disposed return");
-            Interlocked.Decrement(ref _live);
-            if (!poolDisposed)
+            // Only decrement _live and release _gate if this connection was still
+            // tracked as active. The sweeper already did both if it struck first.
+            if (wasActive)
             {
-                _gate.Release();
+                Interlocked.Decrement(ref _live);
+                if (!poolDisposed)
+                {
+                    _gate.Release();
+                }
             }
             TriggerConnectionPoolChangedEvent();
             return;

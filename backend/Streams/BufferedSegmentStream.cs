@@ -1621,7 +1621,11 @@ public class BufferedSegmentStream : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+        // Offload the blocking wait to a dedicated Task.Run thread to avoid
+        // thread-pool starvation: the semaphore classes (PrioritizedSemaphore,
+        // ExtendedSemaphoreSlim) use RunContinuationsAsynchronously, so their
+        // continuations must be able to run on thread-pool threads.
+        return Task.Run(() => ReadAsync(buffer, offset, count)).GetAwaiter().GetResult();
     }
 
     public override bool CanRead => true;

@@ -492,8 +492,18 @@ public class HealthCheckService
         {
             var totalSegments = segments.Count;
             var missingIndex = segments.IndexOf(e.SegmentId);
-            var percentage = totalSegments > 0 ? (double)missingIndex / totalSegments * 100.0 : 0;
-            var failureDetails = $"Missing segment at index {missingIndex}/{totalSegments} ({percentage:F2}%)";
+            string failureDetails;
+            if (missingIndex >= 0)
+            {
+                var percentage = totalSegments > 0 ? (double)missingIndex / totalSegments * 100.0 : 0;
+                failureDetails = $"Missing segment at index {missingIndex}/{totalSegments} ({percentage:F2}%)";
+            }
+            else
+            {
+                // Segment ID not found in the primary segment list — likely a fallback/duplicate
+                // segment that was checked but isn't in the main SegmentIds array.
+                failureDetails = $"Missing segment '{e.SegmentId}' (not found in primary segment list of {totalSegments} entries — may be a fallback/duplicate segment)";
+            }
 
             Log.Warning("[HealthCheck] Health check failed for item {Name} (Missing Segment: {SegmentId}). {FailureDetails}. Attempting repair.",
                 davItem.Name, e.SegmentId, failureDetails);
