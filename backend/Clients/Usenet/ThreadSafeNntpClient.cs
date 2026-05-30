@@ -187,17 +187,13 @@ public class ThreadSafeNntpClient : INntpClient
             var header = await yencStream.GetYencHeadersAsync(cancellationToken).ConfigureAwait(false);
             if (header == null) throw new InvalidDataException("Missing yEnc headers");
 
-            // ABORT: Dispose the client to kill the socket and stop downloading the rest of the body.
-            // This poisons the connection pool item, forcing a new connection next time.
-            _client.Dispose();
-            
+            // The yEnc header has been read; the rest of the article body is still streaming
+            // from the server.  Disposing the response stream (via the outer 'using') signals
+            // the background pipe-writer to stop, and the writer drains the remaining body
+            // data from the network until the NNTP terminator.  Once drained the command
+            // lock is released and this connection returns to the pool fully usable — no
+            // new TCP+SSL+NNTP handshake required.
             return header;
-        }
-        catch (Exception)
-        {
-            // If anything fails, or we dispose, we must release semaphore.
-            // If we disposed _client, future calls will fail, effectively retiring this instance.
-            throw;
         }
         finally
         {
