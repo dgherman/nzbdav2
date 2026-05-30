@@ -20,7 +20,7 @@ export function LiveUsenetConnections() {
     // Parse usage breakdown (e.g., "Queue=5,Streaming=3,HealthCheck=2,BufferedStreaming=5")
     // Map numeric usage types to friendly display names
     const usageTypeLabels: Record<string, string> = {
-        '0': 'Unknown',
+        '0': 'Unlabeled',
         '1': 'Queue',
         '2': 'Streaming',
         '3': 'HealthCheck',

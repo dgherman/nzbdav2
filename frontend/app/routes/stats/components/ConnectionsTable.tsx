@@ -97,7 +97,7 @@ function ConnectionGroup({ type, items = [] }: { type: number, items: Connection
 
 function UsageTypeBadge({ type }: { type: number }) {
     const map: Record<number, { label: string, bg: string }> = {
-       0: { label: "Unknown", bg: "secondary" },
+       0: { label: "Unlabeled", bg: "secondary" },
        1: { label: "Queue", bg: "info" },
        2: { label: "Streaming", bg: "success" },
        3: { label: "HealthCheck", bg: "warning" },

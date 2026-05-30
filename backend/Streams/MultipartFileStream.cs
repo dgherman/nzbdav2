@@ -33,9 +33,9 @@ public class MultipartFileStream : Stream
         _client = client;
         if (usageContext == null)
         {
-            Serilog.Log.Warning("[MultipartFileStream] Created without ConnectionUsageContext — connections will appear as 'Unknown' on the frontend. " +
+            Serilog.Log.Warning("[MultipartFileStream] Created without ConnectionUsageContext — connections will appear as 'Unlabeled' on the frontend. " +
                 "This indicates a caller is not propagating usage context. Using fallback.");
-            _usageContext = new ConnectionUsageContext(ConnectionUsageType.Unknown, "MultipartFileStream: no context provided");
+            _usageContext = new ConnectionUsageContext(ConnectionUsageType.Unlabeled, "MultipartFileStream: no context provided");
         }
         else
         {

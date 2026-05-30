@@ -211,7 +211,7 @@ public class MultiConnectionNntpClient : INntpClient
         // Propagate the connection usage context to the new linked token
         var originalUsageContext = cancellationToken.GetContext<ConnectionUsageContext>();
         IDisposable? timeoutContextScope = null;
-        if (originalUsageContext.UsageType != ConnectionUsageType.Unknown)
+        if (originalUsageContext.UsageType != ConnectionUsageType.Unlabeled)
         {
             timeoutContextScope = timeoutCts.Token.SetScopedContext(originalUsageContext);
         }
@@ -382,7 +382,7 @@ public class MultiConnectionNntpClient : INntpClient
         // Propagate the connection usage context to the new linked token
         var originalUsageContext = cancellationToken.GetContext<ConnectionUsageContext>();
         IDisposable? timeoutContextScope = null;
-        if (originalUsageContext.UsageType != ConnectionUsageType.Unknown)
+        if (originalUsageContext.UsageType != ConnectionUsageType.Unlabeled)
         {
             timeoutContextScope = timeoutCts.Token.SetScopedContext(originalUsageContext);
         }

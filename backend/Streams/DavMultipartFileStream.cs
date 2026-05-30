@@ -25,7 +25,7 @@ public class DavMultipartFileStream(
         {
             Serilog.Log.Warning("DavMultipartFileStream created without ConnectionUsageContext");
             return new ConnectionUsageContext(
-                ConnectionUsageType.Unknown,
+                ConnectionUsageType.Unlabeled,
                 "DavMultipartFileStream: no context provided");
         }
         return usageContext.Value;

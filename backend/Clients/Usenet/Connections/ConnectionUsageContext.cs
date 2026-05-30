@@ -171,7 +171,7 @@ public readonly struct ConnectionUsageContext
 
 public enum ConnectionUsageType
 {
-    Unknown = 0,
+    Unlabeled = 0,
     Queue = 1,
     Streaming = 2,
     HealthCheck = 3,
