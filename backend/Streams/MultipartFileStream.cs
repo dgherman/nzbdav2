@@ -31,7 +31,16 @@ public class MultipartFileStream : Stream
     {
         _multipartFile = multipartFile;
         _client = client;
-        _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
+        if (usageContext == null)
+        {
+            Serilog.Log.Warning("[MultipartFileStream] Created without ConnectionUsageContext — connections will appear as 'Unknown' on the frontend. " +
+                "This indicates a caller is not propagating usage context. Using fallback.");
+            _usageContext = new ConnectionUsageContext(ConnectionUsageType.Unknown, "MultipartFileStream: no context provided");
+        }
+        else
+        {
+            _usageContext = usageContext.Value;
+        }
     }
 
     public override int Read(byte[] buffer, int offset, int count)

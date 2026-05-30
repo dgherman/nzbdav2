@@ -54,7 +54,16 @@ public class NzbFileStream : Stream
         long? requestedEndByte = null
     )
     {
-        _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
+        if (usageContext == null)
+        {
+            Serilog.Log.Warning("[NzbFileStream] Created without ConnectionUsageContext — connections will appear as 'Unknown' on the frontend. " +
+                "This indicates a caller is not propagating usage context. Using fallback.");
+            _usageContext = new ConnectionUsageContext(ConnectionUsageType.Unknown, "NzbFileStream: no context provided");
+        }
+        else
+        {
+            _usageContext = usageContext.Value;
+        }
         Serilog.Log.Debug("[NzbFileStream] Initializing stream (Size: {FileSize} bytes, Segments: {SegmentCount}, Context: {UsageContext})", fileSize, fileSegmentIds.Length, _usageContext.UsageType);
         
         _fileSegmentIds = fileSegmentIds;

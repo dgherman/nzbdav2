@@ -17,7 +17,19 @@ public class DavMultipartFileStream(
 {
     private CombinedStream? _innerStream;
     private bool _disposed;
-    private readonly ConnectionUsageContext _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
+    private readonly ConnectionUsageContext _usageContext = InitializeUsageContext(usageContext);
+
+    private static ConnectionUsageContext InitializeUsageContext(ConnectionUsageContext? usageContext)
+    {
+        if (usageContext is null)
+        {
+            Serilog.Log.Warning("DavMultipartFileStream created without ConnectionUsageContext");
+            return new ConnectionUsageContext(
+                ConnectionUsageType.Unknown,
+                "DavMultipartFileStream: no context provided");
+        }
+        return usageContext.Value;
+    }
 
 
     public override void Flush()

@@ -18,13 +18,26 @@ export function LiveUsenetConnections() {
     const livePercent = 100 * (liveNum / maxNum);
 
     // Parse usage breakdown (e.g., "Queue=5,Streaming=3,HealthCheck=2,BufferedStreaming=5")
+    // Map numeric usage types to friendly display names
+    const usageTypeLabels: Record<string, string> = {
+        '0': 'Unknown',
+        '1': 'Queue',
+        '2': 'Streaming',
+        '3': 'HealthCheck',
+        '4': 'Repair',
+        '5': 'Buffered',
+        '6': 'Analysis',
+        '7': 'QueueAnalysis',
+        '8': 'RarProcessing',
+    };
+
     const usageMap: Record<string, number> = {};
     if (usageBreakdown && usageBreakdown !== 'none') {
         usageBreakdown.split(',').forEach(part => {
             const [type, count] = part.split('=');
             if (type && count) {
-                // Map BufferedStreaming to a more user-friendly name
-                const displayType = type === 'BufferedStreaming' ? 'Buffered' : type;
+                // Look up friendly label; fall back to raw type number if unknown
+                const displayType = usageTypeLabels[type] || type;
                 usageMap[displayType] = Number(count);
             }
         });

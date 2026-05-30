@@ -18,15 +18,17 @@ WORKDIR /backend
 ARG CACHE_BUST
 COPY ./backend ./
 
-# Map Docker TARGETARCH (amd64/arm64) to .NET RID arch suffix (x64/arm64)
-ARG TARGETARCH
-RUN case "$TARGETARCH" in \
-      amd64) DOTNET_ARCH=x64 ;; \
-      arm64) DOTNET_ARCH=arm64 ;; \
-      *) echo "Unsupported TARGETARCH: $TARGETARCH" && exit 1 ;; \
-    esac && \
-    dotnet restore && \
-    dotnet publish -c Release -r linux-musl-$DOTNET_ARCH -o ./publish
+# Derive .NET RID arch suffix from the build platform (uname -m)
+# Docker's TARGETARCH can be unreliable on macOS hosts; using uname -m directly
+RUN set -eux; \
+    case "$(uname -m)" in \
+      x86_64)  DOTNET_ARCH=x64 ;; \
+      aarch64) DOTNET_ARCH=arm64 ;; \
+      *) echo "Unsupported arch: $(uname -m)" && exit 1 ;; \
+    esac; \
+    echo "Building for linux-musl-${DOTNET_ARCH}"; \
+    dotnet restore; \
+    dotnet publish -c Release -r "linux-musl-${DOTNET_ARCH}" -o ./publish
 
 # -------- Stage 3: Combined runtime image --------
 FROM mcr.microsoft.com/dotnet/aspnet:10.0-alpine

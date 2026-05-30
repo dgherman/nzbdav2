@@ -94,13 +94,33 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     {
         var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
 
+        // ConnectionUsageContext is a readonly struct (value type). GetContext<T> returns
+        // default(ConnectionUsageContext) when no context is set, which has UsageType=Unknown (0)
+        // and Details=null. Check for this default state instead of null.
+        var isDefault = usageContext.UsageType == ConnectionUsageType.Unknown
+                        && usageContext.Details == null;
+
+        if (isDefault)
+        {
+            var stackHint = Environment.StackTrace;
+            Serilog.Log.Warning(
+                "[ConnectionPool][{PoolName}] Connection acquired without ConnectionUsageContext on CancellationToken. " +
+                "This will show as 'Unknown' on the frontend. Stack trace hint: {StackHint}",
+                PoolName, stackHint.Substring(0, Math.Min(stackHint.Length, 500)));
+        }
+
+        // Fall back to a descriptive Unknown context with stack info so the frontend
+        // shows useful details instead of just "No details"
+        var effectiveContext = isDefault
+            ? new ConnectionUsageContext(ConnectionUsageType.Unknown, "No context set on cancellation token")
+            : usageContext;
 
         // Determine if we need to reserve slots for higher-priority callers.
         // Background tasks (HealthCheck, Repair) must leave some capacity available.
         // We reserve 25% of the pool for Streaming and Queue.
         var reservedSlots = 0;
-        if (usageContext.UsageType == ConnectionUsageType.HealthCheck ||
-            usageContext.UsageType == ConnectionUsageType.Repair)
+        if (effectiveContext.UsageType == ConnectionUsageType.HealthCheck ||
+            effectiveContext.UsageType == ConnectionUsageType.Repair)
         {
             // Reserve ~16% of slots for high-priority traffic.
             // This allows background tasks to balloon up to ~84% utilization
@@ -159,8 +179,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                 }
             }
 
+            _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, effectiveContext, DateTimeOffset.UtcNow);
             TriggerConnectionPoolChangedEvent();
-            _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext, DateTimeOffset.UtcNow);
 
             return BuildLock(item.Connection, connectionId);
         }
@@ -255,9 +275,9 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         }
 
         Interlocked.Increment(ref _live);
-        TriggerConnectionPoolChangedEvent();
 
-        _activeConnections[connectionId] = new ActiveConnectionInfo(conn, usageContext, DateTimeOffset.UtcNow);
+        _activeConnections[connectionId] = new ActiveConnectionInfo(conn, effectiveContext, DateTimeOffset.UtcNow);
+        TriggerConnectionPoolChangedEvent();
         return BuildLock(conn, connectionId);
 
         ConnectionLock<T> BuildLock(T c, string connId)
