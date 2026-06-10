@@ -13,4 +13,10 @@ public class SonarrQueueRecord: ArrQueueRecord
 
     [JsonPropertyName("seasonNumber")]
     public int SeasonNumber { get; set; }
+
+    [JsonPropertyName("episode")]
+    public SonarrEpisode? Episode { get; set; }
+
+    [JsonPropertyName("episodes")]
+    public List<SonarrEpisode> Episodes { get; set; } = [];
 }

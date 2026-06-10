@@ -20,6 +20,7 @@ public class QueueManager : IDisposable
     private readonly ConfigManager _configManager;
     private readonly WebsocketManager _websocketManager;
     private readonly HealthCheckService _healthCheckService;
+    private readonly ArrReplacementSearchService _arrReplacementSearchService;
     private readonly RcloneRcService _rcloneRcService;
     private readonly IServiceScopeFactory _scopeFactory;
 
@@ -31,6 +32,7 @@ public class QueueManager : IDisposable
         ConfigManager configManager,
         WebsocketManager websocketManager,
         HealthCheckService healthCheckService,
+        ArrReplacementSearchService arrReplacementSearchService,
         RcloneRcService rcloneRcService,
         IServiceScopeFactory scopeFactory
     )
@@ -39,6 +41,7 @@ public class QueueManager : IDisposable
         _configManager = configManager;
         _websocketManager = websocketManager;
         _healthCheckService = healthCheckService;
+        _arrReplacementSearchService = arrReplacementSearchService;
         _rcloneRcService = rcloneRcService;
         _scopeFactory = scopeFactory;
         _cancellationTokenSource = CancellationTokenSource
@@ -214,7 +217,7 @@ public class QueueManager : IDisposable
         var progressHook = new Progress<int>();
         var task = new QueueItemProcessor(
             queueItem, queueNzbContents, scopeFactory, _usenetClient, 
-            _configManager, _websocketManager, _healthCheckService, _rcloneRcService,
+            _configManager, _websocketManager, _healthCheckService, _arrReplacementSearchService, _rcloneRcService,
             progressHook, cts.Token
         ).ProcessAsync();
         var inProgressQueueItem = new InProgressQueueItem()

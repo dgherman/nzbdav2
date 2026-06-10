@@ -1,7 +1,7 @@
 import { Alert, Button, Form } from "react-bootstrap";
 import styles from "./strm-to-symlinks.module.css";
 import { useCallback, useEffect, useState } from "react";
-import { receiveMessage } from "~/utils/websocket-util";
+import { createWebsocketBackoff, getBrowserWebsocketUrl, receiveMessage } from "~/utils/websocket-util";
 
 const cleanupTaskTopic = { 'st2sy': 'state' };
 
@@ -28,13 +28,26 @@ export function ConvertStrmToSymlinks({ savedConfig }: ConvertStrmToSymlinksProp
     useEffect(() => {
         let ws: WebSocket;
         let disposed = false;
+        let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
+        const backoff = createWebsocketBackoff();
+
+        function scheduleReconnect() {
+            if (disposed) return;
+            const delay = backoff.nextDelayMs();
+            reconnectTimer = setTimeout(() => connect(), delay);
+        }
+
         function connect() {
-            ws = new WebSocket(window.location.origin.replace(/^http/, 'ws'));
+            ws = new WebSocket(getBrowserWebsocketUrl());
             ws.onmessage = receiveMessage((_, message) => setProgress(message));
-            ws.onopen = () => { setConnected(true); ws.send(JSON.stringify(cleanupTaskTopic)); }
-            ws.onclose = () => { !disposed && setTimeout(() => connect(), 1000); setProgress(null) };
+            ws.onopen = () => { backoff.reset(); setConnected(true); ws.send(JSON.stringify(cleanupTaskTopic)); }
+            ws.onclose = () => { setConnected(false); scheduleReconnect(); setProgress(null) };
             ws.onerror = () => { ws.close() };
-            return () => { disposed = true; ws.close(); }
+            return () => {
+                disposed = true;
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                ws.close();
+            }
         }
         return connect();
     }, [setProgress, setConnected]);

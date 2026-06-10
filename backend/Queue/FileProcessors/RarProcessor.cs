@@ -26,24 +26,31 @@ public class RarProcessor(
 {
     private readonly GetFileInfosStep.FileInfo _primaryFile = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).First();
 
+    private const int MaxGlobalRarHeaderConnections = 6;
+    private const int MaxRarHeaderConnectionsPerPart = 2;
+    private static readonly SemaphoreSlim RarHeaderConnectionSlots = new(MaxGlobalRarHeaderConnections, MaxGlobalRarHeaderConnections);
+
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
         Log.Information("[RarProcessor] Starting parallel RAR processing for {Count} parts", fileInfos.Count);
 
         var sortedInfos = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).ToList();
-        
-        // OPTIMIZATION: Use higher concurrency for RAR processing
-        // For large RAR sets (29+ parts), processing 2 at a time is very slow
-        // Scale concurrency based on part count: more parts = more parallelism
+
+        // Keep RAR header extraction bounded globally. Each active part may use multiple
+        // buffered segment workers, so part concurrency must be capped by the shared header
+        // connection budget rather than scaling directly with archive part count.
         var partCount = sortedInfos.Count;
-        var concurrency = partCount switch
+        var requestedConcurrency = partCount switch
         {
             > 50 => Math.Min(20, maxConcurrentConnections * 3),  // Large sets: up to 20 concurrent
             > 20 => Math.Min(15, maxConcurrentConnections * 2),  // Medium sets: up to 15 concurrent
             > 10 => Math.Min(10, maxConcurrentConnections),      // Small-medium: up to 10 concurrent
             _ => Math.Max(3, maxConcurrentConnections)           // Small sets: at least 3 concurrent
         };
-        Log.Debug("[RarProcessor] Processing {Count} parts with concurrency {Concurrency}", partCount, concurrency);
+        var maxConcurrentHeaderParts = Math.Max(1, MaxGlobalRarHeaderConnections / MaxRarHeaderConnectionsPerPart);
+        var concurrency = Math.Min(requestedConcurrency, maxConcurrentHeaderParts);
+        Log.Debug("[RarProcessor] Processing {Count} parts with concurrency {Concurrency} (requested {RequestedConcurrency}, global header connection cap {HeaderConnectionCap})",
+            partCount, concurrency, requestedConcurrency, MaxGlobalRarHeaderConnections);
 
         var tasks = sortedInfos
             .Select(async fileInfo =>
@@ -86,16 +93,20 @@ public class RarProcessor(
 
     private async Task<List<StoredFileSegment>> ProcessPartAsync(GetFileInfosStep.FileInfo fileInfo)
     {
+        using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        headerCts.CancelAfter(TimeSpan.FromSeconds(60));
+
+        var segments = fileInfo.NzbFile.GetSegmentIds();
+        var connectionCount = GetRarHeaderConnectionCount(segments.Length);
+        using var headerConnectionLease = await AcquireRarHeaderConnectionSlotsAsync(connectionCount, headerCts.Token).ConfigureAwait(false);
+
         // Use FAST stream that trusts the file size to avoid slow segment re-scans
-        await using var stream = await GetFastNzbFileStream(fileInfo).ConfigureAwait(false);
+        await using var stream = await GetFastNzbFileStream(fileInfo, segments, connectionCount, headerCts.Token).ConfigureAwait(false);
         
         if (fileInfo.MagicOffset > 0)
         {
             stream.Seek(fileInfo.MagicOffset, SeekOrigin.Begin);
         }
-
-        using var headerCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        headerCts.CancelAfter(TimeSpan.FromSeconds(60));
 
         var headers = await RarUtil.GetRarHeadersAsync(stream, password, headerCts.Token).ConfigureAwait(false);
 
@@ -121,7 +132,7 @@ public class RarProcessor(
             var partIds = fileInfo.NzbFile.GetSegmentIds();
             if (partIds.Length > 0)
             {
-                var computed = await usenet.AnalyzeNzbAsync(partIds, RarHeaderConnections, null, ct, useSmartAnalysis: true).ConfigureAwait(false);
+                var computed = await usenet.AnalyzeNzbAsync(partIds, MaxRarHeaderConnectionsPerPart, null, ct, useSmartAnalysis: true).ConfigureAwait(false);
                 if (SegmentOffsetTable.TryBuild(computed, partIds.Length, stream.Length, out _))
                     partSegmentSizes = computed;
             }
@@ -253,11 +264,19 @@ public class RarProcessor(
 
     /// <summary>
     /// Number of connections to use per RAR part for header reading.
-    /// Using multiple connections with buffered streaming speeds up header extraction.
+    /// Using a small number of buffered connections speeds up header extraction while the
+    /// global RAR header slot limiter prevents part-count multiplication.
     /// </summary>
-    private const int RarHeaderConnections = 5;
+    private static int GetRarHeaderConnectionCount(int segmentCount)
+    {
+        return Math.Max(1, Math.Min(MaxRarHeaderConnectionsPerPart, segmentCount));
+    }
 
-    private async Task<NzbFileStream> GetFastNzbFileStream(GetFileInfosStep.FileInfo fileInfo)
+    private async Task<NzbFileStream> GetFastNzbFileStream(
+        GetFileInfosStep.FileInfo fileInfo,
+        string[] segments,
+        int connectionCount,
+        CancellationToken cancellationToken)
     {
         // For RAR processing, we trust the Par2/NZB size if available
         var segmentSizes = fileInfo.SegmentSizes;
@@ -270,7 +289,7 @@ public class RarProcessor(
 
         if (filesize == null)
         {
-            filesize = await usenet.GetFileSizeAsync(fileInfo.NzbFile, ct).ConfigureAwait(false);
+            filesize = await usenet.GetFileSizeAsync(fileInfo.NzbFile, cancellationToken).ConfigureAwait(false);
         }
 
         // Create a QueueRarProcessing context so NzbFileStream allows buffered streaming
@@ -279,17 +298,45 @@ public class RarProcessor(
         var usageContext = parentContext.DetailsObject != null
             ? new ConnectionUsageContext(ConnectionUsageType.QueueRarProcessing, parentContext.DetailsObject)
             : new ConnectionUsageContext(ConnectionUsageType.QueueRarProcessing, parentContext.Details);
-        var segments = fileInfo.NzbFile.GetSegmentIds();
-
-        // Use multiple connections with buffered streaming for faster header reading
-        // Limit connections based on segment count (don't over-allocate for small files)
-        var connectionCount = Math.Min(RarHeaderConnections, segments.Length);
 
         // If we have exact segment sizes, use the standard stream with buffering
         // otherwise use the fast stream that trusts the total size
         return segmentSizes != null
             ? usenet.GetFileStream(segments, filesize.Value, connectionCount, usageContext, useBufferedStreaming: true, bufferSize: connectionCount * 3, segmentSizes: segmentSizes)
             : usenet.GetFileStream(segments, filesize.Value, connectionCount, usageContext, useBufferedStreaming: true, bufferSize: connectionCount * 3);
+    }
+
+    private static async Task<RarHeaderConnectionLease> AcquireRarHeaderConnectionSlotsAsync(int count, CancellationToken ct)
+    {
+        var acquired = 0;
+        try
+        {
+            while (acquired < count)
+            {
+                await RarHeaderConnectionSlots.WaitAsync(ct).ConfigureAwait(false);
+                acquired++;
+            }
+
+            return new RarHeaderConnectionLease(acquired);
+        }
+        catch
+        {
+            if (acquired > 0) RarHeaderConnectionSlots.Release(acquired);
+            throw;
+        }
+    }
+
+    private sealed class RarHeaderConnectionLease(int count) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0 && count > 0)
+            {
+                RarHeaderConnectionSlots.Release(count);
+            }
+        }
     }
 
     public new class Result : BaseProcessor.Result

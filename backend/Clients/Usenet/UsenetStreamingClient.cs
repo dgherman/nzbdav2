@@ -360,10 +360,12 @@ public class UsenetStreamingClient
             var dynamicTimeout = (int)(avgSeconds * 4);
 
             // Clamp between reasonable bounds:
-            // Min: 60s (even fast operations need some buffer)
+            // Min: providerCount * 45s per-provider timeout (or 60s floor), ensuring the
+            // adaptive timeout never undercuts the time needed to try all providers sequentially.
             // Max: (providers * timeout) + 60s (allow trying all providers)
             var maxTimeout = (providerCount * defaultTimeoutPerProvider) + 60;
-            var clampedTimeout = Math.Clamp(dynamicTimeout, 60, maxTimeout);
+            var minTimeout = Math.Max(60, providerCount * 45);
+            var clampedTimeout = Math.Clamp(dynamicTimeout, minTimeout, maxTimeout);
 
             return clampedTimeout;
         }
@@ -451,8 +453,11 @@ public class UsenetStreamingClient
         // Record successful operation time for future dynamic timeout calculations
         if (filesToFetch.Count > 0)
         {
-            // Normalize by number of files to get per-file average
-            var perFileTime = operationStartTime.Elapsed.TotalSeconds / filesToFetch.Count;
+            // Normalize by number of files to get per-file average.
+            // Multiply by concurrency factor because files are fetched in parallel, so the
+            // wall-clock time understates true per-file cost; failing to adjust drives the
+            // rolling average below the minimum clamp, permanently pinning the timeout.
+            var perFileTime = operationStartTime.Elapsed.TotalSeconds / filesToFetch.Count * concurrentConnections;
             RecordFileSizeOperationTime(perFileTime);
         }
 

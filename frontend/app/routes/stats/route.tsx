@@ -17,7 +17,7 @@ import { FileDetailsModal } from "~/routes/health/components/file-details-modal/
 import type { FileDetails } from "~/types/backend";
 import { useToast } from "~/context/ToastContext";
 import { useConfirm } from "~/context/ConfirmContext";
-import { receiveMessage } from "~/utils/websocket-util";
+import { createWebsocketBackoff, getBrowserWebsocketUrl, receiveMessage } from "~/utils/websocket-util";
 
 export function meta({}: Route.MetaArgs) {
   return [
@@ -160,15 +160,27 @@ export default function StatsPage({ loaderData }: Route.ComponentProps) {
         
         let ws: WebSocket;
         let disposed = false;
+        let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
         const topicSubscriptions = { 'cxs': 'state' };
+        const backoff = createWebsocketBackoff();
+
+        function scheduleReconnect() {
+            if (disposed) return;
+            const delay = backoff.nextDelayMs();
+            reconnectTimer = setTimeout(() => connect(), delay);
+        }
 
         function connect() {
-            ws = new WebSocket(window.location.origin.replace(/^http/, 'ws'));
+            ws = new WebSocket(getBrowserWebsocketUrl());
             ws.onmessage = receiveMessage(onWebsocketMessage);
-            ws.onopen = () => { ws.send(JSON.stringify(topicSubscriptions)); }
-            ws.onclose = () => { !disposed && setTimeout(() => connect(), 1000); };
+            ws.onopen = () => { backoff.reset(); ws.send(JSON.stringify(topicSubscriptions)); }
+            ws.onclose = scheduleReconnect;
             ws.onerror = () => { ws.close() };
-            return () => { disposed = true; ws.close(); }
+            return () => {
+                disposed = true;
+                if (reconnectTimer) clearTimeout(reconnectTimer);
+                ws.close();
+            }
         }
 
         const cleanup = connect();

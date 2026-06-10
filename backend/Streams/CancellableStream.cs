@@ -31,7 +31,7 @@ public class CancellableStream(Stream innerStream, CancellationToken token, bool
     public override int Read(byte[] buffer, int offset, int count)
     {
         CheckDisposed();
-        return ReadAsync(buffer, offset, count, token)
+        return Task.Run(() => ReadAsync(buffer, offset, count, token))
             .GetAwaiter()
             .GetResult();
     }

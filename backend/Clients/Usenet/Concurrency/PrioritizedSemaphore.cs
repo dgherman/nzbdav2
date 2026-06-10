@@ -29,6 +29,17 @@ public class PrioritizedSemaphore : IDisposable
 
     public Task WaitAsync(SemaphorePriority priority, CancellationToken cancellationToken = default)
     {
+        // Bail out immediately if the token is already cancelled — avoids entering
+        // the lock at all (and prevents a synchronous Register callback inside Lock
+        // which would throw LockRecursionException on .NET 9+).
+        if (cancellationToken.IsCancellationRequested)
+            return Task.FromCanceled(cancellationToken);
+
+        Task task;
+        LinkedList<TaskCompletionSource<bool>>? capturedQueue = null;
+        LinkedListNode<TaskCompletionSource<bool>>? capturedNode = null;
+        TaskCompletionSource<bool>? capturedTcs = null;
+
         lock (_lock)
         {
             if (_disposed)
@@ -44,33 +55,51 @@ public class PrioritizedSemaphore : IDisposable
             var queue = priority == SemaphorePriority.High ? _highPriorityWaiters : _lowPriorityWaiters;
             var node = queue.AddLast(tcs);
 
+            // Capture the TCS task and locals needed for cancellation registration
+            // OUTSIDE the lock, so the Register callback won't nest-lock a
+            // non-reentrant System.Threading.Lock (.NET 9+).
+            task = tcs.Task;
+
             if (cancellationToken.CanBeCanceled)
             {
-                var registration = cancellationToken.Register(() =>
-                {
-                    var removed = false;
-                    lock (_lock)
-                    {
-                        try
-                        {
-                            queue.Remove(node);
-                            removed = true;
-                        }
-                        catch (InvalidOperationException)
-                        {
-                            // intentionally left blank
-                        }
-                    }
-
-                    if (removed)
-                        tcs.TrySetCanceled(cancellationToken);
-                });
-
-                tcs.Task.ContinueWith(_ => registration.Dispose(), TaskScheduler.Default);
+                capturedQueue = queue;
+                capturedNode = node;
+                capturedTcs = tcs;
             }
-
-            return tcs.Task;
         }
+
+        // Register cancellation AFTER releasing the lock. If the token fires
+        // between lock exit and Register, the waiter stays in the queue
+        // harmlessly — Release() will skip canceled TCS entries. If the token
+        // fires after Register, the callback safely removes the node.
+        if (cancellationToken.CanBeCanceled && capturedQueue is not null)
+        {
+            var ct = cancellationToken;
+            var registration = ct.Register(() =>
+            {
+                var removed = false;
+                lock (_lock)
+                {
+                    try
+                    {
+                        capturedQueue.Remove(capturedNode!);
+                        removed = true;
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Node already removed by Release() — that's fine.
+                    }
+                }
+
+                if (removed)
+                    capturedTcs!.TrySetCanceled(ct);
+            });
+
+            task.ContinueWith(_ => registration.Dispose(), CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+        }
+
+        return task;
     }
 
     public void Release()

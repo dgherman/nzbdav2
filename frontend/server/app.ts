@@ -15,10 +15,21 @@ declare module "react-router" {
 export const app = express();
 export const initializeWebsocketServer = websocketServer.initialize;
 
-// Proxy all webdav and api requests to the backend
+// Proxy all webdav and api requests to the backend.
+//
+// `changeOrigin` MUST be false. With `changeOrigin: true`, http-proxy-middleware rewrites
+// the outbound `Host` header to the target's host (i.e. `localhost:8080`). NWebDav then
+// builds its `<D:href>` response URLs from `Request.Host`, so PROPFIND responses end up
+// containing absolute hrefs like `http://localhost:8080/.ids` instead of the public-facing
+// host the client connected to. Older rclone (≤ v1.73.x) ignored the host component of
+// hrefs and used only the path, so this worked by accident. rclone v1.74.0 became strict
+// about validating href hosts against the connected host, which causes PROPFIND listings
+// to appear empty even though the server returns 207 with a full body. Keeping the
+// original `Host` header (`changeOrigin: false`) makes NWebDav emit hrefs with the
+// correct public host. Kestrel does not validate the Host header, so this is safe.
 const forwardToBackend = createProxyMiddleware({
   target: process.env.BACKEND_URL,
-  changeOrigin: true,
+  changeOrigin: false,
 });
 
 const setApiKeyForAuthenticatedRequests = async (req: express.Request) => {

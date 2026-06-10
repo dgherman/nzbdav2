@@ -89,11 +89,23 @@ public class DatabaseStoreMultipartFile(
             }
         }
 
+        // Honor the consumer's HTTP Range end byte (set by GetAndHeadHandlerPatch) so archive
+        // part prefetch is bounded to the requested segment instead of reading ahead to EOF.
+        // Skipped for AES-encrypted archives, which must be decoded sequentially from the start.
+        long? requestedEndByte = null;
+        if (multipartFile.Metadata.AesParams == null &&
+            httpContext.Items.TryGetValue("RequestedRangeEnd", out var endObj) &&
+            endObj is long endByte)
+        {
+            requestedEndByte = endByte;
+        }
+
         var packedStream = new DavMultipartFileStream(
             multipartFile.Metadata.FileParts,
             usenetClient,
             configManager.GetTotalStreamingConnections(),
-            usageContext
+            usageContext,
+            requestedEndByte: requestedEndByte
         );
         Stream finalStream = multipartFile.Metadata.AesParams != null
             ? new AesDecoderStream(packedStream, multipartFile.Metadata.AesParams)

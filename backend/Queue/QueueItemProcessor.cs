@@ -32,6 +32,7 @@ public class QueueItemProcessor(
     ConfigManager configManager,
     WebsocketManager websocketManager,
     HealthCheckService healthCheckService,
+    ArrReplacementSearchService arrReplacementSearchService,
     RcloneRcService rcloneRcService,
     IProgress<int> progress,
     CancellationToken ct
@@ -133,6 +134,12 @@ public class QueueItemProcessor(
                 Log.Error(ex, "[QueueItemProcessor] Failed to mark queue item {JobName} as completed: {Error}",
                     queueItem.JobName, ex.Message);
             }
+
+            await arrReplacementSearchService.NotifyQueueItemFailedAsync(
+                queueItem.Id,
+                queueItem.JobName,
+                e.Message,
+                ct).ConfigureAwait(false);
         }
     }
 

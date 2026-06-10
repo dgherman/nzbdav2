@@ -1,5 +1,7 @@
-﻿namespace NzbWebDAV.Clients.RadarrSonarr.SonarrModels;
+﻿using NzbWebDAV.Clients.RadarrSonarr.BaseModels;
 
-public class SonarrQueue : Queue<SonarrQueueRecord>
+namespace NzbWebDAV.Clients.RadarrSonarr.SonarrModels;
+
+public class SonarrQueue : ArrQueue<SonarrQueueRecord>
 {
 }

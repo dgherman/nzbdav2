@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
@@ -346,7 +347,8 @@ public class MagicTester
                                  var stream = new DavMultipartFileStream(
                                      multiFile.Metadata.FileParts,
                                      client,
-                                     1
+                                     1,
+                                     new ConnectionUsageContext(ConnectionUsageType.Analysis, "MagicTester: ffprobe validation")
                                  );
                                  
                                  byte[]? key = multiFile.Metadata.ObfuscationKey;
@@ -391,7 +393,8 @@ public class MagicTester
                                  var stream = new DavMultipartFileStream(
                                      multiFile.Metadata.FileParts,
                                      client,
-                                     25  // More connections for faster download
+                                     25,  // More connections for faster download
+                                     new ConnectionUsageContext(ConnectionUsageType.Analysis, "MagicTester: ffprobe validation")
                                  );
 
                                  byte[]? key = multiFile.Metadata.ObfuscationKey;

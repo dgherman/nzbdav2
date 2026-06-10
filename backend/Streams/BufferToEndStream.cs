@@ -40,8 +40,8 @@ public sealed class BufferToEndStream : Stream
     public BufferToEndStream(
         Stream sourceStream,
         int    minimumSegmentSize    = 1024,
-        long   pauseWriterThreshold  = long.MaxValue,
-        long   resumeWriterThreshold = long.MaxValue - 1)
+        long   pauseWriterThreshold  = 1024L * 1024L,            // 1 MB — bound buffered article size
+        long   resumeWriterThreshold = 256L * 1024L)             // 256 KB — resume when reader catches up
     {
         if (sourceStream is null)  throw new ArgumentNullException(nameof(sourceStream));
         if (!sourceStream.CanRead) throw new ArgumentException("Stream must be readable.", nameof(sourceStream));
@@ -152,12 +152,14 @@ public sealed class BufferToEndStream : Stream
     // ───────────────────────────────────  Stream overrides
     public override int Read(Span<byte> buffer)
     {
-        // simple sync path – allocate once then copy
-        byte[] tmp = ArrayPool<byte>.Shared.Rent(buffer.Length);
+        // Offload the blocking wait to a dedicated Task.Run thread to avoid
+        // thread-pool starvation.
+        int length = buffer.Length;
+        byte[] tmp = ArrayPool<byte>.Shared.Rent(length);
         try
         {
-            int read = ReadCoreAsync(tmp.AsMemory(0, buffer.Length), SigtermUtil.GetCancellationToken())
-                       .AsTask().GetAwaiter().GetResult();
+            int read = Task.Run(() => ReadCoreAsync(tmp.AsMemory(0, length), SigtermUtil.GetCancellationToken()).AsTask())
+                           .GetAwaiter().GetResult();
             tmp.AsSpan(0, read).CopyTo(buffer);
             return read;
         }

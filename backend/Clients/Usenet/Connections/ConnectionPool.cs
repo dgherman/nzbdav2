@@ -94,13 +94,33 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     {
         var usageContext = cancellationToken.GetContext<ConnectionUsageContext>();
 
+        // ConnectionUsageContext is a readonly struct (value type). GetContext<T> returns
+        // default(ConnectionUsageContext) when no context is set, which has UsageType=Unlabeled (0)
+        // and Details=null. Check for this default state instead of null.
+        var isDefault = usageContext.UsageType == ConnectionUsageType.Unlabeled
+                        && usageContext.Details == null;
+
+        if (isDefault)
+        {
+            var stackHint = Environment.StackTrace;
+            Serilog.Log.Warning(
+                "[ConnectionPool][{PoolName}] Connection acquired without ConnectionUsageContext on CancellationToken. " +
+                "This will show as 'Unlabeled' on the frontend. Stack trace hint: {StackHint}",
+                PoolName, stackHint.Substring(0, Math.Min(stackHint.Length, 500)));
+        }
+
+        // Fall back to a descriptive Unlabeled context with stack info so the frontend
+        // shows useful details instead of just "No details"
+        var effectiveContext = isDefault
+            ? new ConnectionUsageContext(ConnectionUsageType.Unlabeled, "No context set on cancellation token")
+            : usageContext;
 
         // Determine if we need to reserve slots for higher-priority callers.
         // Background tasks (HealthCheck, Repair) must leave some capacity available.
         // We reserve 25% of the pool for Streaming and Queue.
         var reservedSlots = 0;
-        if (usageContext.UsageType == ConnectionUsageType.HealthCheck ||
-            usageContext.UsageType == ConnectionUsageType.Repair)
+        if (effectiveContext.UsageType == ConnectionUsageType.HealthCheck ||
+            effectiveContext.UsageType == ConnectionUsageType.Repair)
         {
             // Reserve ~16% of slots for high-priority traffic.
             // This allows background tasks to balloon up to ~84% utilization
@@ -145,6 +165,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                 {
                     // Quick liveness check with 3s timeout (reduced from 5s for faster failure detection)
                     using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+                    using var _ = cts.Token.SetScopedContext(
+                        new ConnectionUsageContext(ConnectionUsageType.HealthCheck, "Idle connection liveness check"));
                     await client.DateAsync(cts.Token).ConfigureAwait(false);
                     Serilog.Log.Debug("[ConnectionPool][{PoolName}] Health check passed for idle connection (idle: {IdleTime:F0}s)", PoolName, (Environment.TickCount64 - item.LastTouchedMillis) / 1000.0);
                 }
@@ -159,8 +181,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
                 }
             }
 
+            _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, effectiveContext, DateTimeOffset.UtcNow);
             TriggerConnectionPoolChangedEvent();
-            _activeConnections[connectionId] = new ActiveConnectionInfo(item.Connection, usageContext, DateTimeOffset.UtcNow);
 
             return BuildLock(item.Connection, connectionId);
         }
@@ -255,9 +277,9 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
         }
 
         Interlocked.Increment(ref _live);
-        TriggerConnectionPoolChangedEvent();
 
-        _activeConnections[connectionId] = new ActiveConnectionInfo(conn, usageContext, DateTimeOffset.UtcNow);
+        _activeConnections[connectionId] = new ActiveConnectionInfo(conn, effectiveContext, DateTimeOffset.UtcNow);
+        TriggerConnectionPoolChangedEvent();
         return BuildLock(conn, connectionId);
 
         ConnectionLock<T> BuildLock(T c, string connId)
@@ -300,18 +322,27 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
 
     private void Return(T connection, string connectionId)
     {
-        _activeConnections.TryRemove(connectionId, out var info);
-        var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
+        // Try to remove from active tracking. If it was already removed by the
+        // stuck-connection sweeper (SweepOnce), we must NOT release _gate again —
+        // the sweeper already released it. Double-release would corrupt the
+        // semaphore count and allow more than _maxConnections concurrent connections.
+        var wasActive = _activeConnections.TryRemove(connectionId, out var info);
+        var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unlabeled;
 
         var poolDisposed = Volatile.Read(ref _disposed) == 1;
         var isDoomed = _doomedConnections.TryRemove(connection, out _);
         if (poolDisposed || isDoomed)
         {
             _ = DisposeConnectionSafeAsync(connection, "doomed/disposed return");
-            Interlocked.Decrement(ref _live);
-            if (!poolDisposed)
+            // Only decrement _live and release _gate if this connection was still
+            // tracked as active. The sweeper already did both if it struck first.
+            if (wasActive)
             {
-                _gate.Release();
+                Interlocked.Decrement(ref _live);
+                if (!poolDisposed)
+                {
+                    _gate.Release();
+                }
             }
             TriggerConnectionPoolChangedEvent();
             return;
@@ -325,7 +356,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable
     private void Destroy(T connection, string connectionId)
     {
         _activeConnections.TryRemove(connectionId, out var info);
-        var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unknown;
+        var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unlabeled;
 
         // When a lock requests replacement, we dispose the connection instead of reusing.
         _ = DisposeConnectionSafeAsync(connection, "destroy/replace");

@@ -20,7 +20,7 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
         Get<RadarrQueue>($"/queue?protocol=usenet&pageSize=5000");
 
     public Task<HttpStatusCode> DeleteMovieFile(int id) =>
-        Delete($"/moviefile/{id}");
+        Delete($"/moviefile/{id}", new Dictionary<string, string> { ["deleteFiles"] = "true" });
 
     public Task<ArrCommand> SearchMovieAsync(int id) =>
         CommandAsync(new { name = "MoviesSearch", movieIds = new List<int> { id } });
@@ -43,12 +43,14 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
 
         // 2. Delete the movie file
         Log.Information($"[ArrClient] Deleting movie file ID {mediaIds.Value.movieFileId} from Radarr...");
-        if (await DeleteMovieFile(mediaIds.Value.movieFileId) != System.Net.HttpStatusCode.OK)
+        var deleteStatus = await DeleteMovieFile(mediaIds.Value.movieFileId);
+        if ((int)deleteStatus is < 200 or >= 300)
             throw new Exception($"Failed to delete movie file '{symlinkOrStrmPath}' from Radarr instance '{Host}'.");
 
         Log.Information($"[ArrClient] Successfully deleted movie file ID {mediaIds.Value.movieFileId}.");
 
-        // 3. Try to find the grab event in history and mark it failed (blacklist + auto-search)
+        // 3. Try to find the grab event in history and mark it failed so Arr blocklists this release.
+        // Always trigger an explicit search afterward because Arr's failed-download handling may not auto-search.
         if (!string.IsNullOrEmpty(sceneName))
         {
             try
@@ -68,28 +70,30 @@ public class RadarrClient(string host, string apiKey) : ArrClient(host, apiKey)
                     Log.Information($"[ArrClient] Found grab event ID {grabEvent.Id}. Attempting to mark as failed...");
                     if (await MarkHistoryFailedAsync(grabEvent.Id))
                     {
-                        Log.Information($"[ArrClient] Successfully marked history item {grabEvent.Id} as failed for '{sceneName}' in Radarr '{Host}'.");
-                        return true;
+                        Log.Information($"[ArrClient] Successfully marked history item {grabEvent.Id} as failed for '{sceneName}' in Radarr '{Host}'. Triggering explicit replacement search.");
                     }
-                    Log.Warning($"[ArrClient] Failed to mark history item {grabEvent.Id} as failed. Proceeding to fallback search.");
+                    else
+                    {
+                        Log.Warning($"[ArrClient] Failed to mark history item {grabEvent.Id} as failed. Proceeding to replacement search.");
+                    }
                 }
                 else
                 {
-                    Log.Warning($"[ArrClient] Could not find grab event in history for '{sceneName}' in Radarr '{Host}'. Proceeding to fallback search.");
+                    Log.Warning($"[ArrClient] Could not find grab event in history for '{sceneName}' in Radarr '{Host}'. Proceeding to replacement search.");
                 }
             }
             catch (Exception ex)
             {
-                Log.Warning($"[ArrClient] Error while attempting to mark history failed for '{sceneName}' in Radarr '{Host}': {ex.Message}. Proceeding to fallback search.");
+                Log.Warning($"[ArrClient] Error while attempting to mark history failed for '{sceneName}' in Radarr '{Host}': {ex.Message}. Proceeding to replacement search.");
             }
         }
         else
         {
-            Log.Warning($"[ArrClient] SceneName was null or empty for movie file. Proceeding to fallback search.");
+            Log.Warning($"[ArrClient] SceneName was null or empty for movie file. Proceeding to replacement search.");
         }
 
-        // 4. Fallback: trigger a new movie search
-        Log.Information($"[ArrClient] Triggering fallback search for movie ID {mediaIds.Value.movieId}...");
+        // 4. Trigger a new movie search
+        Log.Information($"[ArrClient] Triggering replacement search for movie ID {mediaIds.Value.movieId}...");
         await SearchMovieAsync(mediaIds.Value.movieId);
         return true;
     }

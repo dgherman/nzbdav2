@@ -211,7 +211,7 @@ public class MultiConnectionNntpClient : INntpClient
         // Propagate the connection usage context to the new linked token
         var originalUsageContext = cancellationToken.GetContext<ConnectionUsageContext>();
         IDisposable? timeoutContextScope = null;
-        if (originalUsageContext.UsageType != ConnectionUsageType.Unknown)
+        if (originalUsageContext.UsageType != ConnectionUsageType.Unlabeled)
         {
             timeoutContextScope = timeoutCts.Token.SetScopedContext(originalUsageContext);
         }
@@ -346,8 +346,14 @@ public class MultiConnectionNntpClient : INntpClient
                                     });
                             }
                         }
-                        // Always dispose permit in finally block of the current recursive call
-                        globalPermit?.Dispose();
+                        // On success, ownership of the global permit is transferred to the
+                        // returned DisposableCallbackStream and released when the caller
+                        // disposes the stream. Releasing it here would make the global
+                        // limiter account only stream creation, not the actual segment read.
+                        if (!success)
+                        {
+                            globalPermit?.Dispose();
+                        }
                     }    }
 
     private async Task<T> RunWithConnection<T>
@@ -376,7 +382,7 @@ public class MultiConnectionNntpClient : INntpClient
         // Propagate the connection usage context to the new linked token
         var originalUsageContext = cancellationToken.GetContext<ConnectionUsageContext>();
         IDisposable? timeoutContextScope = null;
-        if (originalUsageContext.UsageType != ConnectionUsageType.Unknown)
+        if (originalUsageContext.UsageType != ConnectionUsageType.Unlabeled)
         {
             timeoutContextScope = timeoutCts.Token.SetScopedContext(originalUsageContext);
         }

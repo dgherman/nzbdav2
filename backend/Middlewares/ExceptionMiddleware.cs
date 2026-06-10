@@ -131,19 +131,33 @@ public class ExceptionMiddleware(RequestDelegate next)
                 context.Response.StatusCode = 500; // Internal Server Error
                 await context.Response.WriteAsync("An error occurred during processing.").ConfigureAwait(false);
             }
+            else
+            {
+                Log.Warning("Streaming response for file `{FilePath}` failed after headers/body started at byte position {SeekPosition}. Aborting connection to avoid Content-Length mismatch noise.",
+                    filePath, seekPosition);
+                context.Abort();
+            }
         }
         catch (Exception e) when (IsDavItemRequest(context))
         {
+            var filePath = GetRequestFilePath(context);
+            var seekPosition = context.Request.GetRange()?.Start?.ToString() ?? "0";
+
             if (!context.Response.HasStarted)
             {
                 context.Response.Clear();
                 context.Response.StatusCode = 500;
             }
+            else
+            {
+                Log.Warning(e, "Streaming response for file `{FilePath}` failed after headers/body started at byte position {SeekPosition}. Aborting connection to avoid Content-Length mismatch noise.",
+                    filePath, seekPosition);
+                context.Abort();
+                return;
+            }
 
-            var filePath = GetRequestFilePath(context);
-            var seekPosition = context.Request.GetRange()?.Start?.ToString() ?? "0";
-            Log.Error($"File `{filePath}` could not be read from byte position: {seekPosition} " +
-                      $"due to unhandled {e.GetType()}: {e.Message}");
+            Log.Error(e, "File `{FilePath}` could not be read from byte position: {SeekPosition} due to unhandled {ExceptionType}: {ErrorMessage}",
+                filePath, seekPosition, e.GetType(), e.Message);
         }
     }
 

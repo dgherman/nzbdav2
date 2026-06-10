@@ -54,7 +54,16 @@ public class NzbFileStream : Stream
         long? requestedEndByte = null
     )
     {
-        _usageContext = usageContext ?? new ConnectionUsageContext(ConnectionUsageType.Unknown);
+        if (usageContext == null)
+        {
+            Serilog.Log.Warning("[NzbFileStream] Created without ConnectionUsageContext — connections will appear as 'Unlabeled' on the frontend. " +
+                "This indicates a caller is not propagating usage context. Using fallback.");
+            _usageContext = new ConnectionUsageContext(ConnectionUsageType.Unlabeled, "NzbFileStream: no context provided");
+        }
+        else
+        {
+            _usageContext = usageContext.Value;
+        }
         Serilog.Log.Debug("[NzbFileStream] Initializing stream (Size: {FileSize} bytes, Segments: {SegmentCount}, Context: {UsageContext})", fileSize, fileSegmentIds.Length, _usageContext.UsageType);
         
         _fileSegmentIds = fileSegmentIds;
@@ -87,7 +96,7 @@ public class NzbFileStream : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+        return Task.Run(() => ReadAsync(buffer, offset, count)).GetAwaiter().GetResult();
     }
 
     public override async Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken)
@@ -389,13 +398,21 @@ public class NzbFileStream : Stream
                     // Use the entry-scoped CancellationToken, NOT _streamCts.Token!
                     // The pump must survive individual request cancellations — it outlives
                     // the first reader and serves many subsequent readers.
-                    _contextScope = entryCt.SetScopedContext(bufferedContext);
-                    var bufferedStream = new BufferedSegmentStream(
-                        remainingSegments, remainingSize, _client,
-                        _concurrentConnections, _bufferSize, entryCt,
-                        bufferedContext, remainingSegmentSizes, _segmentFallbacks, firstSegmentIndex);
-                    // Do NOT call SetAcquiredSlot — SharedStreamEntry manages the slot
-                    return bufferedStream;
+                    var entryContextScope = entryCt.SetScopedContext(bufferedContext);
+                    try
+                    {
+                        var bufferedStream = new BufferedSegmentStream(
+                            remainingSegments, remainingSize, _client,
+                            _concurrentConnections, _bufferSize, entryCt,
+                            bufferedContext, remainingSegmentSizes, _segmentFallbacks, firstSegmentIndex);
+                        // Do NOT call SetAcquiredSlot — SharedStreamEntry manages the slot
+                        return new SharedStreamManager.SharedStreamFactoryResult(bufferedStream, entryContextScope);
+                    }
+                    catch
+                    {
+                        entryContextScope.Dispose();
+                        throw;
+                    }
                 });
 
             if (sharedHandle != null)
@@ -411,13 +428,37 @@ public class NzbFileStream : Stream
             // Fall through to direct BufferedSegmentStream or unbuffered
         }
 
-        // Direct BufferedSegmentStream path (no DavItemId, or shared stream not available)
-        var acquiredSlot = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > _concurrentConnections
-            ? BufferedSegmentStream.TryAcquireSlot() : null;
-        if (acquiredSlot != null)
+        // Direct BufferedSegmentStream path (no DavItemId, or shared stream not available).
+        // Full direct buffered streams still use the scarce global slot only for streams large
+        // enough to benefit from the normal worker count. Bounded HTTP range reads are handled
+        // separately below so small RAR/multipart part streams do not fall back to raw segment
+        // reads and bypass retry/GD handling.
+        var canUseAnyDirectBufferedStream = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > 0;
+        var shouldUseFullDirectBufferedStream = canUseAnyDirectBufferedStream && _fileSegmentIds.Length > _concurrentConnections;
+        var acquiredSlot = shouldUseFullDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot() : null;
+
+        // If a bounded HTTP Range request cannot get one of the scarce full buffered-stream
+        // slots, still prefer a tiny direct BufferedSegmentStream over the legacy raw
+        // CombinedStream fallback. rclone vfs-cache issues many bounded range GETs; the raw
+        // fallback bypasses BufferedSegmentStream's retry/GD logic, so corrupt yEnc segments
+        // bubble up as unhandled InvalidDataException and noisy 500s. The fallback below keeps
+        // reliability behaviour while capping worker/buffer count to avoid memory blowups.
+        var useRangeReliabilityFallback = canUseAnyDirectBufferedStream
+            && acquiredSlot == null
+            && _requestedEndByte.HasValue
+            && _usageContext.UsageType == ConnectionUsageType.Streaming;
+
+        if (acquiredSlot != null || useRangeReliabilityFallback)
         {
             try
             {
+                var directConcurrentConnections = acquiredSlot != null
+                    ? _concurrentConnections
+                    : Math.Clamp(Math.Min(Math.Min(_concurrentConnections, _fileSegmentIds.Length), 4), 1, 4);
+                var directBufferSize = acquiredSlot != null
+                    ? _bufferSize
+                    : Math.Clamp(_bufferSize, directConcurrentConnections * 2, 16);
+
                 var detailsObj = new ConnectionUsageDetails
                 {
                     Text = _usageContext.Details ?? "",
@@ -452,8 +493,8 @@ public class NzbFileStream : Stream
                     }
                 }
 
-                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}",
-                    remainingSegments.Length, remainingSize, _concurrentConnections, _bufferSize);
+                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}, slotAcquired={SlotAcquired}, rangeReliabilityFallback={RangeFallback}",
+                    remainingSegments.Length, remainingSize, directConcurrentConnections, directBufferSize, acquiredSlot != null, useRangeReliabilityFallback);
                 _contextScope = _streamCts.Token.SetScopedContext(bufferedContext);
                 var bufferedContextCt = _streamCts.Token;
 
@@ -470,8 +511,8 @@ public class NzbFileStream : Stream
                     remainingSegments,
                     remainingSize,
                     _client,
-                    _concurrentConnections,
-                    _bufferSize,
+                    directConcurrentConnections,
+                    directBufferSize,
                     bufferedContextCt,
                     bufferedContext,
                     remainingSegmentSizes,
@@ -479,7 +520,10 @@ public class NzbFileStream : Stream
                     firstSegmentIndex,
                     endSegmentIndexInclusive
                 );
-                bufferedStream.SetAcquiredSlot(acquiredSlot);
+                if (acquiredSlot != null)
+                {
+                    bufferedStream.SetAcquiredSlot(acquiredSlot);
+                }
 
                 _cancellationRegistration = ct.Register(() =>
                 {
@@ -493,7 +537,7 @@ public class NzbFileStream : Stream
             }
             catch
             {
-                acquiredSlot.Release();
+                acquiredSlot?.Release();
                 throw;
             }
         }

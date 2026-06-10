@@ -27,6 +27,7 @@ public class HealthCheckService
     private readonly IServiceScopeFactory _serviceScopeFactory;
     private readonly ProviderErrorService _providerErrorService;
     private readonly NzbAnalysisService _nzbAnalysisService;
+    private readonly ArrReplacementSearchService _arrReplacementSearchService;
     private readonly CancellationToken _cancellationToken = SigtermUtil.GetCancellationToken();
 
     private readonly ConcurrentDictionary<string, byte> _missingSegmentIds = new();
@@ -41,7 +42,8 @@ public class HealthCheckService
         WebsocketManager websocketManager,
         IServiceScopeFactory serviceScopeFactory,
         ProviderErrorService providerErrorService,
-        NzbAnalysisService nzbAnalysisService
+        NzbAnalysisService nzbAnalysisService,
+        ArrReplacementSearchService arrReplacementSearchService
     )
     {
         _configManager = configManager;
@@ -50,6 +52,7 @@ public class HealthCheckService
         _serviceScopeFactory = serviceScopeFactory;
         _providerErrorService = providerErrorService;
         _nzbAnalysisService = nzbAnalysisService;
+        _arrReplacementSearchService = arrReplacementSearchService;
 
         _configManager.OnConfigChanged += (_, configEventArgs) =>
         {
@@ -489,8 +492,18 @@ public class HealthCheckService
         {
             var totalSegments = segments.Count;
             var missingIndex = segments.IndexOf(e.SegmentId);
-            var percentage = totalSegments > 0 ? (double)missingIndex / totalSegments * 100.0 : 0;
-            var failureDetails = $"Missing segment at index {missingIndex}/{totalSegments} ({percentage:F2}%)";
+            string failureDetails;
+            if (missingIndex >= 0)
+            {
+                var percentage = totalSegments > 0 ? (double)missingIndex / totalSegments * 100.0 : 0;
+                failureDetails = $"Missing segment at index {missingIndex}/{totalSegments} ({percentage:F2}%)";
+            }
+            else
+            {
+                // Segment ID not found in the primary segment list — likely a fallback/duplicate
+                // segment that was checked but isn't in the main SegmentIds array.
+                failureDetails = $"Missing segment '{e.SegmentId}' (not found in primary segment list of {totalSegments} entries — may be a fallback/duplicate segment)";
+            }
 
             Log.Warning("[HealthCheck] Health check failed for item {Name} (Missing Segment: {SegmentId}). {FailureDetails}. Attempting repair.",
                 davItem.Name, e.SegmentId, failureDetails);
@@ -681,6 +694,10 @@ public class HealthCheckService
             var symlinkOrStrmPath = OrganizedLinksUtil.GetLink(davItem, _configManager);
             if (symlinkOrStrmPath == null)
             {
+                await NotifyArrReplacementSearchForDeletedItemAsync(
+                    davItem,
+                    "Health check deleted an unhealthy file that no longer had a library link.",
+                    ct).ConfigureAwait(false);
                 dbClient.Ctx.Items.Remove(davItem);
                 OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
                 dbClient.Ctx.HealthCheckResults.Add(SendStatus(new HealthCheckResult()
@@ -745,7 +762,7 @@ public class HealthCheckService
                 {
                     try
                     {
-                        var mediaIds = await sonarrClient.GetMediaIds(davItem.Path);
+                        var mediaIds = await sonarrClient.GetMediaIds(symlinkOrStrmPath);
                         if (mediaIds != null && mediaIds.Value.episodeIds.Any())
                         {
                             episodeId = mediaIds.Value.episodeIds.First(); // Use the first episode ID found
@@ -764,6 +781,9 @@ public class HealthCheckService
                     {
                         var arrActionMessage = $"Successfully triggered Arr to remove file '{symlinkOrStrmPath}'{linkTargetMsg} and search for replacement.";
                         Log.Information($"[HealthCheck] {arrActionMessage}");
+                        var linkCleanupMessage = await DeleteSymlinkOrStrmIfStillPresent(symlinkOrStrmPath).ConfigureAwait(false);
+                        if (linkCleanupMessage != null)
+                            Log.Information("[HealthCheck] {LinkCleanupMessage}", linkCleanupMessage);
 
                         dbClient.Ctx.Items.Remove(davItem);
                         OrganizedLinksUtil.RemoveCacheEntry(davItem.Id);
@@ -778,7 +798,8 @@ public class HealthCheckService
                             Message = string.Join(" ", [
                                 failureReason,
                                 $"Corresponding {linkType} found within Library Dir.",
-                                arrActionMessage
+                                arrActionMessage,
+                                linkCleanupMessage
                             ]),
                             Operation = operation
                         }));
@@ -819,6 +840,10 @@ public class HealthCheckService
             }
 
             Log.Warning($"[HealthCheck] Could not find corresponding Radarr/Sonarr media-item for file: {davItem.Name}. {deleteMessage}");
+            await NotifyArrReplacementSearchForDeletedItemAsync(
+                davItem,
+                "Health check deleted an unhealthy file after Arr path-based remove/search did not match any media item.",
+                ct).ConfigureAwait(false);
             // Only delete symlinks and strm files; regular rclone mount paths must not be deleted directly.
             if (linkInfoToDelete is SymlinkAndStrmUtil.SymlinkInfo or SymlinkAndStrmUtil.StrmInfo)
                 await Task.Run(() => File.Delete(symlinkOrStrmPath)).ConfigureAwait(false);
@@ -887,6 +912,44 @@ public class HealthCheckService
             }));
             await dbClient.Ctx.SaveChangesAsync(ct).ConfigureAwait(false);
         }
+    }
+
+    private async Task NotifyArrReplacementSearchForDeletedItemAsync(DavItem davItem, string reason, CancellationToken ct)
+    {
+        if (!davItem.HistoryItemId.HasValue || !FilenameUtil.IsImportantFileType(davItem.Name)) return;
+
+        var jobName = JobNameUtil.FromDavPath(davItem.Path) ?? davItem.Name;
+        await _arrReplacementSearchService.NotifyQueueFilesDeletedAsync(
+            davItem.HistoryItemId.Value,
+            jobName,
+            [davItem.Name],
+            reason,
+            ct).ConfigureAwait(false);
+    }
+
+    private static async Task<string?> DeleteSymlinkOrStrmIfStillPresent(string symlinkOrStrmPath)
+    {
+        SymlinkAndStrmUtil.ISymlinkOrStrmInfo? currentLinkInfo;
+        try
+        {
+            currentLinkInfo = SymlinkAndStrmUtil.GetSymlinkOrStrmInfo(new FileInfo(symlinkOrStrmPath));
+        }
+        catch (Exception ex) when (ex is FileNotFoundException or DirectoryNotFoundException)
+        {
+            return null;
+        }
+
+        if (currentLinkInfo is null) return null;
+
+        var linkDescription = currentLinkInfo switch
+        {
+            SymlinkAndStrmUtil.SymlinkInfo symInfo => $"symlink '{symlinkOrStrmPath}' (target: '{symInfo.TargetPath}')",
+            SymlinkAndStrmUtil.StrmInfo strmInfo  => $"strm file '{symlinkOrStrmPath}' (target URL: '{strmInfo.TargetUrl}')",
+            _                                     => $"link file '{symlinkOrStrmPath}'"
+        };
+
+        await Task.Run(() => File.Delete(symlinkOrStrmPath)).ConfigureAwait(false);
+        return $"Deleted remaining {linkDescription} after Arr repair.";
     }
 
     private async Task SaveHealthCheckToAnalysisHistoryAsync(Guid davItemId, string fileName, string jobName, string result, string details)

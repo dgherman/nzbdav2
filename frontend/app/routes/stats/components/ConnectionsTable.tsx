@@ -81,7 +81,7 @@ function ConnectionGroup({ type, items = [] }: { type: number, items: Connection
                                     {items.map((conn, i) => (
                                         <tr key={i}>
                                             <td className="ps-5 text-muted small font-mono break-all">
-                                                {conn.details || <span className="italic opacity-50">No details</span>}
+                                                {conn.details != null ? conn.details : <span className="italic opacity-50">No details</span>}
                                             </td>
                                         </tr>
                                     ))}
@@ -97,13 +97,16 @@ function ConnectionGroup({ type, items = [] }: { type: number, items: Connection
 
 function UsageTypeBadge({ type }: { type: number }) {
     const map: Record<number, { label: string, bg: string }> = {
-        0: { label: "Unknown", bg: "secondary" },
-        1: { label: "Queue", bg: "info" },
-        2: { label: "Streaming", bg: "success" },
-        3: { label: "HealthCheck", bg: "warning" },
-        4: { label: "Repair", bg: "danger" },
-        5: { label: "BufferedStreaming", bg: "primary" }
-    };
+       0: { label: "Unlabeled", bg: "secondary" },
+       1: { label: "Queue", bg: "info" },
+       2: { label: "Streaming", bg: "success" },
+       3: { label: "HealthCheck", bg: "warning" },
+       4: { label: "Repair", bg: "danger" },
+       5: { label: "BufferedStreaming", bg: "primary" },
+       6: { label: "Analysis", bg: "info" },
+       7: { label: "QueueAnalysis", bg: "primary" },
+       8: { label: "RarProcessing", bg: "warning" }
+   };
     const info = map[type] || map[0];
     return <Badge bg={info.bg}>{info.label}</Badge>;
 }

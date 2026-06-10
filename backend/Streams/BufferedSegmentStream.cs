@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Diagnostics;
 using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
@@ -28,6 +29,36 @@ public class BufferedSegmentStream : Stream
         // if the config value is 0/negative (same failure class as the v0.7.3 pool-size crash).
         var slots = Math.Max(1, max);
         s_concurrentStreamSlots = new SemaphoreSlim(slots, slots);
+    }
+
+    // Memory-pressure throttle: when an OOM is observed in the fetch path, force GC and
+    // briefly suppress new fetches across all streams to let the heap recover. This avoids
+    // the cascading OOM storms that were observed under sustained streaming load.
+    private static long s_lastOomTicks; // DateTime.UtcNow.Ticks of last OOM event
+    private const int OomCooldownMs = 750;
+
+    private static void HandleOomPressure()
+    {
+        Interlocked.Exchange(ref s_lastOomTicks, DateTime.UtcNow.Ticks);
+        try
+        {
+            // Aggressive collect to release LOH fragments and pipe segments
+            GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+            GC.WaitForPendingFinalizers();
+        }
+        catch { /* never let GC issues kill the worker */ }
+    }
+
+    private static async Task WaitForOomCooldownAsync(CancellationToken ct)
+    {
+        var lastTicks = Interlocked.Read(ref s_lastOomTicks);
+        if (lastTicks == 0) return;
+        var elapsed = (DateTime.UtcNow - new DateTime(lastTicks, DateTimeKind.Utc)).TotalMilliseconds;
+        if (elapsed < OomCooldownMs)
+        {
+            try { await Task.Delay((int)(OomCooldownMs - elapsed), ct).ConfigureAwait(false); }
+            catch (OperationCanceledException) { throw; }
+        }
     }
 
     public static SemaphoreSlim? TryAcquireSlot()
@@ -226,6 +257,14 @@ public class BufferedSegmentStream : Stream
 
     // Track failed providers per segment for exclusion on retry
     private readonly ConcurrentDictionary<int, HashSet<int>> _failedProvidersPerSegment = new();
+
+    private sealed class SegmentFetchAttempt(int index, DateTimeOffset startTime, CancellationTokenSource cts, int workerId)
+    {
+        public int Index { get; } = index;
+        public DateTimeOffset StartTime { get; } = startTime;
+        public CancellationTokenSource Cts { get; } = cts;
+        public int WorkerId { get; } = workerId;
+    }
 
     /// <summary>
     /// Per-stream provider performance tracking with rolling window and sticky failure weight.
@@ -471,9 +510,13 @@ public class BufferedSegmentStream : Stream
     {
         try
         {
-            // Priority channel for racing stragglers or retrying preempted segments
-            var urgentChannel = Channel.CreateUnbounded<(int index, string segmentId)>(new UnboundedChannelOptions
+            // Priority channel for racing stragglers or retrying preempted segments.
+            // Keep it bounded and coalesced by segment index so slow providers can't amplify
+            // work faster than workers can drain it.
+            var urgentQueueCapacity = Math.Max(4, concurrentConnections * 2);
+            var urgentChannel = Channel.CreateBounded<(int index, string segmentId)>(new BoundedChannelOptions(urgentQueueCapacity)
             {
+                FullMode = BoundedChannelFullMode.Wait,
                 SingleReader = false,
                 SingleWriter = false // Multiple sources (monitor, workers)
             });
@@ -486,11 +529,19 @@ public class BufferedSegmentStream : Stream
                 SingleWriter = true
             });
 
-            // Track active assignments: Index -> (StartTime, Cts, WorkerId)
-            var activeAssignments = new ConcurrentDictionary<int, (DateTimeOffset StartTime, CancellationTokenSource Cts, int WorkerId)>();
+            // Track active assignments by attempt ID so duplicate races for the same segment
+            // cannot overwrite each other's cancellation/timing state.
+            var activeAssignments = new ConcurrentDictionary<Guid, SegmentFetchAttempt>();
+
+            // Track urgent jobs already queued so each segment has at most one pending urgent job.
+            var queuedUrgentIndices = new ConcurrentDictionary<int, bool>();
             
             // Track which segments are currently being raced to avoid double-racing
             var racingIndices = new ConcurrentDictionary<int, bool>();
+
+            // Lock-free segment ordering: workers write to slots, ordering task reads in order
+            var segmentSlots = new PooledSegmentData?[segmentIds.Length];
+            var nextIndexToWrite = 0;
 
             // Producer: Queue segment IDs up to effectiveSegmentCount (may be < segmentIds.Length
             // when bounded by an HTTP Range end byte to prevent over-prefetching).
@@ -530,11 +581,16 @@ public class BufferedSegmentStream : Stream
                         var stragglerTimeout = GetDynamicStragglerTimeout();
 
                         // Check if the next needed segment is active and running too long
-                        if (activeAssignments.TryGetValue(nextNeeded, out var assignment))
+                        var activeSnapshot = activeAssignments.Values.ToArray();
+                        var assignment = activeSnapshot
+                            .Where(x => x.Index == nextNeeded)
+                            .OrderBy(x => x.StartTime)
+                            .FirstOrDefault();
+                        if (assignment != null)
                         {
                             var duration = DateTimeOffset.UtcNow - assignment.StartTime;
-                            var activeCount = activeAssignments.Count;
-                            var activeIndices = string.Join(",", activeAssignments.Keys.OrderBy(k => k).Take(10));
+                            var activeCount = activeSnapshot.Length;
+                            var activeIndices = string.Join(",", activeSnapshot.Select(x => x.Index).Distinct().OrderBy(k => k).Take(10));
 
                             // Use dynamic timeout instead of fixed 3.0s
                             if (duration.TotalSeconds > stragglerTimeout && !racingIndices.ContainsKey(nextNeeded))
@@ -543,39 +599,39 @@ public class BufferedSegmentStream : Stream
                                     nextNeeded, duration.TotalSeconds, stragglerTimeout, activeCount, activeIndices);
 
                                 // Find a victim to preempt (highest index currently running)
-                                var victim = activeAssignments.Keys.DefaultIfEmpty(-1).Max();
+                                var victimAssignment = activeSnapshot
+                                    .Where(x => x.Index > nextNeeded)
+                                    .OrderByDescending(x => x.Index)
+                                    .ThenByDescending(x => x.StartTime)
+                                    .FirstOrDefault();
 
-                                if (victim > nextNeeded)
+                                if (victimAssignment != null)
                                 {
-                                    if (activeAssignments.TryGetValue(victim, out var victimAssignment))
+                                    // Record which provider failed for the stalled segment (so retry uses different provider)
+                                    var stalledContext = assignment.Cts.Token.GetContext<ConnectionUsageContext>();
+                                    var failedProviderIndex = stalledContext.DetailsObject?.CurrentProviderIndex;
+                                    if (failedProviderIndex.HasValue)
                                     {
-                                        // Record which provider failed for the stalled segment (so retry uses different provider)
-                                        var stalledContext = assignment.Cts.Token.GetContext<ConnectionUsageContext>();
-                                        var failedProviderIndex = stalledContext.DetailsObject?.CurrentProviderIndex;
-                                        if (failedProviderIndex.HasValue)
-                                        {
-                                            Log.Debug("[BufferedStream] Recording failed provider {ProviderIndex} for segment {Index}",
-                                                failedProviderIndex.Value, nextNeeded);
-                                            _failedProvidersPerSegment.AddOrUpdate(
-                                                nextNeeded,
-                                                _ => new HashSet<int> { failedProviderIndex.Value },
-                                                (_, set) => { lock (set) { set.Add(failedProviderIndex.Value); } return set; }
-                                            );
-                                        }
-
-                                        Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Preempting Segment {Victim} to race.",
-                                            nextNeeded, duration.TotalSeconds, stragglerTimeout, victim);
-
-                                        // Cancel victim to free up its worker
-                                        victimAssignment.Cts.Cancel();
-
-                                        // Re-queue victim (high priority to avoid starvation)
-                                        _ = urgentChannel.Writer.WriteAsync((victim, segmentIds[victim]), ct);
-
-                                        // Race the needed segment
-                                        _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
-                                        racingIndices.TryAdd(nextNeeded, true);
+                                        Log.Debug("[BufferedStream] Recording failed provider {ProviderIndex} for segment {Index}",
+                                            failedProviderIndex.Value, nextNeeded);
+                                        _failedProvidersPerSegment.AddOrUpdate(
+                                            nextNeeded,
+                                            _ => new HashSet<int> { failedProviderIndex.Value },
+                                            (_, set) => { lock (set) { set.Add(failedProviderIndex.Value); } return set; }
+                                        );
                                     }
+
+                                    Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Preempting Segment {Victim} to race.",
+                                        nextNeeded, duration.TotalSeconds, stragglerTimeout, victimAssignment.Index);
+
+                                    // Cancel victim to free up its worker
+                                    TryCancelAttempt(victimAssignment);
+
+                                    // Re-queue victim (high priority to avoid starvation)
+                                    await QueueUrgentSegmentAsync(victimAssignment.Index, markRacing: false, "preempted-victim").ConfigureAwait(false);
+
+                                    // Race the needed segment
+                                    await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "blocking-straggler-race").ConfigureAwait(false);
                                 }
                                 else
                                 {
@@ -597,21 +653,19 @@ public class BufferedSegmentStream : Stream
 
                                     Log.Debug("[BufferedStream] STRAGGLER SELF-CANCEL: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Cancelling stalled worker and queueing for retry.",
                                         nextNeeded, duration.TotalSeconds, stragglerTimeout);
-                                    assignment.Cts.Cancel();
-                                    _ = urgentChannel.Writer.WriteAsync((nextNeeded, segmentIds[nextNeeded]), ct);
-                                    racingIndices.TryAdd(nextNeeded, true);
+                                    TryCancelAttempt(assignment);
+                                    await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "self-cancel-straggler").ConfigureAwait(false);
                                 }
                             }
                         }
 
                         // Also check ALL active workers for stragglers (not just the blocking one)
                         // This helps detect slow providers earlier and apply cooldown
-                        foreach (var kvp in activeAssignments)
+                        foreach (var segmentAssignment in activeAssignments.Values)
                         {
-                            if (kvp.Key == nextNeeded) continue; // Already handled above
+                            if (segmentAssignment.Index == nextNeeded) continue; // Already handled above
 
-                            var segmentIndex = kvp.Key;
-                            var segmentAssignment = kvp.Value;
+                            var segmentIndex = segmentAssignment.Index;
                             var segmentDuration = DateTimeOffset.UtcNow - segmentAssignment.StartTime;
 
                             // Use a more generous timeout for non-blocking segments (1.5x)
@@ -627,10 +681,6 @@ public class BufferedSegmentStream : Stream
                 }
                 catch { /* Ignore cancellation */ }
             }, ct);
-
-            // Lock-free segment ordering: workers write to slots, ordering task reads in order
-            var segmentSlots = new PooledSegmentData?[segmentIds.Length];
-            var nextIndexToWrite = 0;
 
             // Ordering task: reads slots in order and writes to buffer channel
             var orderingTask = Task.Run(async () =>
@@ -784,8 +834,17 @@ public class BufferedSegmentStream : Stream
                                 }
                             }
 
+                            if (isUrgent)
+                            {
+                                queuedUrgentIndices.TryRemove(job.index, out _);
+                            }
+
                             // Skip if already fetched (race condition handling)
-                            if (Volatile.Read(ref segmentSlots[job.index]) != null) continue;
+                            if (Volatile.Read(ref segmentSlots[job.index]) != null)
+                            {
+                                racingIndices.TryRemove(job.index, out _);
+                                continue;
+                            }
 
                             // Create job-specific CTS for preemption (no hard timeout - straggler monitor handles stuck segments)
                             using var jobCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -816,12 +875,11 @@ public class BufferedSegmentStream : Stream
                             );
                             using var _scope = jobCts.Token.SetScopedContext(jobContext);
 
-                            var assignment = (DateTimeOffset.UtcNow, jobCts, workerId);
+                            var attemptId = Guid.NewGuid();
+                            var assignment = new SegmentFetchAttempt(job.index, DateTimeOffset.UtcNow, jobCts, workerId);
                             
                             // Track assignment
-                            // Note: If racing, multiple workers might have same index. We just overwrite or ignore.
-                            // We mainly care about having *at least one* active.
-                            activeAssignments[job.index] = assignment;
+                            activeAssignments[attemptId] = assignment;
 
                             // Track active workers for timing
                             if (EnableDetailedTiming)
@@ -846,11 +904,14 @@ public class BufferedSegmentStream : Stream
                                 // Acquire a streaming connection permit from the global pool
                                 // This ensures total streaming connections are shared across all active streams
                                 var limiter = StreamingConnectionLimiter.Instance;
-                                var hasPermit = false;
+                                StreamingConnectionLimiter.StreamingConnectionLease? permitLease = null;
                                 if (limiter != null)
                                 {
-                                    hasPermit = await limiter.AcquireAsync(TimeSpan.FromSeconds(60), jobCts.Token).ConfigureAwait(false);
-                                    if (!hasPermit)
+                                    permitLease = await limiter.AcquireLeaseAsync(
+                                        TimeSpan.FromSeconds(60),
+                                        jobCts.Token,
+                                        $"segment={job.index}").ConfigureAwait(false);
+                                    if (permitLease == null)
                                     {
                                         Log.Warning("[BufferedStream] Worker {WorkerId} timed out waiting for streaming permit for segment {Index}", workerId, job.index);
                                         continue; // Try again with next job
@@ -913,10 +974,7 @@ public class BufferedSegmentStream : Stream
                                 finally
                                 {
                                     // Release the streaming connection permit
-                                    if (hasPermit && limiter != null)
-                                    {
-                                        limiter.Release();
-                                    }
+                                    permitLease?.Dispose();
                                 }
                             }
                             catch (OperationCanceledException)
@@ -952,8 +1010,12 @@ public class BufferedSegmentStream : Stream
                             }
                             finally
                             {
-                                activeAssignments.TryRemove(job.index, out _);
-                                racingIndices.TryRemove(job.index, out _);
+                                activeAssignments.TryRemove(attemptId, out _);
+                                if (Volatile.Read(ref segmentSlots[job.index]) != null ||
+                                    (!activeAssignments.Values.Any(x => x.Index == job.index) && !queuedUrgentIndices.ContainsKey(job.index)))
+                                {
+                                    racingIndices.TryRemove(job.index, out _);
+                                }
                                 if (EnableDetailedTiming) Interlocked.Decrement(ref _activeWorkers);
                             }
                         }
@@ -998,6 +1060,46 @@ public class BufferedSegmentStream : Stream
                 var remaining = Interlocked.Exchange(ref segmentSlots[i], null);
                 remaining?.Dispose();
             }
+
+            async ValueTask<bool> QueueUrgentSegmentAsync(int index, bool markRacing, string reason)
+            {
+                if ((uint)index >= (uint)effectiveSegmentCount) return false;
+                if (Volatile.Read(ref segmentSlots[index]) != null) return false;
+
+                if (markRacing && !racingIndices.TryAdd(index, true)) return false;
+
+                if (!queuedUrgentIndices.TryAdd(index, true))
+                {
+                    if (markRacing) racingIndices.TryRemove(index, out _);
+                    return false;
+                }
+
+                try
+                {
+                    await urgentChannel.Writer.WriteAsync((index, segmentIds[index]), ct).ConfigureAwait(false);
+                    Log.Debug("[BufferedStream] URGENT QUEUED: Segment={SegmentIndex}, Reason={Reason}, Capacity={Capacity}",
+                        index, reason, urgentQueueCapacity);
+                    return true;
+                }
+                catch (Exception ex) when (ex is OperationCanceledException or ChannelClosedException)
+                {
+                    queuedUrgentIndices.TryRemove(index, out _);
+                    if (markRacing) racingIndices.TryRemove(index, out _);
+                    return false;
+                }
+            }
+
+            static void TryCancelAttempt(SegmentFetchAttempt attempt)
+            {
+                try
+                {
+                    attempt.Cts.Cancel();
+                }
+                catch (ObjectDisposedException)
+                {
+                    // Attempt finished between the monitor snapshot and cancellation.
+                }
+            }
         }
         catch (OperationCanceledException)
         {
@@ -1023,12 +1125,13 @@ public class BufferedSegmentStream : Stream
     {
         const int maxRetries = 3;
         Exception? lastException = null;
+        int? lastKnownSegmentSize = null;
         var jobName = _usageContext?.DetailsObject?.Text ?? "Unknown";
         var fetchStartTime = Stopwatch.StartNew();
 
         // Track providers that failed for this segment to exclude on retries
         var excludedProviders = new HashSet<int>();
-        var baseDetails = _usageContext?.DetailsObject;
+        var operationDetails = ct.GetContext<ConnectionUsageContext>().DetailsObject;
 
         for (int attempt = 0; attempt < maxRetries; attempt++)
         {
@@ -1042,10 +1145,14 @@ public class BufferedSegmentStream : Stream
             }
 
             // Set excluded providers before each attempt (including first attempt for straggler re-retries)
-            if (baseDetails != null)
+            if (operationDetails != null)
             {
-                baseDetails.ExcludedProviderIndices = excludedProviders.Count > 0 ? excludedProviders : null;
+                operationDetails.ExcludedProviderIndices = excludedProviders.Count > 0 ? excludedProviders : null;
             }
+
+            // Respect global memory-pressure cooldown so we don't pile new allocations
+            // on top of an already OOM-pressured heap.
+            await WaitForOomCooldownAsync(ct).ConfigureAwait(false);
 
             Stream? stream = null;
             try
@@ -1077,6 +1184,16 @@ public class BufferedSegmentStream : Stream
                     Interlocked.Add(ref s_connectionAcquireTimeMs, acquireWatch.ElapsedMilliseconds);
                 }
 
+                if (stream is YencHeaderStream segmentHeaderStream
+                    && segmentHeaderStream.Header.PartSize > 0
+                    && segmentHeaderStream.Header.PartSize <= int.MaxValue)
+                {
+                    // Even if the read later fails CRC validation, the yEnc header gives us
+                    // the exact decoded segment size. Keep it so graceful degradation can
+                    // zero-fill the failed segment without shifting downstream byte offsets.
+                    lastKnownSegmentSize = (int)segmentHeaderStream.Header.PartSize;
+                }
+
                 if (fetchHeaders && stream is YencHeaderStream yencStream && yencStream.ArticleHeaders != null)
                 {
                     FileDate = yencStream.ArticleHeaders.Date;
@@ -1086,8 +1203,12 @@ public class BufferedSegmentStream : Stream
                     }
                 }
 
-                // Rent a buffer and read the segment into it
-                var buffer = new byte[1024 * 1024];
+                // Rent a pooled buffer right-sized to the expected segment size when possible.
+                // Falls back to a 1MB initial size and doubles via re-rent if needed.
+                var initialRentSize = (_segmentSizes != null && index < _segmentSizes.Length && _segmentSizes[index] > 0)
+                    ? (int)Math.Min(_segmentSizes[index] + 4096, int.MaxValue)
+                    : Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
+                var buffer = ArrayPool<byte>.Shared.Rent(initialRentSize);
                 var totalRead = 0;
 
                 // Time network read
@@ -1103,9 +1224,10 @@ public class BufferedSegmentStream : Stream
                     {
                         if (totalRead == buffer.Length)
                         {
-                            // Resize
-                            var newBuffer = new byte[buffer.Length * 2];
+                            // Resize via ArrayPool to avoid LOH churn
+                            var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
                             Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
+                            ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                             buffer = newBuffer;
                         }
 
@@ -1166,15 +1288,17 @@ public class BufferedSegmentStream : Stream
                     }
 
                     // Clean up provider exclusions before returning
-                    if (baseDetails != null)
+                    if (operationDetails != null)
                     {
-                        baseDetails.ExcludedProviderIndices = null;
+                        operationDetails.ExcludedProviderIndices = null;
                     }
 
-                    return new PooledSegmentData(segmentId, buffer, totalRead);
+                    return new PooledSegmentData(segmentId, buffer, totalRead, pooled: true);
                 }
                 catch
                 {
+                    // Return the rented buffer on failure to avoid pool leaks
+                    ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                     throw;
                 }
             }
@@ -1185,7 +1309,7 @@ public class BufferedSegmentStream : Stream
                 lastException = ex;
 
                 // Track which provider failed so we exclude it on retry
-                var failedProviderIndex = baseDetails?.CurrentProviderIndex;
+                var failedProviderIndex = operationDetails?.CurrentProviderIndex;
                 if (failedProviderIndex.HasValue)
                 {
                     excludedProviders.Add(failedProviderIndex.Value);
@@ -1239,6 +1363,20 @@ public class BufferedSegmentStream : Stream
             {
                 throw;
             }
+            catch (OutOfMemoryException ex)
+            {
+                // OOM is special: don't blame the provider, the process is under memory pressure.
+                // Force GC, throttle, and retry without excluding the provider.
+                lastException = ex;
+                HandleOomPressure();
+                Log.Warning("[BufferedStream] OOM during fetch: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Attempt={Attempt}/{MaxRetries}. Forced GC and backing off before retry.",
+                    jobName, index, segmentIds.Length, segmentId, attempt + 1, maxRetries);
+                try
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(500 + attempt * 500), ct).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) { throw; }
+            }
             catch (Exception ex)
             {
                 if (ct.IsCancellationRequested) throw new OperationCanceledException(ex.Message, ex, ct);
@@ -1246,7 +1384,7 @@ public class BufferedSegmentStream : Stream
                 lastException = ex;
 
                 // Track which provider failed so we exclude it on retry
-                var failedProviderIndex = baseDetails?.CurrentProviderIndex;
+                var failedProviderIndex = operationDetails?.CurrentProviderIndex;
                 if (failedProviderIndex.HasValue)
                 {
                     excludedProviders.Add(failedProviderIndex.Value);
@@ -1269,9 +1407,9 @@ public class BufferedSegmentStream : Stream
         if (disableGracefulDegradation)
         {
             // Clean up provider exclusions before throwing
-            if (baseDetails != null)
+            if (operationDetails != null)
             {
-                baseDetails.ExcludedProviderIndices = null;
+                operationDetails.ExcludedProviderIndices = null;
             }
 
             throw new PermanentSegmentFailureException(index, segmentId, lastException?.Message ?? "Unknown error after all retries");
@@ -1322,6 +1460,16 @@ public class BufferedSegmentStream : Stream
             Log.Warning("[BufferedStream] Estimating segment size {Size} for segment {Index}/{Total} based on max observed segment size to allow graceful degradation.", 
                 zeroBufferSize, index, segmentIds.Length);
         }
+        else if (lastKnownSegmentSize is > 0 && index < segmentIds.Length - 1)
+        {
+            // If the segment itself was corrupt (for example yEnc CRC mismatch), we may not
+            // have any successful segment in this bounded HTTP range yet. The yEnc header was
+            // still parsed before the CRC failure and contains the decoded part size, which is
+            // exact enough to preserve file offsets while zero-filling the failed segment.
+            zeroBufferSize = lastKnownSegmentSize.Value;
+            Log.Warning("[BufferedStream] Using yEnc header size {Size} for corrupted segment {Index}/{Total} to allow graceful degradation without shifting offsets.",
+                zeroBufferSize, index, segmentIds.Length);
+        }
         else
         {
             // If we don't know the exact size, we cannot safely zero-fill without corrupting the file structure (shifting offsets).
@@ -1334,9 +1482,9 @@ public class BufferedSegmentStream : Stream
         Array.Clear(zeroBuffer, 0, zeroBufferSize);
 
         // Clean up provider exclusions before returning
-        if (baseDetails != null)
+        if (operationDetails != null)
         {
-            baseDetails.ExcludedProviderIndices = null;
+            operationDetails.ExcludedProviderIndices = null;
         }
 
         return new PooledSegmentData(segmentId, zeroBuffer, zeroBufferSize);
@@ -1361,7 +1509,8 @@ public class BufferedSegmentStream : Stream
                 ? await multiClient.GetBalancedSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false)
                 : await client.GetSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
 
-            var buffer = new byte[1024 * 1024];
+            var initialSize = Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
+            var buffer = ArrayPool<byte>.Shared.Rent(initialSize);
             var totalRead = 0;
             try
             {
@@ -1369,18 +1518,20 @@ public class BufferedSegmentStream : Stream
                 {
                     if (totalRead == buffer.Length)
                     {
-                        var newBuffer = new byte[buffer.Length * 2];
+                        var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
                         Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
+                        ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                         buffer = newBuffer;
                     }
                     var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
                     if (read == 0) break;
                     totalRead += read;
                 }
-                return new PooledSegmentData(segmentId, buffer, totalRead);
+                return new PooledSegmentData(segmentId, buffer, totalRead, pooled: true);
             }
             catch
             {
+                ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
                 throw;
             }
         }
@@ -1470,7 +1621,11 @@ public class BufferedSegmentStream : Stream
 
     public override int Read(byte[] buffer, int offset, int count)
     {
-        return ReadAsync(buffer, offset, count).GetAwaiter().GetResult();
+        // Offload the blocking wait to a dedicated Task.Run thread to avoid
+        // thread-pool starvation: the semaphore classes (PrioritizedSemaphore,
+        // ExtendedSemaphoreSlim) use RunContinuationsAsynchronously, so their
+        // continuations must be able to run on thread-pool threads.
+        return Task.Run(() => ReadAsync(buffer, offset, count)).GetAwaiter().GetResult();
     }
 
     public override bool CanRead => true;
@@ -1665,21 +1820,28 @@ public class BufferedSegmentStream : Stream
     private class PooledSegmentData : IDisposable
     {
         private byte[]? _buffer;
+        private readonly bool _pooled;
 
         public string SegmentId { get; }
         public byte[] Data => _buffer ?? Array.Empty<byte>();
         public int Length { get; }
 
-        public PooledSegmentData(string segmentId, byte[] buffer, int length)
+        public PooledSegmentData(string segmentId, byte[] buffer, int length, bool pooled = false)
         {
             SegmentId = segmentId;
             _buffer = buffer;
             Length = length;
+            _pooled = pooled;
         }
 
         public void Dispose()
         {
+            var buf = _buffer;
             _buffer = null;
+            if (buf != null && _pooled)
+            {
+                ArrayPool<byte>.Shared.Return(buf, clearArray: false);
+            }
         }
     }
 
