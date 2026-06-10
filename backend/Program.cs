@@ -59,8 +59,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-06-09-FIZZWHIRL-SYNC");
-        Log.Warning("  SYNC: 25 fixes from FizzWhirl fork — stream permits, OOM hardening, rclone, Arr replacement searches, connection stats");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-06-10-METRICS");
+        Log.Warning("  FEATURE: Prometheus /metrics endpoint (shared-stream hits/misses/entries/readers, per-pool connection gauges + circuit breaker, seek-latency histogram, .NET runtime metrics). Pool + shared-stream gauges refresh every 5s. Frontend /metrics proxy is session-authenticated; backend scrapes can require the API key via METRICS_REQUIRE_API_KEY=true. Frontend session cookie key now persists across restarts.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

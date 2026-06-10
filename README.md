@@ -116,6 +116,14 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.10.0 (2026-06-10)
+Prometheus observability, adopted from the [FizzWhirl/nzbdav2](https://github.com/FizzWhirl/nzbdav2) fork (`4adaf66`, `5c6fb1f`, `491f2a0`, `6f79d3d`) with local adaptations.
+
+*   **Feature**: Prometheus metrics endpoint at `/metrics`. Exposes shared-stream hits/misses (with miss `reason` label), active entries and active readers; per-pool live/idle/active/max connections, remaining semaphore slots, consecutive failures and circuit-breaker state (refreshed every 5s by a `PoolMetricsCollector` hosted service); a seek-latency histogram on `NzbFileStream.Seek` (`kind=cold|warm|noop|fresh`); plus the prometheus-net default .NET runtime/process metrics.
+*   **Security**: The frontend `/metrics` proxy (port 3000) requires normal session authentication. The backend endpoint (port 8080) is served before the WebDAV auth middleware so scrapers don't get challenged; set `METRICS_REQUIRE_API_KEY=true` to require the internal API key (`x-api-key` header or `?apikey=`) for direct backend scrapes.
+*   **Adaptation**: Removed the dead `path` label from the shared-stream counters (every call site passed `""`; real paths would be an unbounded-cardinality trap). Wired the `nzbdav_shared_stream_active_readers` gauge, which upstream declared but never set. Deduplicated the circuit-breaker failure threshold into a single constant.
+*   **Reliability**: When `SESSION_KEY` is unset, the frontend persists its generated cookie-signing key under `/config/data-protection/frontend-session.key` so logins survive container restarts (`SESSION_KEY_FILE` overrides the path).
+
 ## v0.9.0 (2026-06-09)
 Sync of 25 fixes from the [FizzWhirl/nzbdav2](https://github.com/FizzWhirl/nzbdav2) fork (a downstream fork of this repo). Full adoption analysis in [`docs/upstream-sync-2026-06-09-fizzwhirl.md`](./docs/upstream-sync-2026-06-09-fizzwhirl.md).
 
