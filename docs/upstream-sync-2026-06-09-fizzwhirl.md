@@ -121,6 +121,8 @@ Known limitations, accepted as-is:
 
 Skipped intermediate frontend state: an earlier FizzWhirl commit briefly forwarded `/metrics` unauthenticated through the frontend proxy (for their later-reverted Live Metrics tab); we adopted the final, session-authenticated wiring from `491f2a0` directly.
 
+Deployed and verified 2026-06-10: all pool gauges live under streaming load, seek histogram populating, frontend proxy auth intact. Scraped by Grafana Alloy on the NAS (30s, keep-allowlist that drops the auto-bridged `system_net_*` meters — per-IP `network_peer_address` label is unbounded cardinality) and remote-written to Grafana Cloud; dashboard `nzbdav2-metrics` in the Syno folder. Note: `nzbdav_shared_stream_*` stays 0 for rclone-mount playback — bounded VFS range reads bypass the shared-stream path by design (gate in `NzbFileStream.GetCombinedStream` skips it when `requestedEndByte` is set, without incrementing the miss counter).
+
 ---
 
 ## Pickup Point
