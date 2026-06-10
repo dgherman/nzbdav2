@@ -23,19 +23,19 @@ public static class SharedStreamManager
     {
         if (!s_entries.TryGetValue(davItemId, out var entry))
         {
-            AppMetrics.SharedStreamMisses.WithLabels("", "no_entry").Inc();
+            AppMetrics.SharedStreamMisses.WithLabels("no_entry").Inc();
             return null;
         }
 
         var handle = entry.TryAttachReader(startPosition);
         if (handle != null)
         {
-            AppMetrics.SharedStreamHits.WithLabels("").Inc();
+            AppMetrics.SharedStreamHits.Inc();
             Log.Debug("[SharedStreamManager] Attached to existing shared stream. DavItemId={DavItemId}, Position={Position}", davItemId, startPosition);
         }
         else
         {
-            AppMetrics.SharedStreamMisses.WithLabels("", "position_out_of_range").Inc();
+            AppMetrics.SharedStreamMisses.WithLabels("position_out_of_range").Inc();
         }
         return handle;
     }
@@ -68,17 +68,17 @@ public static class SharedStreamManager
             var handle = existing.TryAttachReader(startPosition);
             if (handle != null)
             {
-                AppMetrics.SharedStreamHits.WithLabels("").Inc();
+                AppMetrics.SharedStreamHits.Inc();
                 Log.Debug("[SharedStreamManager] Attached to existing entry (race). DavItemId={DavItemId}", davItemId);
                 return handle;
             }
             // Entry exists but can't attach (position out of range, or entry is dying)
             // Fall through to try creating a new one — the old one will evict itself
-            AppMetrics.SharedStreamMisses.WithLabels("", "existing_entry_unattachable").Inc();
+            AppMetrics.SharedStreamMisses.WithLabels("existing_entry_unattachable").Inc();
         }
         else
         {
-            AppMetrics.SharedStreamMisses.WithLabels("", "no_entry").Inc();
+            AppMetrics.SharedStreamMisses.WithLabels("no_entry").Inc();
         }
 
         // Acquire a semaphore slot
@@ -156,4 +156,15 @@ public static class SharedStreamManager
     /// Get the number of active entries (for diagnostics/debugging).
     /// </summary>
     public static int ActiveEntryCount => s_entries.Count;
+
+    /// <summary>
+    /// Refresh shared-stream gauges. Called periodically by PoolMetricsCollector;
+    /// reader counts change on every attach/detach so they are sampled rather than
+    /// updated inline at each site.
+    /// </summary>
+    public static void RefreshGauges()
+    {
+        AppMetrics.SharedStreamActiveEntries.Set(s_entries.Count);
+        AppMetrics.SharedStreamActiveReaders.Set(s_entries.Values.Sum(e => e.ActiveReaders));
+    }
 }

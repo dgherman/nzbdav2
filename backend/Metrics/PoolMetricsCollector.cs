@@ -22,6 +22,7 @@ public sealed class PoolMetricsCollector : BackgroundService
                 try
                 {
                     AppMetrics.RefreshPoolGauges();
+                    NzbWebDAV.Streams.SharedStreamManager.RefreshGauges();
                 }
                 catch (Exception ex)
                 {

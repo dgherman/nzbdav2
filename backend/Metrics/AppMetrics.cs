@@ -14,14 +14,15 @@ public static class AppMetrics
     public static readonly Counter SharedStreamHits = Prometheus.Metrics
         .CreateCounter(
             "nzbdav_shared_stream_hits_total",
-            "Number of GETs that attached to an existing shared stream.",
-            new CounterConfiguration { LabelNames = new[] { "path" } });
+            "Number of GETs that attached to an existing shared stream.");
 
+    // No per-path label: file paths are unbounded-cardinality and would create
+    // one permanent time series per streamed file.
     public static readonly Counter SharedStreamMisses = Prometheus.Metrics
         .CreateCounter(
             "nzbdav_shared_stream_misses_total",
             "Number of GETs that had to create a new stream (no shared entry, or position out of range).",
-            new CounterConfiguration { LabelNames = new[] { "path", "reason" } });
+            new CounterConfiguration { LabelNames = new[] { "reason" } });
 
     public static readonly Gauge SharedStreamActiveEntries = Prometheus.Metrics
         .CreateGauge(
