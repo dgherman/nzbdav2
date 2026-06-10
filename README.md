@@ -116,6 +116,20 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.9.0 (2026-06-09)
+Sync of 25 fixes from the [FizzWhirl/nzbdav2](https://github.com/FizzWhirl/nzbdav2) fork (a downstream fork of this repo). Full adoption analysis in [`docs/upstream-sync-2026-06-09-fizzwhirl.md`](./docs/upstream-sync-2026-06-09-fizzwhirl.md).
+
+*   **Feature (Arr replacement searches)**: New `ArrReplacementSearchService` notifies Radarr/Sonarr when a queue item fails or when the health check deletes a dead file — the item is marked failed in Arr history and a replacement search is triggered automatically, instead of the Arr silently waiting on a file that no longer exists.
+*   **Fix (memory/OOM hardening)**: Segment fetch buffers are pooled via `ArrayPool` (eliminating per-segment 1MB large-object-heap allocations), `OutOfMemoryException` during fetch now forces a GC and a global cooldown gate instead of cascading, and `BufferToEndStream` uses bounded pipe backpressure instead of unbounded buffering.
+*   **Fix (stream permit lifecycle)**: Streaming connection permits use tracked disposable leases; global operation permits are held until the returned stream is disposed; urgent segment fetch races are bounded; shared stream context is entry-scoped; per-segment worker contexts are cloned so concurrent workers no longer overwrite each other's provider attribution/exclusion state.
+*   **Perf (bounded archive prefetch)**: Ranged reads on RAR/7z multipart files now bound prefetch to the requested HTTP Range end (plus small overshoot) instead of prefetching to EOF — stops ~40MB of speculative Usenet reads per ranged request from rclone/ffprobe.
+*   **Fix (RAR header extraction load)**: RAR header probing is capped by a global connection budget (6 connections, 2 per part) so large multipart imports no longer starve streaming.
+*   **Fix (rclone compatibility)**: PROPFIND hrefs preserve the original Host header behind reverse proxies; 404 propstat blocks are stripped from PROPFIND responses (rclone v1.74.0 chokes on them); ranged GETs are hardened against corrupt yEnc segments and archive ranged reads against short reads.
+*   **Fix (connection stats)**: Connections acquired without a usage context now fall back to a descriptive `Unlabeled` label (renamed from `Unknown`) instead of showing empty; health-check connections are labeled correctly; short-lived connections no longer vanish from provider stats; provider error buffer is flushed on shutdown; `GetFileSizeAsync` yEnc header reads no longer kill the NNTP connection and the adaptive timeout respects per-provider minimums.
+*   **Fix (missing-articles stats)**: Missing PAR2 files are no longer flagged as blocking (nzbdav uses PAR2 only as a filename oracle, not for recovery); filenames are NFC-normalized when grouping summaries so unicode variants merge.
+*   **Fix (SABnzbd API)**: Zero queue/history limits are treated as unlimited, matching SABnzbd semantics.
+*   **Fix (frontend)**: WebSocket reconnects use exponential backoff instead of hammering the server; queue UI WebSocket parsing hardened against malformed frames.
+
 ## v0.8.1 (2026-05-29)
 Provider Stats card fixes (reported in [#10](https://github.com/dgherman/nzbdav2/issues/10)).
 

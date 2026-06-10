@@ -57,8 +57,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-05-29-PROVIDER-STATS");
-        Log.Warning("  FIX: Provider stats record even with affinity disabled; card moved to System Monitor");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-06-09-FIZZWHIRL-SYNC");
+        Log.Warning("  SYNC: 25 fixes from FizzWhirl fork — stream permits, OOM hardening, rclone, Arr replacement searches, connection stats");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
