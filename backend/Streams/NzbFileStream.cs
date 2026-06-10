@@ -147,6 +147,8 @@ public class NzbFileStream : Stream
     public override long Seek(long offset, SeekOrigin origin)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
+        var seekStopwatch = System.Diagnostics.Stopwatch.StartNew();
+        var hadInnerStream = _innerStream != null;
         _totalSeekCount++;
         var absoluteOffset = origin == SeekOrigin.Begin ? offset
             : origin == SeekOrigin.Current ? _position + offset
@@ -180,6 +182,9 @@ public class NzbFileStream : Stream
         if (_position == absoluteOffset)
         {
             Serilog.Log.Debug("[NzbFileStream] Seek resulted in no change. Position: {Position}", _position);
+            NzbWebDAV.Metrics.AppMetrics.SeekLatencySeconds
+                .WithLabels(hadInnerStream ? "warm" : "noop")
+                .Observe(seekStopwatch.Elapsed.TotalSeconds);
             return _position;
         }
 
@@ -187,6 +192,11 @@ public class NzbFileStream : Stream
         _innerStream?.Dispose();
         _innerStream = null;
         Serilog.Log.Debug("[NzbFileStream] Seek completed. New position: {NewPosition}", _position);
+        // "cold" = we discarded a previously-open inner stream and will need a new one;
+        // a fresh seek with no prior stream is also effectively cold but cheap.
+        NzbWebDAV.Metrics.AppMetrics.SeekLatencySeconds
+            .WithLabels(hadInnerStream ? "cold" : "fresh")
+            .Observe(seekStopwatch.Elapsed.TotalSeconds);
         return _position;
     }
 

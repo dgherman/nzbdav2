@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
+using Microsoft.AspNetCore.Http;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using NWebDav.Server;
@@ -19,6 +20,7 @@ using NzbWebDAV.WebDav;
 using NzbWebDAV.Streams;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.Websocket;
+using Prometheus;
 using Serilog;
 using Serilog.Core;
 using Serilog.Events;
@@ -57,8 +59,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-06-09-FIZZWHIRL-SYNC");
-        Log.Warning("  SYNC: 25 fixes from FizzWhirl fork — stream permits, OOM hardening, rclone, Arr replacement searches, connection stats");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-06-10-METRICS");
+        Log.Warning("  FEATURE: Prometheus /metrics endpoint (shared-stream hits/misses/entries/readers, per-pool connection gauges + circuit breaker, seek-latency histogram, .NET runtime metrics). Pool + shared-stream gauges refresh every 5s. Frontend /metrics proxy is session-authenticated; backend scrapes can require the API key via METRICS_REQUIRE_API_KEY=true. Frontend session cookie key now persists across restarts.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -249,6 +251,7 @@ class Program
             .AddSingleton<StreamingConnectionLimiter>()
             .AddHostedService<DatabaseMaintenanceService>()
             .AddHostedService<HistoryCleanupService>()
+            .AddHostedService<NzbWebDAV.Metrics.PoolMetricsCollector>()
             .AddScoped<DavDatabaseContext>()
             .AddScoped<DavDatabaseClient>()
             .AddScoped<DatabaseStore>()
@@ -306,6 +309,32 @@ class Program
 
         // run
         app.UseMiddleware<ExceptionMiddleware>();
+        // Expose Prometheus /metrics as middleware BEFORE auth so it short-circuits before
+        // UseWebdavBasicAuthentication/UseNWebDav can challenge unauthenticated callers.
+        // When METRICS_REQUIRE_API_KEY=true, require the same x-api-key/apikey used by
+        // internal frontend API calls so direct backend scrapes can be protected too.
+        if (EnvironmentUtil.IsVariableTrue("METRICS_REQUIRE_API_KEY"))
+        {
+            app.Use(async (context, next) =>
+            {
+                if (!context.Request.Path.Equals("/metrics", StringComparison.OrdinalIgnoreCase))
+                {
+                    await next().ConfigureAwait(false);
+                    return;
+                }
+
+                var apiKey = context.GetRequestApiKey();
+                if (apiKey != EnvironmentUtil.GetVariable("FRONTEND_BACKEND_API_KEY"))
+                {
+                    context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+                    await context.Response.WriteAsync("Metrics authentication required.").ConfigureAwait(false);
+                    return;
+                }
+
+                await next().ConfigureAwait(false);
+            });
+        }
+        app.UseMetricServer("/metrics");
         // ReservedConnectionsMiddleware removed - using GlobalOperationLimiter instead
         app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(30) });
         app.MapHealthChecks("/health");

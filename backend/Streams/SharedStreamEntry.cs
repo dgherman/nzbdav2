@@ -46,6 +46,7 @@ public class SharedStreamEntry : IDisposable
     private readonly object _stateLock = new();
 
     public long WritePosition => Volatile.Read(ref _writePosition);
+    public int ActiveReaders => Volatile.Read(ref _readerCount);
     public long ValidRangeStart => Math.Max(_basePosition, WritePosition - _ringBufferSize);
     public bool IsCompleted => _completed;
     public Exception? Failure => _failure;

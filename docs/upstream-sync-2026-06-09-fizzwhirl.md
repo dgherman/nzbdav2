@@ -79,7 +79,7 @@ Connection stalling + negative health index + async safety fixes; `effectiveCont
 |-------|-------------------|--------|
 | Media analysis pipeline (ffprobe smart probes, dual-point decode, DMCA handling, Step 5 deletion) | `d9ead6e`, `cdcb714`, `994833a`, `e9fed63`, +~10 | Large feature; heavy ffprobe dependency; not adopted this round |
 | Health check overhaul (quick checks, HEAD-scan fallback, debounce, DMCA repair, concurrency config) | ~25 commits | Big surface; revisit separately |
-| Prometheus `/metrics` + PoolMetricsCollector | `4adaf66`, `5c6fb1f`, `491f2a0`, `6f79d3d` | "Consider" tier — good Grafana Cloud fit, not in this batch |
+| ~~Prometheus `/metrics` + PoolMetricsCollector~~ | `4adaf66`, `5c6fb1f`, `491f2a0`, `6f79d3d` | **ADOPTED 2026-06-10** in v0.10.0 — see Addendum below |
 | Graceful-degradation cap + Truncated badge + moov-at-end detection | `d7a2c6c` saga | They flip-flopped (revert/reapply); needs scrutiny |
 | Preview player in explore modal | `51085ca` + 5 | Nice-to-have UI |
 | Settings UI reorg + UI polish series | ~20 commits | Cosmetic churn |
@@ -90,7 +90,7 @@ Connection stalling + negative health index + async safety fixes; `effectiveCont
 
 | Feature | Condition |
 |---------|-----------|
-| Prometheus `/metrics` (`4adaf66` et al.) | User wants pool/seek metrics in Grafana Cloud — natural next pick; small and self-contained |
+| ~~Prometheus `/metrics` (`4adaf66` et al.)~~ | ADOPTED 2026-06-10 (v0.10.0) — see Addendum |
 | `BackgroundTaskQueue` supervisor (`fe06886`) | If we adopt their health-check overhaul, restore the queued (non-awaited) Arr notify in HealthCheckService |
 | Multi-provider ArticleNotFound retry + `hadTransientFailure` (excluded from `034d6c2` region) | If multi-provider article retries are wanted; pairs with `a2aaef6` compact evidence persistence |
 | Their analysis-mode throttles (`db5ddaf`, `03c8446`) | Only meaningful if the media-analysis pipeline is adopted |
@@ -100,6 +100,26 @@ Connection stalling + negative health index + async safety fixes; `effectiveCont
 - FizzWhirl's tree contains our v0.8.0/v0.8.1 verbatim, so file-level diffs against them exclude our recent work — convenient for future syncs.
 - Their fix commits sit *on top of* their media-analysis/preview/health-overhaul infra (merged early in their history), so cherry-picks routinely drag in `isAnalysisMode` / `PreviewMode` / `BackgroundTaskQueue` references that must be stripped.
 - Every FizzWhirl commit bumps the `Program.cs` BUILD banner and their README changelog — these conflict on every pick and are always resolved `--ours`.
+
+---
+
+## Addendum 2026-06-10: Prometheus `/metrics` adopted (v0.10.0)
+
+Cherry-picked `4adaf66` (metrics core), `5c6fb1f` (UseMetricServer-before-auth 401 fix), `491f2a0` (frontend session-auth proxy + optional `METRICS_REQUIRE_API_KEY` backend gate), `6f79d3d` (persisted frontend session key). Only the usual banner/README conflicts; their `docs/fork-vs-upstream-analysis` doc kept deleted.
+
+Critical-read findings and adaptations (follow-up commit on top of the picks):
+
+- **Dropped the `path` label** on `nzbdav_shared_stream_{hits,misses}_total` — every call site passed `""`, and real paths would be an unbounded-cardinality trap (Grafana Cloud bills per active series).
+- **Wired `nzbdav_shared_stream_active_readers`** — declared but never set in their tree (constant 0, even at their HEAD). `SharedStreamEntry.ActiveReaders` now exposed; `SharedStreamManager.RefreshGauges()` sampled by `PoolMetricsCollector` every 5s.
+- **Deduplicated circuit-breaker threshold** — their `IsCircuitBreakerTripped => failures > 5` duplicated the magic `5` from the retry loop; extracted `CircuitBreakerFailureThreshold` const.
+
+Known limitations, accepted as-is:
+
+- Seek histogram measures time *inside* `Seek()` only; the real cold-seek cost (NNTP refetch/rebuffer) happens lazily on the next `Read()`, so `kind="cold"` ≈ stream-teardown cost, not time-to-first-byte.
+- Pool metrics registry is keyed by `PoolName` (host); two pools with the same host (dual accounts) would collide — one registration overwrites the other and disposal unregisters both. Distinct hosts today.
+- Deployment decision: `METRICS_REQUIRE_API_KEY` left **unset** (LAN-open backend `/metrics` on the NAS); the frontend proxy is session-authenticated regardless.
+
+Skipped intermediate frontend state: an earlier FizzWhirl commit briefly forwarded `/metrics` unauthenticated through the frontend proxy (for their later-reverted Live Metrics tab); we adopted the final, session-authenticated wiring from `491f2a0` directly.
 
 ---
 
