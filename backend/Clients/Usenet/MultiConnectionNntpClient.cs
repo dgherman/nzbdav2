@@ -19,6 +19,7 @@ namespace NzbWebDAV.Clients.Usenet;
 public class MultiConnectionNntpClient : INntpClient
 {
     public ProviderType ProviderType { get; }
+    public bool IsTripped => _circuitBreaker.IsTripped;
     public int LiveConnections => _connectionPool.LiveConnections;
     public int IdleConnections => _connectionPool.IdleConnections;
     public int ActiveConnections => _connectionPool.ActiveConnections;
@@ -32,6 +33,7 @@ public class MultiConnectionNntpClient : INntpClient
     private readonly ProviderErrorService? _providerErrorService;
     private readonly int _providerIndex;
     private readonly string _host;
+    private readonly ProviderCircuitBreaker _circuitBreaker;
     private readonly int _operationTimeoutSeconds;
     private DateTimeOffset _lastActivity = DateTimeOffset.UtcNow;
     private DateTimeOffset _lastLatencyRecordTime = DateTimeOffset.MinValue;
@@ -60,6 +62,7 @@ public class MultiConnectionNntpClient : INntpClient
         _providerErrorService = providerErrorService;
         _providerIndex = providerIndex;
         _host = host ?? $"Provider {providerIndex}";
+        _circuitBreaker = new ProviderCircuitBreaker(_host);
         _operationTimeoutSeconds = operationTimeoutSeconds;
         _logger = configManager != null ? new ComponentLogger(LogComponents.Usenet, configManager) : null;
 
@@ -291,11 +294,14 @@ public class MultiConnectionNntpClient : INntpClient
                                         }                );
 
                 success = true;
+                _circuitBreaker.RecordSuccess();
                 // Return a new YencHeaderStream that wraps our callback stream, preserving headers
                 return new YencHeaderStream(stream.Header, stream.ArticleHeaders, wrappedStream);
             }
             catch (Exception ex) when (ex is UsenetException or UsenetNotConnectedException or ObjectDisposedException or IOException or SocketException or TimeoutException or RetryableDownloadException)
             {
+                _circuitBreaker.RecordFailure();
+
                 // we want to replace the underlying connection in cases of NntpExceptions or login failures.
                 connectionLock.Replace();
                 connectionLock.Dispose();
@@ -414,10 +420,13 @@ public class MultiConnectionNntpClient : INntpClient
                     _lastLatencyRecordTime = DateTimeOffset.UtcNow;
                 }
 
+                _circuitBreaker.RecordSuccess();
                 return result;
             }
             catch (Exception ex) when (ex is UsenetException or UsenetNotConnectedException or ObjectDisposedException or IOException or SocketException or TimeoutException or RetryableDownloadException)
             {
+                _circuitBreaker.RecordFailure();
+
                 // we want to replace the underlying connection in cases of NntpExceptions or login failures.
                 connectionLock.Replace();
                 connectionLock.Dispose();

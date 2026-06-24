@@ -179,10 +179,18 @@ public class SharedStreamEntry : IDisposable
             if (startPosition < validStart)
                 return null;
 
-            // Position can be at or ahead of write position (reader will wait for pump)
-            // But don't let a reader attach too far ahead — they'd wait forever
-            // Allow up to writePosition (they'll wait for pump to catch up)
-            // Don't allow beyond stream length
+            // Position can be at or slightly ahead of the write frontier (the reader waits
+            // briefly for the in-order pump to reach it). But reject positions far ahead of
+            // the frontier: the pump fills the ring sequentially, so a reader that joins far
+            // ahead — e.g. a player seeking to the Matroska tail/Cues (~hundreds of MB out)
+            // to read the index before playback — would block until the pump crawled all the
+            // way there, stalling the read until it times out and the player re-opens (an
+            // endless "buffering" loop). Returning null makes the caller spin up its own
+            // stream at the seek target, which serves the tail immediately.
+            if (startPosition > WritePosition + _ringBufferSize)
+                return null;
+
+            // Don't allow beyond stream length.
             if (startPosition > _basePosition + StreamLength)
                 return null;
 

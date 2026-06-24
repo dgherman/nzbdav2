@@ -21,16 +21,16 @@ public class GetHistoryRequest
 
     public GetHistoryRequest(HttpContext context, ConfigManager configManager)
     {
-        var startParam = context.GetQueryParam("start");
-        var limitParam = context.GetQueryParam("limit");
-        var pageSizeParam = context.GetQueryParam("pageSize");
-        var nzoIdsParam = context.GetQueryParam("nzo_ids");
-        var showHiddenParam = context.GetQueryParam("show_hidden");
-        var showArchivedParam = context.GetQueryParam("show_archived");
-        var statusParam = context.GetQueryParam("status");
-        Category = context.GetQueryParam("category");
-        Search = context.GetQueryParam("search");
-        FailureReason = context.GetQueryParam("failure_reason");
+        var startParam = context.GetRequestParam("start");
+        var limitParam = context.GetRequestParam("limit");
+        var pageSizeParam = context.GetRequestParam("pageSize");
+        var nzoIdsParam = context.GetRequestParam("nzo_ids");
+        var showHiddenParam = context.GetRequestParam("show_hidden");
+        var showArchivedParam = context.GetRequestParam("show_archived");
+        var statusParam = context.GetRequestParam("status");
+        Category = context.GetRequestParam("category");
+        Search = context.GetRequestParam("search");
+        FailureReason = context.GetRequestParam("failure_reason");
         CancellationToken = context.RequestAborted;
 
         if (statusParam != null && Enum.TryParse<HistoryItem.DownloadStatusOption>(statusParam, true, out var status))

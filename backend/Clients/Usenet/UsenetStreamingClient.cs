@@ -480,10 +480,14 @@ public class UsenetStreamingClient
         string host
     )
     {
-        // Create connection pool with 2-minute idle timeout (was 30s)
-        // Longer idle timeout reduces reconnection overhead and improves throughput
-        var idleTimeout = TimeSpan.FromSeconds(120);
-        var pool = new ConnectionPool<INntpClient>(maxConnections, pooledSemaphore, connectionFactory, poolName: host, idleTimeout: idleTimeout);
+        // Long idle timeout + a small warm floor so the first stream after an idle gap
+        // doesn't pay the full cold-start (TLS handshake storm + segment starvation + an
+        // aborted first request). The 15-min idle window keeps a recent play's full
+        // working set hot across normal inter-episode gaps; the warm floor (kept alive by
+        // a 60s keepalive ping) stays hot indefinitely so even a cold start ramps gently.
+        var idleTimeout = TimeSpan.FromMinutes(15);
+        var minWarm = Math.Clamp(maxConnections / 6, 1, 8);
+        var pool = new ConnectionPool<INntpClient>(maxConnections, pooledSemaphore, connectionFactory, poolName: host, idleTimeout: idleTimeout, minWarmConnections: minWarm);
         pool.OnConnectionPoolChanged += onConnectionPoolChanged;
         connectionPoolStats.RegisterConnectionPool(providerIndex, pool);
         var args = new ConnectionPoolStats.ConnectionPoolChangedEventArgs(0, 0, maxConnections);

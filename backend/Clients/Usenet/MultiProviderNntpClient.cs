@@ -419,7 +419,12 @@ public class MultiProviderNntpClient : INntpClient
             .Prepend(affinityProvider)      // NZB-level affinity (HIGHEST priority - if not excluded)
             .Where(x => x is not null)
             .Select(x => x!)
-            .Distinct();
+            .Distinct()
+            // Circuit breaker: try healthy providers before any whose breaker has
+            // tripped. Stable sort preserves affinity/preference within each group;
+            // tripped providers are kept (not dropped) so a cooldown probe can still
+            // fire when all healthy providers are exhausted.
+            .OrderBy(x => x.IsTripped);
     }
 
     private IEnumerable<MultiConnectionNntpClient> GetBalancedProviders(CancellationToken cancellationToken = default)
@@ -558,7 +563,10 @@ public class MultiProviderNntpClient : INntpClient
             .Prepend(affinityProvider)  // NZB-level affinity takes priority
             .Where(x => x is not null)
             .Select(x => x!)
-            .Distinct();
+            .Distinct()
+            // Circuit breaker: try healthy providers before any whose breaker has
+            // tripped (stable; tripped kept as last-resort cooldown probe).
+            .OrderBy(x => x.IsTripped);
     }
 
     public Task ForceReleaseConnections(ConnectionUsageType? type = null)

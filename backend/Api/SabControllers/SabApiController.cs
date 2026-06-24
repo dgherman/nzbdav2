@@ -84,20 +84,20 @@ public class SabApiController(
                 return new AddUrlController(
                     HttpContext, dbClient, queueManager, configManager, websocketManager);
 
-            case "queue" when HttpContext.GetQueryParam("name") == "delete":
+            case "queue" when HttpContext.GetRequestParam("name") == "delete":
                 return new RemoveFromQueueController(
                     HttpContext, dbClient, queueManager, configManager, websocketManager);
-            case "queue" when HttpContext.GetQueryParam("name") == "priority":
+            case "queue" when HttpContext.GetRequestParam("name") == "priority":
                 return new ChangeQueuePriorityController(
                     HttpContext, dbClient, configManager, websocketManager);
             case "queue":
                 return new GetQueueController(
                     HttpContext, dbClient, queueManager, configManager);
 
-            case "history" when HttpContext.GetQueryParam("name") == "delete":
+            case "history" when HttpContext.GetRequestParam("name") == "delete":
                 return new RemoveFromHistoryController(
                     HttpContext, dbClient, configManager, websocketManager);
-            case "history" when HttpContext.GetQueryParam("name") == "requeue":
+            case "history" when HttpContext.GetRequestParam("name") == "requeue":
                 return new RequeueHistoryItemController(
                     HttpContext, dbClient, queueManager, configManager, websocketManager);
             case "history":

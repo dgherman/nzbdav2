@@ -40,6 +40,11 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
 
     private readonly Func<CancellationToken, ValueTask<T>> _factory;
     private readonly int _maxConnections;
+    private readonly int _minWarmConnections;
+
+    // How often the warm min-pool is pinged to keep it alive server-side. Kept
+    // shorter than typical provider idle-drop windows so the floor never goes cold.
+    private static readonly TimeSpan WarmKeepAliveInterval = TimeSpan.FromSeconds(60);
 
     /* --------------------------------- state --------------------------------------- */
 
@@ -47,6 +52,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
     private readonly CombinedSemaphoreSlim _gate;
     private readonly CancellationTokenSource _sweepCts = new();
     private readonly Task _sweeperTask; // keeps timer alive
+    private readonly Task? _warmPoolTask; // pre-warms + keeps the warm min-pool hot
 
     private int _live; // number of connections currently alive
     private int _disposed; // 0 == false, 1 == true
@@ -73,7 +79,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
         ExtendedSemaphoreSlim pooledSemaphore,
         Func<CancellationToken, ValueTask<T>> connectionFactory,
         string poolName = "Unknown",
-        TimeSpan? idleTimeout = null)
+        TimeSpan? idleTimeout = null,
+        int minWarmConnections = 0)
     {
         if (maxConnections <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxConnections));
@@ -84,8 +91,11 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
         PoolName = poolName;
 
         _maxConnections = maxConnections;
+        _minWarmConnections = Math.Clamp(minWarmConnections, 0, maxConnections);
         _gate = new CombinedSemaphoreSlim(maxConnections, pooledSemaphore);
         _sweeperTask = Task.Run(SweepLoop); // background idle-reaper
+        if (_minWarmConnections > 0)
+            _warmPoolTask = Task.Run(WarmPoolLoop); // pre-warm + keepalive
         AppMetrics.RegisterPool(this);
     }
 
@@ -434,10 +444,21 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
         var survivors = new List<Pooled>();
         var isAnyConnectionFreed = false;
 
-        // Sweep idle connections
+        // Drain all idle connections so we can apply the warm floor before reaping.
+        var drained = new List<Pooled>();
         while (_idleConnections.TryPop(out var item))
+            drained.Add(item);
+
+        // Freshest first, so the warm floor keeps the most-recently-used connections.
+        drained.Sort((a, b) => b.LastTouchedMillis.CompareTo(a.LastTouchedMillis));
+
+        for (var i = 0; i < drained.Count; i++)
         {
-            if (item.IsExpired(IdleTimeout, now))
+            var item = drained[i];
+            // Keep the freshest _minWarmConnections regardless of age — they are the
+            // hot floor that lets a stream start without paying full cold-start.
+            var isWarmFloor = i < _minWarmConnections;
+            if (!isWarmFloor && item.IsExpired(IdleTimeout, now))
             {
                 await DisposeConnectionAsync(item.Connection).ConfigureAwait(false);
                 Interlocked.Decrement(ref _live);
@@ -449,7 +470,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
             }
         }
 
-        // Preserve original LIFO order.
+        // Preserve original LIFO order (freshest ends up on top of the stack).
         for (int i = survivors.Count - 1; i >= 0; i--)
             _idleConnections.Push(survivors[i]);
 
@@ -492,6 +513,108 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
 
         if (isAnyConnectionFreed)
             TriggerConnectionPoolChangedEvent();
+    }
+
+    /* =================== warm min-pool (pre-warm + keepalive) ====================== */
+
+    // Keeps a small number of connections hot so a stream that starts after an idle
+    // gap does not pay the full cold-start (TLS handshake storm + segment starvation +
+    // an aborted first request). Pre-warms once on startup, then periodically pings the
+    // floor so providers don't drop the connections, and refills any that were lost.
+    private async Task WarmPoolLoop()
+    {
+        // Initial pre-warm. Failures (e.g. provider down at boot) self-heal on later ticks.
+        try
+        {
+            await EnsureWarmAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Serilog.Log.Debug("[ConnectionPool][{PoolName}] Initial pre-warm failed: {Error}", PoolName, ex.Message);
+        }
+
+        try
+        {
+            using var timer = new PeriodicTimer(WarmKeepAliveInterval);
+            while (await timer.WaitForNextTickAsync(_sweepCts.Token).ConfigureAwait(false))
+                await KeepWarmAsync().ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            /* normal on disposal */
+        }
+    }
+
+    private async Task KeepWarmAsync()
+    {
+        if (_minWarmConnections <= 0 || Volatile.Read(ref _disposed) == 1) return;
+
+        // Ping up to _minWarmConnections idle connections to keep them alive server-side
+        // and refresh their idle clock so the sweeper won't reap them.
+        var refreshed = new List<Pooled>();
+        while (refreshed.Count < _minWarmConnections && _idleConnections.TryPop(out var item))
+        {
+            if (item.Connection is INntpClient client)
+            {
+                try
+                {
+                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                    using var _ = cts.Token.SetScopedContext(
+                        new ConnectionUsageContext(ConnectionUsageType.HealthCheck, "Warm-pool keepalive"));
+                    await client.DateAsync(cts.Token).ConfigureAwait(false);
+                    refreshed.Add(new Pooled(item.Connection, Environment.TickCount64));
+                }
+                catch (Exception ex)
+                {
+                    Serilog.Log.Debug("[ConnectionPool][{PoolName}] Warm keepalive ping failed, discarding: {Error}", PoolName, ex.Message);
+                    await DisposeConnectionSafeAsync(item.Connection, "warm keepalive failed").ConfigureAwait(false);
+                    Interlocked.Decrement(ref _live);
+                }
+            }
+            else
+            {
+                refreshed.Add(item); // non-NNTP connection: can't ping, keep as-is
+            }
+        }
+
+        foreach (var p in refreshed)
+            _idleConnections.Push(p);
+
+        // Refill the floor if keepalive discarded some or the pool was drained between ticks.
+        await EnsureWarmAsync().ConfigureAwait(false);
+        TriggerConnectionPoolChangedEvent();
+    }
+
+    private async Task EnsureWarmAsync()
+    {
+        if (_minWarmConnections <= 0) return;
+
+        // Top up idle connections to the warm floor. Idle connections hold no gate
+        // permit, so this never blocks borrowers; the _live guard keeps us within the
+        // provider's connection cap.
+        while (Volatile.Read(ref _disposed) == 0
+               && _idleConnections.Count < _minWarmConnections
+               && Volatile.Read(ref _live) < _maxConnections)
+        {
+            try
+            {
+                using var linked = CancellationTokenSource.CreateLinkedTokenSource(_sweepCts.Token);
+                using var _ = linked.Token.SetScopedContext(
+                    new ConnectionUsageContext(ConnectionUsageType.HealthCheck, "Warm-pool pre-warm"));
+                var conn = await _factory(linked.Token).ConfigureAwait(false);
+                Interlocked.Increment(ref _live);
+                _idleConnections.Push(new Pooled(conn, Environment.TickCount64));
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Debug("[ConnectionPool][{PoolName}] Warm-up connection failed: {Error}", PoolName, ex.Message);
+                break; // retry on the next keepalive tick
+            }
+        }
     }
 
     /* ------------------------- dispose helpers ------------------------------------ */
@@ -542,6 +665,18 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
         catch (OperationCanceledException)
         {
             /* ignore */
+        }
+
+        if (_warmPoolTask != null)
+        {
+            try
+            {
+                await _warmPoolTask.ConfigureAwait(false); // await clean warm-loop exit
+            }
+            catch (OperationCanceledException)
+            {
+                /* ignore */
+            }
         }
 
         // Drain and dispose cached items.

@@ -14,10 +14,10 @@ public class GetQueueRequest
 
     public GetQueueRequest(HttpContext context)
     {
-        var startParam = context.GetQueryParam("start");
-        var limitParam = context.GetQueryParam("limit");
-        Category = context.GetQueryParam("category");
-        Search = context.GetQueryParam("search");
+        var startParam = context.GetRequestParam("start");
+        var limitParam = context.GetRequestParam("limit");
+        Category = context.GetRequestParam("category");
+        Search = context.GetRequestParam("search");
         CancellationToken = context.RequestAborted;
 
         if (startParam is not null)
