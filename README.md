@@ -116,6 +116,9 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.1 (2026-07-06)
+- **Fix**: Latency check no longer storms unreachable providers. A failing provider previously fired an unthrottled ping every 10s (the throttle only advanced on a *successful* ping) with no single-flight guard, which could wedge the backend on reboot cold-start — unresponsive `/health`, `unhealthy` container, and a restart loop. The per-provider latency check now runs at a fixed ~45s cadence with a single-flight guard (`LatencyCheckGate`).
+
 ## v0.11.0 (2026-06-24)
 Three upstream cherry-picks (per-provider circuit breaker, SAB form-body params, `TZ` support) plus two fork-original streaming fixes for slow playback start. Upstream adoption analysis in [`docs/upstream-sync-2026-06-23.md`](./docs/upstream-sync-2026-06-23.md).
 
