@@ -38,6 +38,8 @@ public class MultiConnectionNntpClient : INntpClient
     private DateTimeOffset _lastActivity = DateTimeOffset.UtcNow;
     private DateTimeOffset _lastLatencyRecordTime = DateTimeOffset.MinValue;
     private readonly Timer? _latencyMonitorTimer;
+    // Throttle + single-flight for CheckLatency (prevents the latency-check storm).
+    private readonly LatencyCheckGate _latencyGate = new(TimeSpan.FromSeconds(45));
     private readonly ComponentLogger? _logger;
 
     public long AverageLatency => _bandwidthService?.GetAverageLatency(_providerIndex) ?? 0;
@@ -89,34 +91,30 @@ public class MultiConnectionNntpClient : INntpClient
 
     private void CheckLatency(object? state)
     {
-        if (DateTimeOffset.UtcNow - _lastLatencyRecordTime <= TimeSpan.FromSeconds(45)) return;
-        
-        try
+        // Fixed-cadence throttle + single-flight. Prevents the latency-check storm:
+        // a failing provider previously fired an unthrottled ping every 10s because
+        // the old throttle only advanced on a successful ping (_lastLatencyRecordTime).
+        if (!_latencyGate.TryBegin(DateTimeOffset.UtcNow)) return;
+
+        Task.Run(async () =>
         {
-            // We can't easily wait for this in a void timer callback, but we can fire and forget
-            // However, we want to ensure we don't pile up checks if they are slow.
-            // Since DateAsync uses connection pool, it will just wait/timeout if busy.
-            // We use a separate async void wrapper or Task.Run to handle the async nature.
-            Task.Run(async () =>
+            try
             {
-                try
-                {
-                    // Use a short timeout for the ping
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-                    // Set context to Analysis so it's clear it's a provider health check/ping
-                    using var _ = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Analysis, "Latency Check"));
-                    await DateAsync(cts.Token).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    _logger?.Debug("Latency check (ping) failed for provider {Host}: {Error}", _host, ex.Message);
-                }
-            });
-        }
-        catch (Exception ex)
-        {
-            _logger?.Error(ex, "Error initiating latency check");
-        }
+                // Use a short timeout for the ping
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                // Set context to Analysis so it's clear it's a provider health check/ping
+                using var _ = cts.Token.SetScopedContext(new ConnectionUsageContext(ConnectionUsageType.Analysis, "Latency Check"));
+                await DateAsync(cts.Token).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                _logger?.Debug("Latency check (ping) failed for provider {Host}: {Error}", _host, ex.Message);
+            }
+            finally
+            {
+                _latencyGate.End(); // release single-flight even if the ping threw
+            }
+        });
     }
 
     public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken cancellationToken)
