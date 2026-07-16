@@ -1,5 +1,13 @@
 # OOM investigation — handoff (2026-07-16)
 
+> **Resolved in v0.11.5.** The root cause was **unbounded prefetch**, not an `ArrayPool`
+> pathology. Fetch workers parked completed ~1MB buffers in `segmentSlots` (sized to the whole
+> file) with no gate tied to the reader, so the resident set scaled with **file size** rather than
+> with `bufferSegmentCount`. The pool was reusing correctly the whole time: distinct arrays (303)
+> tracked the peak working set (299) almost exactly. See the "How it actually resolved" section at
+> the bottom. The rest of this document is preserved as the state of the hunt before the fix —
+> including the fourth wrong theory, which this document itself proposed.
+
 State of the hunt for the streaming OOM that kills the backend with
 `Internal CLR error (0x80131506)` during large-file playback.
 
@@ -159,3 +167,87 @@ Prints an ALLOCATION block (total allocated, alloc per MB read, Gen0/1/2, heap n
 
 **Two caveats:** it has no websocket (so it cannot model the relay), and it runs a **single**
 provider (so it cannot model the 7× fan-out). Neither limitation is fixed.
+
+## How it actually resolved (v0.11.5)
+
+The fourth theory — the one this document proposed above — was also wrong, and wrong in the same
+way as the first three: it was inferred from reading code, and it named the pool as the culprit.
+
+**The pool was fine.** Instrumenting the rent path (`SegmentBufferPoolDiagnostics`, set
+`NZBDAV_POOL_DIAG=1`) with rents, returns, distinct array identities and the peak checked-out count
+settled it in one run:
+
+```
+Rents:                   598
+Returns:                 307
+Peak checked out:        299   <- working set the pool must satisfy
+Distinct arrays:         303   <- fresh allocations
+Pool reuse rate:       49.3%
+```
+
+Distinct arrays (303) ≈ peak checked out (299). The pool allocated **one array per slot of the
+working set and reused it thereafter** — ideal behaviour. There was no trim loop, no bucket
+overflow, no TLS problem. `Rent` "missing on every segment" in the EventPipe trace was the pool
+correctly filling a working set that was ~300 buffers wide.
+
+A finalizer counting segments collected while still holding a buffer reported **0**: nothing
+leaked either. The 291 unreturned buffers were simply **still checked out** — alive, referenced,
+sitting in stream channels and slots.
+
+### The actual cause
+
+The backpressure chain has a hole:
+
+```
+producer -> segmentQueue(60) -> workers(30) -> segmentSlots(UNBOUNDED, sized to the whole file)
+         -> orderingTask -> _bufferChannel(60) -> reader
+```
+
+`_bufferChannel` bounds only the **ordering task**, which is *downstream* of the slots. Nothing
+tied the fetch rate to the read rate, so the workers raced to the end of the file, each completed
+segment parking a ~1MB pooled buffer in a slot. **Resident memory scaled with file size, not with
+`bufferSegmentCount`.** The comment at the channel construction ("250 segments = ~500MB") was
+describing a bound that did not exist.
+
+Proof, as a unit test (`BufferedSegmentStreamPrefetchWindowTests`): with the reader stopped after
+**one** segment, the fetchers pulled **500 of 500** segments anyway.
+
+### The fix
+
+The producer holds a segment back until the reader is within `bufferSegmentCount + connections` of
+needing it. `_nextIndexToRead` is always inside the window, so the segment the reader is waiting on
+can never be gated.
+
+| measurement (mock harness, 30 connections) | before | after |
+| --- | --- | --- |
+| peak buffers resident, 200 MB file (293 segments) | 299 — *the whole file* | 179 |
+| peak buffers resident, 400 MB | **OutOfMemoryException** | 183 |
+| peak buffers resident, 1000 MB | — | 185 |
+| LOH after last GC, 200 MB | 376 MB | 238 MB |
+| allocation per MB read, 200 MB | 2.8 MB | 1.9 MB |
+| segments fetched to deliver 293 | 427 | 294 |
+
+Peak resident is **flat across 200/400/1000 MB** — memory is now a function of configuration, not
+of file length. That flatness is the result; the LOH reduction is a side effect of it.
+
+### What is still open
+
+- **Throughput.** Harness sequential speed reads ~13 MB/s after vs ~23 MB/s before. The comparison
+  is confounded and the harness is a poor instrument for it: ~99% of fetch time there is connection
+  acquire (**#18**), the mock provider's breaker trips ~28 times per run on **baseline** too, and
+  the run-to-run spread is 7.6–34.1 MB/s. The baseline bought its number by fetching 1.43× the
+  segments and holding the whole file in RAM — the bug itself. **#18 is the real throughput
+  limiter** and is untouched.
+- **Window vs memory tradeoff.** The window costs `window × 1 MB` per live stream (~90 MB at 30
+  connections), and each buffer is 1 MB serving ~700 KB because 720,896 rounds up to
+  `ArrayPool`'s 1 MB bucket. Right-sizing that is worth ~30% and is not done.
+- **Not verified on the NAS.** The harness models neither the websocket relay nor the 7× provider
+  fan-out. The mechanism (memory ∝ file size) is provider-count-independent, but the numbers above
+  are harness numbers.
+
+### The lesson, again
+
+Four theories, four wrong, all from reading code. The measurements were right every time. The one
+that cracked it took ~20 lines of counters. **Instrument the thing before theorising about it** —
+and note that "the call site is identified" is not the same as "the cause is identified": the
+allocation trace named the exact line, and the line was innocent.
