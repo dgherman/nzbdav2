@@ -15,9 +15,18 @@ there is no headroom, and an allocation failing inside a finalizer produces the 
 It is **not** a leak, and it is **not** the connection-pool stats event that #14 was reopened to
 correct.
 
-Unexplained and the thing to chase: **~7 MB of LOH garbage per MB streamed** (~109 MB/s LOH against
-~15 MB/s delivered). Segments are ~700 KB and the LOH threshold is 85,000 bytes, so every
-segment-sized buffer is an LOH allocation by definition — but 7× amplification is not accounted for.
+**The call site is now identified** (see #19 for the trace). `ArrayPool<byte>.Shared.Rent` at
+`BufferedSegmentStream.cs:1236`, inside `FetchSegmentWithRetryAsync`, **misses on roughly every
+segment** and allocates a fresh 1 MB LOH array instead of reusing one — 272+ MB over 272+ allocations
+of exactly 1 MB for ~286 segments. The stack frame is `AllocateNewArrayWorker` *under*
+`SharedArrayPool.Rent`, so the pool is providing essentially no reuse.
+
+**It reproduces in the mock harness**, which matches the NAS signature (70.7% LOH vs 71%) with no
+websocket and a single provider. The OOM can be investigated with no NAS access at all.
+
+Remaining question: *why* the pool misses. Candidates in #19 — trim-under-memory-pressure feedback
+loop, bucket capacity vs 30-way concurrency, or cross-thread rent/return defeating the TLS slot.
+Note the harness has no heap limit and still misses, so trimming is not the whole story.
 
 ## Three wrong diagnoses, and why each survived
 
@@ -105,6 +114,34 @@ ssh -o RequestTTY=no -o RemoteCommand=none syno 'sudo /usr/local/bin/docker ...'
   seek stacks a new full-width stream onto a pool the outgoing stream still holds. Worker timeouts
   from acquire starvation then call `RecordFailure()`, so local contention trips the *provider's*
   breaker for up to 300s. NAS shape (25/stream, 30 total) has the same overlap.
+
+## Capturing an allocation profile (this is how the call site was found)
+
+`dotnet-gcdump` is the **wrong tool** — it triggers a blocking Gen2 and captures *live* objects, so
+all the garbage vanishes before it looks and it shows only the ~1.15 GB floor. It answers "what is
+retained", and nothing is retained.
+
+Use EventPipe's `GCAllocationTick` (fires every ~100 KB, carries the type name and the LOH flag). No
+tool needs to attach — it is startup env vars, so it works in a throwaway harness container:
+
+```
+DOTNET_EnableEventPipe=1
+DOTNET_EventPipeOutputPath=/config/trace.nettrace
+DOTNET_EventPipeConfig=Microsoft-Windows-DotNETRuntime:1:5    # GC keyword, Verbose
+```
+
+Analyse with TraceEvent (`Microsoft.Diagnostics.Tracing.TraceEvent`):
+
+```csharp
+var etlx = TraceLog.CreateFromEventPipeDataFile(path);   // stacks live on TraceLog,
+using var traceLog = new TraceLog(etlx);                 // NOT on raw EventPipeEventSource
+var source = traceLog.Events.GetSource();
+source.Clr.GCAllocationTick += d => { /* d.AllocationKind, d.TypeName, d.CallStack() */ };
+source.Process();
+```
+
+A ~200 MB run produces an ~11 MB trace. Match the tool's arch to the image
+(`aka.ms/dotnet-trace/linux-musl-arm64` for a local Apple Silicon build; `-x64` for the NAS).
 
 ## Benchmark harness
 
