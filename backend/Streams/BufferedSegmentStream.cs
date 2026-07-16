@@ -39,18 +39,19 @@ public class BufferedSegmentStream : Stream, ITouchableStream
 
     private static void HandleOomPressure()
     {
-        var now = DateTime.UtcNow.Ticks;
-        var previous = Interlocked.Exchange(ref s_lastOomTicks, now);
-
-        // Single-flight the collection. An OOM hits many workers at once, and each one stacking its own
-        // blocking, compacting gen2 collect turns memory pressure into a stall. The first worker through
-        // collects for everyone; the rest just observe the cooldown (which is still refreshed above).
-        if (previous != 0 && new TimeSpan(now - previous).TotalMilliseconds < OomCooldownMs)
-            return;
-
+        Interlocked.Exchange(ref s_lastOomTicks, DateTime.UtcNow.Ticks);
         try
         {
-            // Aggressive collect to release LOH fragments and pipe segments
+            // Aggressive collect to release LOH fragments and pipe segments.
+            //
+            // Every OOM collects — deliberately NOT single-flighted, however wasteful the duplicate
+            // collections look. An OOM storm hits many workers within the same second, and each worker
+            // is about to re-rent a ~1MB segment buffer the moment it returns here. Skipping the collect
+            // for the workers that arrive behind the first one sends them straight back into allocation
+            // against a heap that has not been compacted yet, which turns a survivable blip into a
+            // cascade. Tried single-flighting this on 2026-07-16; it took the NAS from a recoverable
+            // OOM to a fatal one (the runtime died formatting an exception message it could not
+            // allocate). The stall from repeated blocking collects is the price of recovery.
             GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
             GC.WaitForPendingFinalizers();
         }
@@ -1423,8 +1424,25 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             }
             finally
             {
+                // Disposal must never throw out of here. An exception raised in a finally replaces the
+                // one being handled and escapes the whole method — past the OutOfMemoryException catch
+                // above and past graceful degradation — so the worker's outer handler aborts the entire
+                // stream over a single segment. That is not theoretical: under memory pressure the
+                // dispose chain allocates (the connection-pool stats event builds a string), so the OOM
+                // that the retry loop was about to absorb instead came out of this finally and killed
+                // playback outright. Swallow it; the connection is torn down regardless.
                 if (stream != null)
-                    await stream.DisposeAsync().ConfigureAwait(false);
+                {
+                    try
+                    {
+                        await stream.DisposeAsync().ConfigureAwait(false);
+                    }
+                    catch (Exception disposeEx)
+                    {
+                        Log.Debug("[BufferedStream] Error disposing segment stream for segment {Index}: {Error}",
+                            index, disposeEx.Message);
+                    }
+                }
             }
         }
 
@@ -1563,8 +1581,20 @@ public class BufferedSegmentStream : Stream, ITouchableStream
         }
         finally
         {
+            // See FetchSegmentWithRetryAsync: a throw from a finally escapes past every handler and
+            // aborts the stream. Disposal failures are never worth that.
             if (stream != null)
-                await stream.DisposeAsync().ConfigureAwait(false);
+            {
+                try
+                {
+                    await stream.DisposeAsync().ConfigureAwait(false);
+                }
+                catch (Exception disposeEx)
+                {
+                    Log.Debug("[BufferedStream] Error disposing fallback segment stream for segment {Index}: {Error}",
+                        index, disposeEx.Message);
+                }
+            }
         }
     }
 

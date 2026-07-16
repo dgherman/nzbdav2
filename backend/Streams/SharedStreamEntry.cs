@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Serilog;
 
 namespace NzbWebDAV.Streams;
@@ -38,6 +39,12 @@ public class SharedStreamEntry : IDisposable
     private Timer? _graceTimer;
     private Task? _pumpTask;
     private int _cleanedUp; // 0 = not yet, 1 = done. Guards CleanupResources against running twice.
+
+    // How long the pump will keep a backpressured inner stream alive while no reader consumes.
+    // Long enough for a real pause, short enough that a reader which silently went away releases
+    // its buffers rather than pinning them for the life of the process.
+    private const int MaxPausedTouchSeconds = 600;
+    private long _backpressureSinceTimestamp = Stopwatch.GetTimestamp();
 
     // Per-reader position tracking for backpressure
     private readonly ConcurrentDictionary<int, long> _readerPositions = new();
@@ -119,6 +126,9 @@ public class SharedStreamEntry : IDisposable
     internal void UpdateReaderPosition(int handleId, long position)
     {
         _readerPositions[handleId] = position;
+        // A reader is demonstrably alive, so the paused-touch budget starts over. Only a reader that
+        // never advances again can exhaust it.
+        Volatile.Write(ref _backpressureSinceTimestamp, Stopwatch.GetTimestamp());
         // Signal pump that a reader advanced (may release backpressure)
         Interlocked.Exchange(ref _readerAdvancedTcs, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
     }
@@ -319,8 +329,15 @@ public class SharedStreamEntry : IDisposable
                     // Readers are attached but not consuming — a paused player. Keep the inner stream's
                     // idle watchdog at bay: it only sees reads, and this pump has deliberately stopped
                     // reading. Without this the workers self-cancel after 60s and resume pays a full
-                    // cold rebuild. A genuinely orphaned stream has no readers and never reaches here.
-                    (_innerStream as ITouchableStream)?.Touch();
+                    // cold rebuild.
+                    //
+                    // Bounded, because "a reader is attached" is weaker evidence than it looks: the
+                    // watchdog exists for clients that vanished without the server noticing (a
+                    // disconnect that never propagated back through a reverse proxy), and such a reader
+                    // stays attached forever. Holding the stream open for it would pin its buffers for
+                    // good. A real paused player resumes well inside this window; a ghost gets reaped.
+                    if (Stopwatch.GetElapsedTime(Volatile.Read(ref _backpressureSinceTimestamp)).TotalSeconds < MaxPausedTouchSeconds)
+                        (_innerStream as ITouchableStream)?.Touch();
 
                     // Pump would overwrite data the slowest reader hasn't consumed — wait
                     try
