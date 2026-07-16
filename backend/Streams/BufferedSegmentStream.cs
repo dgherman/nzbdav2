@@ -17,7 +17,7 @@ namespace NzbWebDAV.Streams;
 /// High-performance buffered stream that maintains a read-ahead buffer of segments
 /// for smooth, consistent streaming performance.
 /// </summary>
-public class BufferedSegmentStream : Stream
+public class BufferedSegmentStream : Stream, ITouchableStream
 {
     // Concurrent stream cap — limits how many BufferedSegmentStreams can exist simultaneously
     private static volatile SemaphoreSlim s_concurrentStreamSlots = new(2, 2);
@@ -39,7 +39,15 @@ public class BufferedSegmentStream : Stream
 
     private static void HandleOomPressure()
     {
-        Interlocked.Exchange(ref s_lastOomTicks, DateTime.UtcNow.Ticks);
+        var now = DateTime.UtcNow.Ticks;
+        var previous = Interlocked.Exchange(ref s_lastOomTicks, now);
+
+        // Single-flight the collection. An OOM hits many workers at once, and each one stacking its own
+        // blocking, compacting gen2 collect turns memory pressure into a stall. The first worker through
+        // collects for everyone; the rest just observe the cooldown (which is still refreshed above).
+        if (previous != 0 && new TimeSpan(now - previous).TotalMilliseconds < OomCooldownMs)
+            return;
+
         try
         {
             // Aggressive collect to release LOH fragments and pipe segments
@@ -161,6 +169,14 @@ public class BufferedSegmentStream : Stream
 
     public int BufferedCount => _bufferedCount;
 
+    /// <summary>
+    /// Marks the stream as alive without reading, holding off the idle-timeout self-cancel.
+    /// Used by SharedStreamEntry's pump while it is paused on ring-buffer backpressure with readers
+    /// still attached — a paused player is not an orphaned stream, and tearing the workers down there
+    /// forces a cold rebuild (connection ramp + buffer refill) on resume.
+    /// </summary>
+    public void Touch() => Volatile.Write(ref _lastReadTimestamp, Stopwatch.GetTimestamp());
+
     // Detailed timing metrics (only collected when EnableDetailedTiming = true)
     private long _totalFetchTimeMs;
     private long _totalDecodeTimeMs;
@@ -245,7 +261,10 @@ public class BufferedSegmentStream : Stream
     private readonly long[]? _segmentSizes;
     private readonly Dictionary<int, string[]>? _segmentFallbacks;
     private readonly int _segmentIndexOffset;
-    private readonly List<(int Index, string SegmentId)> _corruptedSegments = new();
+    // Concurrent: written from worker threads during graceful degradation. A DMCA'd file fails many
+    // segments at once across workers, and a plain List would corrupt or throw under that exact load —
+    // aborting the stream precisely when degradation is supposed to keep it alive.
+    private readonly ConcurrentBag<(int Index, string SegmentId)> _corruptedSegments = new();
     private int _lastSuccessfulSegmentSize = 0;
 
     // Per-stream provider scoring for cooldown system
@@ -913,14 +932,21 @@ public class BufferedSegmentStream : Stream
                                         $"segment={job.index}").ConfigureAwait(false);
                                     if (permitLease == null)
                                     {
-                                        Log.Warning("[BufferedStream] Worker {WorkerId} timed out waiting for streaming permit for segment {Index}", workerId, job.index);
-                                        continue; // Try again with next job
+                                        Log.Warning("[BufferedStream] Worker {WorkerId} timed out waiting for streaming permit for segment {Index}. Re-queueing.", workerId, job.index);
+                                        // This job was already taken off the queue, so dropping it here would strand the
+                                        // ordering task at this index until the idle watchdog tore the whole stream down.
+                                        // The straggler monitor cannot rescue it either — the assignment is gone by then.
+                                        await QueueUrgentSegmentAsync(job.index, markRacing: false, "permit-timeout").ConfigureAwait(false);
+                                        continue;
                                     }
                                 }
 
                                 try
                                 {
-                                    // Track fetch timing for both detailed timing stats and dynamic straggler timeout
+                                    // Whole-wrapper timing: retries and their backoff included, which is what
+                                    // the "total fetch phase" benchmark counters are meant to report. The
+                                    // dynamic straggler timeout is fed separately from inside the retry loop,
+                                    // per successful attempt, so backoff sleeps cannot inflate it.
                                     var fetchWatch = Stopwatch.StartNew();
 
                                     var segmentData = await FetchSegmentWithRetryAsync(job.index, job.segmentId, segmentIds, client, jobCts.Token).ConfigureAwait(false);
@@ -933,9 +959,6 @@ public class BufferedSegmentStream : Stream
                                         Interlocked.Add(ref _totalFetchTimeMs, fetchTimeMs);
                                         Interlocked.Add(ref s_totalFetchTimeMs, fetchTimeMs);
                                     }
-
-                                    // Track successful fetch time for dynamic straggler timeout calculation
-                                    TrackSuccessfulFetchTime(fetchTimeMs);
 
                                     // Record provider success for per-stream scoring
                                     // We need to get the provider index from the context if available
@@ -1127,7 +1150,6 @@ public class BufferedSegmentStream : Stream
         Exception? lastException = null;
         int? lastKnownSegmentSize = null;
         var jobName = _usageContext?.DetailsObject?.Text ?? "Unknown";
-        var fetchStartTime = Stopwatch.StartNew();
 
         // Track providers that failed for this segment to exclude on retries
         var excludedProviders = new HashSet<int>();
@@ -1154,6 +1176,12 @@ public class BufferedSegmentStream : Stream
             // on top of an already OOM-pressured heap.
             await WaitForOomCooldownAsync(ct).ConfigureAwait(false);
 
+            // Times this attempt's real work only — connection acquire plus network read. Deliberately
+            // started after the backoff and OOM waits above: those sleeps are not fetch cost, and
+            // folding them in would inflate the dynamic straggler timeout right after a rough patch,
+            // exactly when it should stay tight.
+            var attemptWatch = Stopwatch.StartNew();
+
             Stream? stream = null;
             try
             {
@@ -1173,10 +1201,6 @@ public class BufferedSegmentStream : Stream
                 {
                     stream = await client.GetSegmentStreamAsync(segmentId, fetchHeaders, ct).ConfigureAwait(false);
                 }
-
-                // IMPORTANT: Reset the fetch start time now that we have the stream.
-                // This ensures straggler detection only considers data read time, not connection time.
-                fetchStartTime.Restart();
 
                 if (EnableDetailedTiming && acquireWatch != null)
                 {
@@ -1292,6 +1316,9 @@ public class BufferedSegmentStream : Stream
                     {
                         operationDetails.ExcludedProviderIndices = null;
                     }
+
+                    // Feeds the dynamic straggler timeout: only this successful attempt's fetch cost.
+                    TrackSuccessfulFetchTime(attemptWatch.ElapsedMilliseconds);
 
                     return new PooledSegmentData(segmentId, buffer, totalRead, pooled: true);
                 }
@@ -1477,9 +1504,8 @@ public class BufferedSegmentStream : Stream
             throw new InvalidDataException($"Cannot perform graceful degradation for segment {index} ({segmentId}) because segment size is unknown. Failing stream to prevent structural corruption.");
         }
 
-        // Return a zero-filled segment of correct size
+        // Return a zero-filled segment of correct size (new arrays are already zeroed)
         var zeroBuffer = new byte[zeroBufferSize];
-        Array.Clear(zeroBuffer, 0, zeroBufferSize);
 
         // Clean up provider exclusions before returning
         if (operationDetails != null)
@@ -1795,8 +1821,10 @@ public class BufferedSegmentStream : Stream
         var fetchCount = Volatile.Read(ref _successfulFetchCount);
         if (fetchCount < 10)
         {
-            // Not enough data yet - use conservative default
-            return 5.0;
+            // Cold start: these first segments ARE click-to-play, so race a stalled provider sooner
+            // than the steady-state floor would. Kept above the 1.5s that earlier tuning found churns
+            // connections; it only applies until the dynamic average below has enough samples.
+            return 2.0;
         }
 
         var totalMs = Volatile.Read(ref _successfulFetchTimeMs);

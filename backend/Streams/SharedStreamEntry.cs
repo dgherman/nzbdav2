@@ -16,12 +16,18 @@ public class SharedStreamEntry : IDisposable
     private readonly byte[] _ringBuffer;
     private readonly int _ringBufferSize;
     private readonly long _basePosition; // Absolute byte offset of first byte written
-    private readonly BufferedSegmentStream _innerStream;
+    // Typed as Stream rather than BufferedSegmentStream: the pump only needs Read/Dispose,
+    // and the looser type lets the entry be driven by an in-memory stream in tests.
+    private readonly Stream _innerStream;
     private readonly SemaphoreSlim _slot; // Acquired semaphore from TryAcquireSlot
     private readonly Guid _davItemId;
     private readonly int _gracePeriodSeconds;
     private readonly Action<Guid> _evictCallback; // Calls SharedStreamManager.Evict
     private readonly CancellationTokenSource _entryCts; // Entry-scoped cancellation, independent of any request
+    // Captured once: reading _entryCts.Token after the CTS is disposed throws, and the pump can
+    // reach its next wait after cleanup has already run. A captured token stays usable — once
+    // cancelled, waits on it throw OperationCanceledException without touching the source.
+    private readonly CancellationToken _entryToken;
     private readonly IDisposable? _contextScope; // Entry-scoped cancellation-token context lifetime
 
     private long _writePosition; // Absolute byte offset of next write
@@ -31,6 +37,7 @@ public class SharedStreamEntry : IDisposable
     private volatile bool _completed; // Inner stream returned 0 (natural end)
     private Timer? _graceTimer;
     private Task? _pumpTask;
+    private int _cleanedUp; // 0 = not yet, 1 = done. Guards CleanupResources against running twice.
 
     // Per-reader position tracking for backpressure
     private readonly ConcurrentDictionary<int, long> _readerPositions = new();
@@ -53,8 +60,11 @@ public class SharedStreamEntry : IDisposable
     public long StreamLength { get; }
     public EntryState State => _state;
 
+    /// <summary>The pump task, once started. Exposed so tests can assert it actually exits on teardown.</summary>
+    internal Task? PumpTask => Volatile.Read(ref _pumpTask);
+
     public SharedStreamEntry(
-        BufferedSegmentStream innerStream,
+        Stream innerStream,
         SemaphoreSlim slot,
         Guid davItemId,
         long basePosition,
@@ -76,6 +86,7 @@ public class SharedStreamEntry : IDisposable
         _gracePeriodSeconds = gracePeriodSeconds;
         _evictCallback = evictCallback;
         _entryCts = entryCts;
+        _entryToken = entryCts.Token;
         _contextScope = contextScope;
         _readerCount = 1; // First reader is being created by the caller
     }
@@ -85,7 +96,9 @@ public class SharedStreamEntry : IDisposable
     /// </summary>
     public void StartPump()
     {
-        _pumpTask = Task.Run(PumpLoop);
+        // Volatile: the entry is published to SharedStreamManager before this runs, so cleanup on
+        // another thread must not read a stale null and skip waiting for the pump.
+        Volatile.Write(ref _pumpTask, Task.Run(PumpLoop));
     }
 
     /// <summary>
@@ -154,12 +167,15 @@ public class SharedStreamEntry : IDisposable
     }
 
     /// <summary>
-    /// Wait for the pump to write new data. Returns when data is available or entry fails.
+    /// Captures the current data-available signal.
+    /// Callers MUST capture this BEFORE re-checking WritePosition/IsCompleted/Failure, and then
+    /// await the captured task. The pump swaps in a fresh TCS every time it publishes data, so a
+    /// caller that checks its exit conditions first and only then reads the signal can await a TCS
+    /// the pump has already moved past — the wakeup is lost and the reader hangs until its request
+    /// token fires. Capturing first closes that window: any signal raised after the capture either
+    /// completes the captured task or is followed by a state change the re-check observes.
     /// </summary>
-    public async Task WaitForDataAsync(CancellationToken ct)
-    {
-        await Volatile.Read(ref _dataAvailableTcs).Task.WaitAsync(ct).ConfigureAwait(false);
-    }
+    public Task CaptureDataSignal() => Volatile.Read(ref _dataAvailableTcs).Task;
 
     /// <summary>
     /// Attach a new reader. Returns a SharedStreamHandle if the position is within range, null otherwise.
@@ -259,8 +275,12 @@ public class SharedStreamEntry : IDisposable
         {
             while (true)
             {
-                // Block if no readers are active (grace period)
-                _pumpGate.Wait();
+                // Block if no readers are active (grace period).
+                // The token is essential: cleanup opens the gate AND cancels, but a pump parked on
+                // an untokened Wait() would stay parked forever if the gate were disposed from under
+                // it (ManualResetEventSlim.Dispose does not release waiters), leaking this thread on
+                // every normal teardown.
+                _pumpGate.Wait(_entryToken);
 
                 if (_state == EntryState.Disposed || _state == EntryState.Failed)
                     break;
@@ -281,8 +301,7 @@ public class SharedStreamEntry : IDisposable
                 {
                     _completed = true;
                     Log.Debug("[SharedStreamEntry] Pump reached end of stream. DavItemId={DavItemId}", _davItemId);
-                    // Signal all waiting readers that we're done
-                    Interlocked.Exchange(ref _dataAvailableTcs, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
+                    SignalTerminalState();
                     return;
                 }
 
@@ -296,6 +315,12 @@ public class SharedStreamEntry : IDisposable
                     // No readers tracked → write freely (grace period handles pump pausing)
                     if (minPos == null || _writePosition + bytesRead <= minPos.Value + _ringBufferSize)
                         break;
+
+                    // Readers are attached but not consuming — a paused player. Keep the inner stream's
+                    // idle watchdog at bay: it only sees reads, and this pump has deliberately stopped
+                    // reading. Without this the workers self-cancel after 60s and resume pays a full
+                    // cold rebuild. A genuinely orphaned stream has no readers and never reaches here.
+                    (_innerStream as ITouchableStream)?.Touch();
 
                     // Pump would overwrite data the slowest reader hasn't consumed — wait
                     try
@@ -333,6 +358,23 @@ public class SharedStreamEntry : IDisposable
             Log.Error(ex, "[SharedStreamEntry] Pump loop unexpected error. DavItemId={DavItemId}", _davItemId);
             TransitionToFailed(ex);
         }
+        finally
+        {
+            // Every started pump must reach this line. A missing exit log for an evicted entry means
+            // a pump thread leaked — the failure mode this loop's cancellable gate wait exists to prevent.
+            Log.Debug("[SharedStreamEntry] Pump exited. DavItemId={DavItemId}, State={State}", _davItemId, _state);
+        }
+    }
+
+    /// <summary>
+    /// Wakes every waiting reader for a state they can never be woken out of again (EOF or failure).
+    /// Unlike the per-chunk pulse this does NOT swap in a fresh TCS: the pump is gone, so a fresh one
+    /// would never be completed and a reader that captured it would wait forever. Leaving the signal
+    /// permanently completed is correct — later readers wake at once and re-check the terminal state.
+    /// </summary>
+    private void SignalTerminalState()
+    {
+        Volatile.Read(ref _dataAvailableTcs).TrySetResult();
     }
 
     private void TransitionToFailed(Exception ex)
@@ -347,7 +389,7 @@ public class SharedStreamEntry : IDisposable
             _graceTimer = null;
 
             // Wake all waiting readers so they see the failure
-            Interlocked.Exchange(ref _dataAvailableTcs, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
+            SignalTerminalState();
 
             Log.Warning("[SharedStreamEntry] Entry failed, evicting. DavItemId={DavItemId}, Error={Error}", _davItemId, ex.Message);
         }
@@ -372,6 +414,15 @@ public class SharedStreamEntry : IDisposable
 
     private void CleanupResources()
     {
+        // Exactly once. TransitionToFailed cleans up without marking the entry Disposed, so a later
+        // Dispose() would otherwise clean up a second time and release the concurrent-stream slot twice
+        // (SemaphoreFullException), on top of touching an already-disposed gate.
+        if (Interlocked.Exchange(ref _cleanedUp, 1) == 1) return;
+
+        // Wake the pump before tearing anything down. It may be parked on the gate (grace period)
+        // or blocked in the inner stream's read: Set() covers the former, Cancel() the latter.
+        // Both are needed — the gate wait is what silently leaked pump threads before.
+        _pumpGate.Set();
         try { _entryCts.Cancel(); } catch { /* best effort */ }
 
         try
@@ -383,11 +434,45 @@ public class SharedStreamEntry : IDisposable
             Log.Debug(ex, "[SharedStreamEntry] Error disposing inner stream");
         }
 
+        // Release the scarce concurrent-stream slot immediately — never behind pump exit.
         _slot.Release();
-        _pumpGate.Dispose();
         try { _contextScope?.Dispose(); } catch { /* best effort */ }
-        try { _entryCts.Dispose(); } catch { /* best effort */ }
+
+        DisposePumpScopedResources();
+
         Log.Debug("[SharedStreamEntry] Resources cleaned up, semaphore slot released. DavItemId={DavItemId}", _davItemId);
+    }
+
+    /// <summary>
+    /// Disposes the two things the pump can be waiting on — the gate and the entry CTS — but only
+    /// once the pump has actually exited, and never inline: TransitionToFailed calls CleanupResources
+    /// from inside the pump itself, so an inline wait would self-deadlock. If the pump does not exit
+    /// promptly we log and leave both to the GC rather than fault a live pump; that is strictly
+    /// better than the disposal-under-waiter bug this replaces.
+    /// </summary>
+    private void DisposePumpScopedResources()
+    {
+        var pump = Volatile.Read(ref _pumpTask);
+        if (pump == null)
+        {
+            // StartPump was never called (e.g. the TryAdd race loser) — nothing can be waiting.
+            _pumpGate.Dispose();
+            try { _entryCts.Dispose(); } catch { /* best effort */ }
+            return;
+        }
+
+        _ = Task.Run(async () =>
+        {
+            var finished = await Task.WhenAny(pump, Task.Delay(TimeSpan.FromSeconds(5))).ConfigureAwait(false);
+            if (finished != pump)
+            {
+                Log.Warning("[SharedStreamEntry] Pump still running 5s after cleanup; leaving gate/CTS to the GC. DavItemId={DavItemId}", _davItemId);
+                return;
+            }
+
+            _pumpGate.Dispose();
+            try { _entryCts.Dispose(); } catch { /* best effort */ }
+        });
     }
 
     public void Dispose()

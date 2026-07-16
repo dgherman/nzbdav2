@@ -70,11 +70,29 @@ public abstract class WrappingNntpClient(INntpClient client) : INntpClient
         return Client.DownloadArticleBodyAsync(group, articleId, cancellationToken);
     }
 
+    // How long a replaced client is left alive for in-flight operations to finish before it is disposed.
+    private static readonly TimeSpan ReplacedClientDrainPeriod = TimeSpan.FromMinutes(2);
+
     public void UpdateUnderlyingClient(INntpClient client)
     {
         var oldClient = Client;
         Client = client;
-        oldClient.Dispose();
+
+        // Do not dispose inline. Streams that are mid-read still hold a reference to the old client and
+        // its connection pools; disposing it under them turns a provider-settings save into
+        // ObjectDisposedExceptions on active playback. New work already goes to the new client, so give
+        // the old one a drain window and then let it go.
+        _ = Task.Delay(ReplacedClientDrainPeriod).ContinueWith(_ =>
+        {
+            try
+            {
+                oldClient.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Debug(ex, "[WrappingNntpClient] Error disposing replaced client after drain period.");
+            }
+        }, TaskScheduler.Default);
     }
 
     public void Dispose()

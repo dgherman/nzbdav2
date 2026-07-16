@@ -50,6 +50,16 @@ public class SharedStreamHandle : Stream
         // Wait for data if we've caught up to the write position
         while (_position >= _entry.WritePosition)
         {
+            // Capture the signal BEFORE re-checking, never after: the pump swaps in a fresh TCS each
+            // time it publishes, so checking first and awaiting second can land on a TCS the pump has
+            // already moved past — the wakeup is lost and this read hangs until the request is
+            // cancelled. Capturing first means any state change below is either already visible to the
+            // re-check or still ahead of the captured signal.
+            var dataSignal = _entry.CaptureDataSignal();
+
+            if (_position < _entry.WritePosition)
+                break; // Pump published between the loop condition and the capture
+
             if (_entry.IsCompleted)
                 return 0; // Stream finished naturally
 
@@ -57,14 +67,10 @@ public class SharedStreamHandle : Stream
             if (failure != null)
                 throw new IOException("Shared stream failed", failure);
 
-            try
-            {
-                await _entry.WaitForDataAsync(cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                return 0;
-            }
+            // Client disconnects surface as OperationCanceledException. Let it propagate: returning 0
+            // would look like a premature EOF to NzbFileStream, which would then build a replacement
+            // stream (and burn connections) for a reader that has already gone away.
+            await dataSignal.WaitAsync(cancellationToken).ConfigureAwait(false);
         }
 
         // Check if we've fallen behind the ring buffer window

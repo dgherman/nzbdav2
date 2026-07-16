@@ -59,8 +59,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-06-LATENCY-CHECK-SINGLEFLIGHT");
-        Log.Warning("  FEATURE: Per-provider circuit breaker skips failing usenet providers (3 consecutive failures -> 60s cooldown doubling to 5m; tripped providers deprioritized in selection). SAB API reads cat/priority/pp from form body too (NZBDonkey compat). TZ env var supported via tzdata.");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-STREAMING-STABILITY-CLICK-TO-PLAY");
+        Log.Warning("  FEATURE: Shared-stream pump no longer leaks a thread per teardown; readers can't hang at EOF/failure; segment jobs survive a streaming-permit timeout; connection destroy after a sweeper reclaim no longer double-releases. Click-to-play: mkv tail probes stop building a throwaway fetch pipeline, cold-start straggler races at 2s, warm pool stays hot during keepalive, and a paused player no longer forces a cold rebuild.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
