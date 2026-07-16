@@ -1,11 +1,19 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
-using System.Text.RegularExpressions;
-using System.IO.Hashing;
 
 namespace NzbWebDAV.Tools;
 
+/// <summary>
+/// In-process NNTP server that serves synthetic articles for benchmarking.
+///
+/// Every article it serves must carry the yEnc part header for *that* segment. Serving one
+/// hardcoded "=ypart begin=1 end=<segmentSize>" for all segments makes every segment claim to be
+/// byte 0 of the file, so the client computes a file size of one segment no matter how many the
+/// NZB lists — the benchmark then streams a single segment and reports meaningless numbers.
+/// The layout registry below exists to keep the headers honest.
+/// </summary>
 public class MockNntpServer : IDisposable
 {
     private readonly TcpListener _listener;
@@ -14,25 +22,108 @@ public class MockNntpServer : IDisposable
     private readonly double _timeoutRate;
     private readonly int _segmentSize;
     private bool _running;
-    private readonly byte[] _staticArticleBody;
-    private readonly byte[] _rarFirstSegmentBody;
+
+    /// <summary>msgId (without angle brackets) to the article that segment must return.</summary>
+    private readonly Dictionary<string, SegmentLayout> _layouts = new();
+
+    /// <summary>
+    /// Encoded payloads keyed by (size, rarHeader). Segments of equal shape share one array: the
+    /// server runs in the benchmark's own process, so per-request payload allocation would land in
+    /// the GC counters the benchmark reports and be indistinguishable from client-side garbage.
+    /// </summary>
+    private readonly ConcurrentDictionary<(int Size, bool Rar), byte[]> _payloadCache = new();
+
+    private readonly SegmentLayout _fallbackLayout;
 
     // RAR5 magic bytes: 52 61 72 21 1A 07 01 00
     private static readonly byte[] Rar5Magic = { 0x52, 0x61, 0x72, 0x21, 0x1A, 0x07, 0x01, 0x00 };
 
-    // Regex to parse message IDs like: mock-000-000001-<guid>@mock.server
-    private static readonly Regex MsgIdPattern = new(@"mock-(\d{3})-(\d{6})-", RegexOptions.Compiled);
+    private sealed class SegmentLayout
+    {
+        public required string FileName { get; init; }
+        public required int PartNumber { get; init; }
+        public required int PartSize { get; init; }
+        public required byte[] HeaderBytes { get; init; }
+        public required byte[] FooterBytes { get; init; }
+        public required byte[] Payload { get; init; }
+    }
 
-    public MockNntpServer(int port, int latencyMs = 150, int segmentSize = 716800, int jitterMs = 40, double timeoutRate = 0.01)
+    public MockNntpServer(
+        int port,
+        int latencyMs = 150,
+        int segmentSize = 716800,
+        int jitterMs = 40,
+        double timeoutRate = 0.01,
+        MockNzbGenerator.GenerationResult? layout = null)
     {
         _latencyMs = latencyMs;
         _jitterMs = jitterMs;
         _timeoutRate = timeoutRate;
         _segmentSize = segmentSize;
         _listener = new TcpListener(IPAddress.Any, port);
-        _staticArticleBody = GenerateStaticArticle(segmentSize, rarHeader: false);
-        _rarFirstSegmentBody = GenerateStaticArticle(segmentSize, rarHeader: true);
+
+        _fallbackLayout = BuildLayout("mock_file.bin", partNumber: 1, totalParts: 1,
+            fileSize: segmentSize, partOffset: 0, partSize: segmentSize, rarHeader: false);
+
+        if (layout != null) RegisterLayout(layout);
     }
+
+    /// <summary>
+    /// Teach the server the real geometry of the generated NZB, so each segment gets a truthful
+    /// =ybegin/=ypart pair.
+    /// </summary>
+    private void RegisterLayout(MockNzbGenerator.GenerationResult layout)
+    {
+        foreach (var file in layout.Files)
+        {
+            for (var i = 0; i < file.SegmentIds.Count; i++)
+            {
+                var partSize = MockNzbGenerator.SegmentSizeAt(i, file.SegmentCount, file.FileSize, _segmentSize);
+                _layouts[file.SegmentIds[i]] = BuildLayout(
+                    file.FileName,
+                    partNumber: i + 1,
+                    totalParts: file.SegmentCount,
+                    fileSize: file.FileSize,
+                    partOffset: (long)i * _segmentSize,
+                    partSize: partSize,
+                    // Only the first part of a RAR volume carries the archive magic.
+                    rarHeader: file.IsRar && i == 0);
+            }
+        }
+    }
+
+    private SegmentLayout BuildLayout(
+        string fileName, int partNumber, int totalParts, long fileSize,
+        long partOffset, int partSize, bool rarHeader)
+    {
+        // yEnc is 1-based and inclusive on both ends; the client recovers the segment's place in the
+        // file as (begin - 1) and its length as (end - begin + 1).
+        var begin = partOffset + 1;
+        var end = partOffset + partSize;
+
+        var header = $"=ybegin part={partNumber} total={totalParts} line=128 size={fileSize} name={fileName}\r\n" +
+                     $"=ypart begin={begin} end={end}\r\n";
+        // CRC is omitted deliberately: the payload is synthetic and the client does not verify it.
+        var footer = $"=yend size={partSize} part={partNumber}\r\n.\r\n";
+
+        return new SegmentLayout
+        {
+            FileName = fileName,
+            PartNumber = partNumber,
+            PartSize = partSize,
+            HeaderBytes = Encoding.ASCII.GetBytes(header),
+            FooterBytes = Encoding.ASCII.GetBytes(footer),
+            Payload = _payloadCache.GetOrAdd((partSize, rarHeader), k => EncodePayload(k.Size, k.Rar)),
+        };
+    }
+
+    private static string NormalizeMsgId(string raw) => raw.Trim('<', '>');
+
+    private SegmentLayout GetLayout(string msgId) =>
+        _layouts.TryGetValue(NormalizeMsgId(msgId), out var layout) ? layout : _fallbackLayout;
+
+    /// <summary>Port actually bound. Meaningful only after <see cref="Start"/>; pass port 0 to let the OS pick.</summary>
+    public int Port => ((IPEndPoint)_listener.LocalEndpoint).Port;
 
     public void Start()
     {
@@ -61,11 +152,10 @@ public class MockNntpServer : IDisposable
     private async Task HandleClient(TcpClient client)
     {
         using var stream = client.GetStream();
-        // Set write timeout to break deadlocks if client doesn't drain body
-        stream.WriteTimeout = 1000; // 1 second
-
         using var reader = new StreamReader(stream, Encoding.ASCII);
-        using var writer = new StreamWriter(stream, Encoding.ASCII) { AutoFlush = true };
+        // NNTP terminates every line with CRLF. StreamWriter defaults to Environment.NewLine,
+        // which is a bare LF on Linux — where this benchmark actually runs.
+        using var writer = new StreamWriter(stream, Encoding.ASCII) { AutoFlush = true, NewLine = "\r\n" };
 
         try
         {
@@ -103,10 +193,14 @@ public class MockNntpServer : IDisposable
                 }
 
                 string msgId;
+                SegmentLayout layout;
                 switch (cmd)
                 {
                     case "CAPABILITIES":
-                        await writer.WriteLineAsync("101 Capability list:\r\nVERSION 2\r\nREADER\r\n.\r\n");
+                        // Multi-line block, written verbatim: WriteLine would append a second
+                        // terminator after the "." and leave a stray blank line in the stream for
+                        // the client to read as the next response.
+                        await writer.WriteAsync("101 Capability list:\r\nVERSION 2\r\nREADER\r\n.\r\n");
                         break;
                     case "MODE":
                         await writer.WriteLineAsync("200 Posting allowed");
@@ -122,18 +216,18 @@ public class MockNntpServer : IDisposable
                         // Format: 222 0 <msgid> article
                         msgId = parts.Length > 1 ? parts[1] : "<unknown>";
                         await writer.WriteLineAsync($"222 0 {msgId} article");
-                        await stream.WriteAsync(GetArticleBodyForMsgId(msgId));
+                        await WriteArticleBodyAsync(stream, GetLayout(msgId));
                         break;
                     case "ARTICLE":
                         // Format: 220 0 <msgid> article
                         msgId = parts.Length > 1 ? parts[1] : "<unknown>";
-                        var fileName = GetFileNameForMsgId(msgId);
+                        layout = GetLayout(msgId);
                         await writer.WriteLineAsync($"220 0 {msgId} article");
                         await writer.WriteLineAsync($"Message-ID: {msgId}");
-                        await writer.WriteLineAsync($"Subject: {fileName}");
+                        await writer.WriteLineAsync($"Subject: {layout.FileName}");
                         await writer.WriteLineAsync($"Date: Fri, 09 Jan 2026 12:00:00 GMT");
                         await writer.WriteLineAsync(); // End of headers
-                        await stream.WriteAsync(GetArticleBodyForMsgId(msgId));
+                        await WriteArticleBodyAsync(stream, layout);
                         break;
                     case "QUIT":
                         await writer.WriteLineAsync("205 Bye");
@@ -145,12 +239,12 @@ public class MockNntpServer : IDisposable
                         break;
                     case "HEAD":
                         msgId = parts.Length > 1 ? parts[1] : "<unknown>";
-                        var headFileName = GetFileNameForMsgId(msgId);
+                        layout = GetLayout(msgId);
                         await writer.WriteLineAsync($"221 0 {msgId} article");
                         await writer.WriteLineAsync($"Message-ID: {msgId}");
-                        await writer.WriteLineAsync($"Subject: {headFileName}");
+                        await writer.WriteLineAsync($"Subject: {layout.FileName}");
                         await writer.WriteLineAsync($"Date: Fri, 09 Jan 2026 12:00:00 GMT");
-                        await writer.WriteLineAsync($"Bytes: {_segmentSize}");
+                        await writer.WriteLineAsync($"Bytes: {layout.PartSize}");
                         await writer.WriteLineAsync(); // End of headers
                         await writer.WriteLineAsync(".");
                         break;
@@ -170,54 +264,25 @@ public class MockNntpServer : IDisposable
         }
     }
 
-    /// <summary>
-    /// Parse message ID to determine if this is a first segment (needs RAR header)
-    /// Format: mock-{volumeIndex:D3}-{segmentIndex:D6}-{guid}@mock.server
-    /// </summary>
-    private byte[] GetArticleBodyForMsgId(string msgId)
+    private static async Task WriteArticleBodyAsync(NetworkStream stream, SegmentLayout layout)
     {
-        var match = MsgIdPattern.Match(msgId);
-        if (match.Success)
-        {
-            var segmentIndex = int.Parse(match.Groups[2].Value);
-            // First segment of any RAR volume needs RAR magic bytes
-            if (segmentIndex == 0)
-            {
-                return _rarFirstSegmentBody;
-            }
-        }
-        return _staticArticleBody;
+        await stream.WriteAsync(layout.HeaderBytes);
+        await stream.WriteAsync(layout.Payload);
+        await stream.WriteAsync(layout.FooterBytes);
     }
 
     /// <summary>
-    /// Get a simulated filename based on message ID
+    /// yEnc-encode <paramref name="size"/> bytes of synthetic data, returning only the encoded data
+    /// lines — the =ybegin/=ypart/=yend framing is per-segment and lives in <see cref="SegmentLayout"/>.
     /// </summary>
-    private string GetFileNameForMsgId(string msgId)
+    private static byte[] EncodePayload(int size, bool rarHeader)
     {
-        var match = MsgIdPattern.Match(msgId);
-        if (match.Success)
-        {
-            var volumeIndex = int.Parse(match.Groups[1].Value);
-            if (volumeIndex == 0)
-                return "MockArchive.rar";
-            else
-                return $"MockArchive.r{(volumeIndex - 1):D2}";
-        }
-        // Flat file or unknown format
-        if (msgId.Contains("mock-flat-"))
-            return "Mock_File_1GB.bin";
-        return "mock_file.bin";
-    }
-
-    private byte[] GenerateStaticArticle(int size, bool rarHeader)
-    {
-        // 1. Generate decoded data
         var decodedData = new byte[size];
 
         if (rarHeader)
         {
             // Start with RAR5 magic bytes
-            Array.Copy(Rar5Magic, decodedData, Rar5Magic.Length);
+            Array.Copy(Rar5Magic, decodedData, Math.Min(Rar5Magic.Length, size));
             // Fill rest with 'R' for RAR content
             for (int i = Rar5Magic.Length; i < size; i++)
                 decodedData[i] = (byte)'R';
@@ -228,27 +293,7 @@ public class MockNntpServer : IDisposable
             Array.Fill(decodedData, (byte)'A');
         }
 
-        // 2. Calculate CRC of decoded data
-        var crc = new Crc32();
-        crc.Append(decodedData);
-        var hash = BitConverter.ToUInt32(crc.GetCurrentHash());
-
-        // 3. Generate yEnc encoded body
-        using var ms = new MemoryStream();
-        using var writer = new StreamWriter(ms, Encoding.ASCII);
-        writer.NewLine = "\r\n";
-
-        // Header
-        var fileName = rarHeader ? "MockArchive.rar" : "mock_file.bin";
-        writer.WriteLine($"=ybegin part=1 line=128 size={size} name={fileName}");
-        writer.WriteLine($"=ypart begin=1 end={size}");
-        writer.Flush();
-
-        // Write header to buffer
         var buffer = new List<byte>();
-        buffer.AddRange(ms.ToArray());
-
-        // Body: encode each byte with yEnc encoding
         var crlf = new byte[] { 13, 10 };
         int bytesWritten = 0;
         int linePos = 0;
@@ -260,10 +305,12 @@ public class MockNntpServer : IDisposable
             // yEnc encoding: (byte + 42) mod 256
             var encoded = (byte)((srcByte + 42) % 256);
 
-            // Escape special characters: NUL, LF, CR, =, TAB, SPACE (at line start)
+            // Escape special characters: NUL, LF, CR, =, TAB/SPACE/'.' at line start.
+            // A leading '.' would otherwise need NNTP dot-stuffing; escaping it here keeps the
+            // wire format unambiguous whatever the synthetic payload happens to encode to.
             bool needsEscape = encoded == 0x00 || encoded == 0x0A || encoded == 0x0D ||
                                encoded == 0x3D || // '='
-                               (linePos == 0 && (encoded == 0x09 || encoded == 0x20)); // TAB or SPACE at line start
+                               (linePos == 0 && (encoded == 0x09 || encoded == 0x20 || encoded == 0x2E));
 
             if (needsEscape)
             {
@@ -288,10 +335,6 @@ public class MockNntpServer : IDisposable
                 linePos = 0;
             }
         }
-
-        // Footer - omit CRC to avoid mismatch issues during mock testing
-        var footerStr = $"=yend size={size} part=1\r\n.\r\n";
-        buffer.AddRange(Encoding.ASCII.GetBytes(footerStr));
 
         return buffer.ToArray();
     }

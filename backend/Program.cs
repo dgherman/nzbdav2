@@ -59,8 +59,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-STREAMING-STABILITY-CLICK-TO-PLAY");
-        Log.Warning("  FEATURE: Shared-stream pump no longer leaks a thread per teardown; readers can't hang at EOF/failure; segment jobs survive a streaming-permit timeout; connection destroy after a sweeper reclaim no longer double-releases. Click-to-play: mkv tail probes stop building a throwaway fetch pipeline, cold-start straggler races at 2s, warm pool stays hot during keepalive, and a paused player no longer forces a cold rebuild.");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-MOCK-HARNESS-REPAIR");
+        Log.Warning("  FEATURE: Tooling only — streaming behaviour is unchanged from v0.11.2 (shared-stream pump thread leak, EOF/failure hangs, streaming-permit wedge, connection-pool double release, and the click-to-play latency pass). This build repairs the --test-full-nzb --mock-server benchmark: the mock server now serves truthful per-segment yEnc headers, so a --size=N run measures N megabytes instead of collapsing to a single segment.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

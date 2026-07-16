@@ -89,16 +89,18 @@ public class FullNzbTester
             BufferedSegmentStream.EnableDetailedTiming = true;
             BufferedSegmentStream.ResetGlobalTimingStats();
 
-            // Start mock server
-            Console.WriteLine($"Starting mock NNTP server on port {port}...");
-            mockServer = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, stallRate);
-            mockServer.Start();
-
-            // Generate mock NZB
+            // Generate the mock NZB first: the server serves per-segment yEnc headers derived from
+            // this layout, so it has to know the geometry before it answers anything.
             nzbPath = "mock.nzb";
             var totalSize = (long)totalSizeMb * 1024 * 1024;
             Console.WriteLine($"Generating {nzbPath} ({totalSizeMb}MB)...");
-            await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize);
+            var layout = await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize);
+            Console.WriteLine($"Generated {layout.TotalSegments} segments across {layout.Files.Count} file(s).");
+
+            // Start mock server
+            Console.WriteLine($"Starting mock NNTP server on port {port}...");
+            mockServer = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, stallRate, layout);
+            mockServer.Start();
 
             var mockConfig = new UsenetProviderConfig
             {
@@ -154,7 +156,11 @@ public class FullNzbTester
         services.AddSingleton<ProviderErrorService>();
         services.AddSingleton<NzbProviderAffinityService>();
         services.AddSingleton<UsenetStreamingClient>();
-        services.AddDbContext<DavDatabaseContext>();
+        // Construct the context directly rather than AddDbContext<T>(): the DI overload injects an
+        // unconfigured DbContextOptions, so every query throws "No database provider has been
+        // configured". The parameterless ctor carries the app's real SQLite options, which is what
+        // makes provider affinity behave here the way it does in production.
+        services.AddScoped<DavDatabaseContext>(_ => new DavDatabaseContext());
 
         var sp = services.BuildServiceProvider();
         var client = sp.GetRequiredService<UsenetStreamingClient>();

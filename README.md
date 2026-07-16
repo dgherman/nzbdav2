@@ -116,6 +116,16 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.3 (2026-07-16)
+Repairs the `--test-full-nzb --mock-server` benchmark harness so it measures something real. Tooling and tests only — no change to streaming behaviour. See [issue #15](https://github.com/dgherman/nzbdav2/issues/15).
+
+*   **Tooling (mock server described every segment as byte 0)**: `MockNntpServer` served one hardcoded article for every message ID, so all segments reported `=ypart begin=1 end=<segmentSize>`. The client derives a segment's position from that header (`offset = begin - 1`), so every segment claimed offset 0 and `GetFileSizeAsync` — which reads the *last* segment's header — concluded the file was one segment long regardless of how many the NZB listed. A `--size=50` run reported `File size: 0.68 MB (74 segments)` and streamed 1 MB. The server now derives a per-segment `=ybegin`/`=ypart`/`=yend` from the generated NZB's real geometry, including the short trailing segment; the same run now reports `File size: 50.00 MB (74 segments)` and delivers 50 MB.
+*   **Tooling (flat-file segments were unaddressable)**: the server recovered the segment index by regex over the message ID, but the pattern only matched the RAR form (`mock-000-000001-`) and never the flat-file form (`mock-flat-000001-`) that the default benchmark generates. Replaced with a layout registry built from `MockNzbGenerator`'s output, so segment identity no longer depends on parsing its name.
+*   **Tooling (NNTP responses used LF, not CRLF)**: `StreamWriter` defaults to `Environment.NewLine`, which is a bare LF on Linux — where the benchmark runs. Responses are now explicitly CRLF-terminated. The `CAPABILITIES` reply also appended a terminator after its own `.`, leaving a stray blank line for the client to read as the next response.
+*   **Tooling (benchmark ran with the database detached)**: `FullNzbTester` registered its `DbContext` via `AddDbContext<T>()`, whose DI overload injects an unconfigured options object — every provider-affinity query threw *"No database provider has been configured"* and was swallowed, so the harness benchmarked a code path with affinity silently disabled. It now constructs the context directly, using the app's real SQLite options.
+*   **Tooling**: removed `stream.WriteTimeout = 1000` from the mock server. It was commented as a deadlock guard for clients that don't drain a body, but `NetworkStream` applies `WriteTimeout` only to synchronous `Write` — it has never had any effect on the `WriteAsync` calls it was guarding.
+*   **Tooling**: mock server binds port 0 on request and exposes the assigned `Port`, and reuses one encoded payload per segment shape — it shares a process with the benchmark, so per-request payload garbage would land in the allocation counters the benchmark reports.
+
 ## v0.11.2 (2026-07-16)
 Streaming stability and click-to-play latency pass over the shared-stream/buffered-stream path. Review findings and implementation plan in [`docs/plans/2026-07-16-streaming-stability-click-to-play-spec.md`](./docs/plans/2026-07-16-streaming-stability-click-to-play-spec.md).
 
