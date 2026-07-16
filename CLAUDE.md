@@ -160,7 +160,7 @@ docker run -p 3000:3000 -v $(pwd)/config:/config local/nzbdav:3
 
 ### Build Version Updates
 
-**IMPORTANT:** When making significant code changes, update the build version string in `backend/Program.cs` (lines 58-61):
+**IMPORTANT:** When making significant code changes, update the build version string in `backend/Program.cs` — the `Log.Warning` banner in `Main`, just after the logger is configured:
 
 ```csharp
 Log.Warning("  NzbDav Backend Starting - BUILD v2025-12-30-DB-OPTIMIZATIONS");
@@ -183,14 +183,19 @@ Log.Warning("  FEATURE: Database PRAGMA Optimizations (5-10x faster migrations)"
 
 ### Versioning Scheme
 
-Version format: `0.MINOR.PATCH`
+Version format: `MAJOR.MINOR.PATCH`, held in the **`VERSION` file at the repo root**.
 
-- **MINOR** — tracks the upstream [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) sync level. Currently `6` (synced to upstream v0.6.0). Only bump MINOR after a deliberate upstream sync — document this in `docs/upstream-sync-YYYY-MM-DD.md`.
-- **PATCH** — auto-incremented by CI. **Never set this manually.** The formula is in `.github/workflows/docker-publish.yml`:
-  ```bash
-  PATCH=$(( ${{ github.run_number }} - OFFSET ))
-  ```
-  To determine what version the *next* CI build will produce, check `github.run_number` in recent Actions runs and apply the formula.
+**`VERSION` is the single source of truth and you must bump it by hand as part of your change.** Nothing auto-increments it. `.github/workflows/docker-publish.yml` reads the file, hard-fails the build if it isn't `MAJOR.MINOR.PATCH`, and on `main` publishes `ghcr.io/dgherman/nzbdav2` tagged `latest`, `MAJOR.MINOR.PATCH`, `MAJOR.MINOR.x`, and `MAJOR.x`. Builds from any other branch are tagged with the sanitized branch name instead and do not consume a version.
+
+Forget to bump it and CI silently ships the new image under the *previous* version number, overwriting that tag — so `0.11.1` in a container log no longer identifies which build is actually running.
+
+Which part to bump:
+
+- **PATCH** — bug fixes and small changes. The common case.
+- **MINOR** — a notable feature batch, whether fork-original (e.g. `0.7.0` hybrid connection pool, `0.8.0` multipart streaming) or an upstream/downstream sync (e.g. `0.9.0`, `0.11.0`). Reset PATCH to 0.
+- **MAJOR** — not currently used; stays `0`.
+
+Sync history lives in `docs/upstream-sync-YYYY-MM-DD.md`. Write one whenever you pull changes from [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) or a downstream fork, recording what was adopted, what was skipped, and why. (Note: MINOR does **not** track the upstream version number — `0.6.22` was an upstream sync with no MINOR bump, and `0.7.0`/`0.8.0` were MINOR bumps with no sync at all.)
 
 ### When to Add a Changelog Entry
 
@@ -204,29 +209,33 @@ Add a new `## vX.Y.Z (YYYY-MM-DD)` entry at the **top** of the changelog (just b
 ### Changelog Entry Format
 
 ```markdown
-## v0.6.Z (YYYY-MM-DD)
+## vX.Y.Z (YYYY-MM-DD)
 *   **Category**: Description of what changed and why.
 *   **Category**: Another change.
 ```
 
 **Category tags** (use these consistently): `Feature`, `Fix`, `UI`, `Performance`, `Logging`, `Reliability`, `Optimization`, `Tooling`, `Logic`, `Maintenance`, `Docs`, `Versioning`
 
-**For the version number in a new entry:** Use the current MINOR (e.g. `6`) and set PATCH to one more than the most recent `0.6.x` entry already in the changelog. If no `0.6.x` entry exists yet, start at `0.6.1`. The CI build that deploys the change will produce a matching version automatically.
+**The version number in the entry must be the one you wrote into `VERSION`** — the two are read together and drift is confusing to debug from a container log.
 
 ### Example Workflow
 
 When making changes in a session:
 1. Make the code change.
-2. Open `README.md` and locate `## Changelog`.
-3. Insert a new `## v0.6.Z (today's date)` block above the previous most-recent entry.
-4. List all changes made in this session with appropriate category tags.
-5. Commit `README.md` along with the code changes.
+2. Bump `VERSION` (PATCH for a fix, MINOR for a feature batch).
+3. Open `README.md` and locate `## Changelog`.
+4. Insert a new `## vX.Y.Z (today's date)` block — matching `VERSION` — above the previous most-recent entry.
+5. List all changes made in this session with appropriate category tags.
+6. Update the BUILD string in `backend/Program.cs` (see "Build Version Updates" above).
+7. Commit `VERSION` and `README.md` along with the code changes.
 
 ### What NOT to Do
 
 - Do **not** create git version tags manually — CI handles Docker image tagging.
-- Do **not** hardcode `PATCH` in the workflow — the formula calculates it from `run_number`.
-- Do **not** bump `MINOR` without a corresponding upstream sync document in `docs/`.
+- Do **not** hardcode a version in the workflow — it reads the `VERSION` file.
+- Do **not** ship a code change without bumping `VERSION`; nothing else will.
+- Do **not** let `VERSION`, the changelog heading, and the `Program.cs` BUILD string disagree.
+- Do **not** pull in upstream/downstream changes without a `docs/upstream-sync-YYYY-MM-DD.md` write-up.
 
 ## Configuration
 

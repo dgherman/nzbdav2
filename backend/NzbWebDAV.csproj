@@ -29,6 +29,10 @@
     </ItemGroup>
 
     <ItemGroup>
+      <InternalsVisibleTo Include="NzbWebDAV.Tests" />
+    </ItemGroup>
+
+    <ItemGroup>
       <EmbeddedResource Include="Api\SabControllers\GetConfig\config_template.json" />
     </ItemGroup>
 

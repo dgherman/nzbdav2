@@ -13,7 +13,9 @@ public static class SharedStreamManager
 {
     private static readonly ConcurrentDictionary<Guid, SharedStreamEntry> s_entries = new();
 
-    public readonly record struct SharedStreamFactoryResult(BufferedSegmentStream Stream, IDisposable? ContextScope = null);
+    // Stream rather than BufferedSegmentStream: the entry only needs Read/Dispose, and the looser
+    // type lets the manager be exercised with an in-memory stream in tests.
+    public readonly record struct SharedStreamFactoryResult(Stream Stream, IDisposable? ContextScope = null);
 
     /// <summary>
     /// Try to attach to an existing shared stream for this file.
@@ -72,14 +74,20 @@ public static class SharedStreamManager
                 Log.Debug("[SharedStreamManager] Attached to existing entry (race). DavItemId={DavItemId}", davItemId);
                 return handle;
             }
-            // Entry exists but can't attach (position out of range, or entry is dying)
-            // Fall through to try creating a new one — the old one will evict itself
+
+            // Entry exists but this position can't attach — normally a player seeking to the mkv
+            // tail/Cues, far ahead of the front pump. Give up now: the caller falls back to a private
+            // BufferedSegmentStream at the seek target, which is exactly what serves that read.
+            // Building an entry here instead would start a full fetch pipeline (permits, connections,
+            // real segment reads) only to lose the TryAdd against the entry we just found and be torn
+            // down synchronously — a wasted pipeline on the click-to-play path, on every file open.
             AppMetrics.SharedStreamMisses.WithLabels("existing_entry_unattachable").Inc();
+            Log.Debug("[SharedStreamManager] Entry exists but position {Position} cannot attach; caller will use a private stream. DavItemId={DavItemId}",
+                startPosition, davItemId);
+            return null;
         }
-        else
-        {
-            AppMetrics.SharedStreamMisses.WithLabels("no_entry").Inc();
-        }
+
+        AppMetrics.SharedStreamMisses.WithLabels("no_entry").Inc();
 
         // Acquire a semaphore slot
         var slot = BufferedSegmentStream.TryAcquireSlot();
@@ -110,7 +118,9 @@ public static class SharedStreamManager
                 factoryResult.ContextScope
             );
 
-            // Try to add — if another thread raced us, clean up our entry and attach to theirs
+            // Try to add — if another thread raced us, clean up our entry and attach to theirs.
+            // Only a genuine concurrent create can land here now: an already-registered entry is
+            // handled by the fast path above, which never reaches the factory.
             if (!s_entries.TryAdd(davItemId, entry))
             {
                 // Don't call Dispose — that would evict the winner's entry from the dictionary!

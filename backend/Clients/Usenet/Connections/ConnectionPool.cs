@@ -62,7 +62,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
     private record ActiveConnectionInfo(T Connection, ConnectionUsageContext Context, DateTimeOffset BorrowedAt);
 
     // Maximum time a connection can be held before being considered stuck (30 minutes)
-    private static readonly TimeSpan MaxActiveConnectionTime = TimeSpan.FromMinutes(30);
+    private static readonly TimeSpan DefaultMaxActiveConnectionTime = TimeSpan.FromMinutes(30);
+    private readonly TimeSpan _maxActiveConnectionTime;
 
     // Track doomed connections (marked for release)
     private readonly System.Collections.Concurrent.ConcurrentDictionary<T, bool> _doomedConnections = new();
@@ -80,7 +81,8 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
         Func<CancellationToken, ValueTask<T>> connectionFactory,
         string poolName = "Unknown",
         TimeSpan? idleTimeout = null,
-        int minWarmConnections = 0)
+        int minWarmConnections = 0,
+        TimeSpan? maxActiveConnectionTime = null)
     {
         if (maxConnections <= 0)
             throw new ArgumentOutOfRangeException(nameof(maxConnections));
@@ -88,6 +90,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
         _factory = connectionFactory
                    ?? throw new ArgumentNullException(nameof(connectionFactory));
         IdleTimeout = idleTimeout ?? TimeSpan.FromSeconds(30);
+        _maxActiveConnectionTime = maxActiveConnectionTime ?? DefaultMaxActiveConnectionTime;
         PoolName = poolName;
 
         _maxConnections = maxConnections;
@@ -173,10 +176,11 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
                 continue;
             }
 
-            // Health check for long-idle connections (>60s) before reuse
-            // Increased from 30s to 60s to reduce unnecessary health checks
-            // This still catches stale connections while reducing overhead
-            if (unchecked(Environment.TickCount64 - item.LastTouchedMillis) > 60000 && item.Connection is INntpClient client)
+            // Health check for long-idle connections before reuse. The threshold must stay above
+            // WarmKeepAliveInterval (60s) — at exactly 60s the warm floor straddles the boundary and
+            // borrowers pay a serial DATE round-trip on the click-to-play path for a connection the
+            // keepalive just proved alive. 90s = WarmKeepAliveInterval x 1.5.
+            if (unchecked(Environment.TickCount64 - item.LastTouchedMillis) > 90000 && item.Connection is INntpClient client)
             {
                 try
                 {
@@ -372,15 +376,24 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
 
     private void Destroy(T connection, string connectionId)
     {
-        _activeConnections.TryRemove(connectionId, out var info);
+        // Same accounting hazard as Return(): the stuck-connection sweeper (SweepOnce) may have
+        // already removed this connection, released _gate and decremented _live. Releasing a second
+        // time here over-counts the semaphore, letting the pool exceed the provider's connection cap
+        // (which providers answer with login rejections) and driving _live negative, which in turn
+        // skews the warm-floor top-up and the pool stats.
+        var wasActive = _activeConnections.TryRemove(connectionId, out var info);
         var usageType = info?.Context.UsageType ?? ConnectionUsageType.Unlabeled;
 
         // When a lock requests replacement, we dispose the connection instead of reusing.
+        // Unconditional: disposal is idempotent, and the sweeper may or may not have disposed it.
         _ = DisposeConnectionSafeAsync(connection, "destroy/replace");
-        Interlocked.Decrement(ref _live);
-        if (Volatile.Read(ref _disposed) == 0)
+        if (wasActive)
         {
-            _gate.Release();
+            Interlocked.Decrement(ref _live);
+            if (Volatile.Read(ref _disposed) == 0)
+            {
+                _gate.Release();
+            }
         }
 
         TriggerConnectionPoolChangedEvent();
@@ -482,7 +495,7 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
             var info = kvp.Value;
             var heldFor = utcNow - info.BorrowedAt;
 
-            if (heldFor > MaxActiveConnectionTime)
+            if (heldFor > _maxActiveConnectionTime)
             {
                 Serilog.Log.Warning(
                     "[ConnectionPool][{PoolName}] STUCK CONNECTION DETECTED: Connection held for {HeldMinutes:F1} minutes. " +
@@ -549,36 +562,51 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
     {
         if (_minWarmConnections <= 0 || Volatile.Read(ref _disposed) == 1) return;
 
-        // Ping up to _minWarmConnections idle connections to keep them alive server-side
-        // and refresh their idle clock so the sweeper won't reap them.
-        var refreshed = new List<Pooled>();
-        while (refreshed.Count < _minWarmConnections && _idleConnections.TryPop(out var item))
+        // Ping up to _minWarmConnections idle connections to keep them alive server-side and refresh
+        // their idle clock so the sweeper won't reap them.
+        //
+        // Each connection is pushed back as soon as its own ping finishes, rather than holding them
+        // all until the batch completes: draining the stack for the duration of several serial 5s
+        // pings means a stream starting in that window finds no idle connection and pays the full
+        // cold-start this warm floor exists to avoid.
+        //
+        // Because a pinged connection goes straight back on top of the stack, track what we have
+        // already handled this tick — otherwise we would keep popping the same connection.
+        // Linear scan is fine: the warm floor is capped at 8.
+        var pingedThisTick = new List<T>(_minWarmConnections);
+
+        while (pingedThisTick.Count < _minWarmConnections && _idleConnections.TryPop(out var item))
         {
-            if (item.Connection is INntpClient client)
+            if (pingedThisTick.Any(c => ReferenceEquals(c, item.Connection)))
             {
-                try
-                {
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                    using var _ = cts.Token.SetScopedContext(
-                        new ConnectionUsageContext(ConnectionUsageType.HealthCheck, "Warm-pool keepalive"));
-                    await client.DateAsync(cts.Token).ConfigureAwait(false);
-                    refreshed.Add(new Pooled(item.Connection, Environment.TickCount64));
-                }
-                catch (Exception ex)
-                {
-                    Serilog.Log.Debug("[ConnectionPool][{PoolName}] Warm keepalive ping failed, discarding: {Error}", PoolName, ex.Message);
-                    await DisposeConnectionSafeAsync(item.Connection, "warm keepalive failed").ConfigureAwait(false);
-                    Interlocked.Decrement(ref _live);
-                }
+                // Came back around to a connection we just refreshed — the stack holds nothing new.
+                _idleConnections.Push(item);
+                break;
             }
-            else
+
+            pingedThisTick.Add(item.Connection);
+
+            if (item.Connection is not INntpClient client)
             {
-                refreshed.Add(item); // non-NNTP connection: can't ping, keep as-is
+                _idleConnections.Push(item); // non-NNTP connection: can't ping, keep as-is
+                continue;
+            }
+
+            try
+            {
+                using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+                using var _ = cts.Token.SetScopedContext(
+                    new ConnectionUsageContext(ConnectionUsageType.HealthCheck, "Warm-pool keepalive"));
+                await client.DateAsync(cts.Token).ConfigureAwait(false);
+                _idleConnections.Push(new Pooled(item.Connection, Environment.TickCount64));
+            }
+            catch (Exception ex)
+            {
+                Serilog.Log.Debug("[ConnectionPool][{PoolName}] Warm keepalive ping failed, discarding: {Error}", PoolName, ex.Message);
+                await DisposeConnectionSafeAsync(item.Connection, "warm keepalive failed").ConfigureAwait(false);
+                Interlocked.Decrement(ref _live);
             }
         }
-
-        foreach (var p in refreshed)
-            _idleConnections.Push(p);
 
         // Refill the floor if keepalive discarded some or the pool was drained between ticks.
         await EnsureWarmAsync().ConfigureAwait(false);
