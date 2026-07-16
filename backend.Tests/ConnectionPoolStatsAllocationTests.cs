@@ -135,10 +135,13 @@ public class ConnectionPoolStatsAllocationTests
         var args = new ConnectionPoolStats.ConnectionPoolChangedEventArgs(connections, 0, connections);
         handler(this, args); // warm up JIT + serializer metadata
 
+        // Thread-local, not GC.GetTotalAllocatedBytes: that counts the whole process, and xUnit runs
+        // test classes in parallel, so a sibling class's allocations would land in this number. The
+        // handler is synchronous, so the measured work stays on this thread.
         const int iterations = 200;
-        var before = GC.GetTotalAllocatedBytes(precise: true);
+        var before = GC.GetAllocatedBytesForCurrentThread();
         for (var i = 0; i < iterations; i++) handler(this, args);
-        var after = GC.GetTotalAllocatedBytes(precise: true);
+        var after = GC.GetAllocatedBytesForCurrentThread();
 
         var perEvent = (after - before) / (double)iterations;
         _output.WriteLine($"Allocated per stats event, no subscribers: {perEvent:N0} bytes ({connections} active connections)");
@@ -182,10 +185,11 @@ public class ConnectionPoolStatsAllocationTests
         var args = new ConnectionPoolStats.ConnectionPoolChangedEventArgs(connections, 0, connections);
         handler(this, args); // warm up, and consume the leading-edge push
 
+        // Thread-local: see the sibling test — the process-wide counter picks up parallel classes.
         const int iterations = 200;
-        var before = GC.GetTotalAllocatedBytes(precise: true);
+        var before = GC.GetAllocatedBytesForCurrentThread();
         for (var i = 0; i < iterations; i++) handler(this, args);
-        var after = GC.GetTotalAllocatedBytes(precise: true);
+        var after = GC.GetAllocatedBytesForCurrentThread();
 
         var perEvent = (after - before) / (double)iterations;
         _output.WriteLine($"Allocated per stats event, one subscriber: {perEvent:N0} bytes ({connections} active connections)");

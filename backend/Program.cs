@@ -59,8 +59,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-STATS-CHURN");
-        Log.Warning("  FEATURE: Connection-pool stats no longer build a websocket message when nobody is subscribed (61,683 bytes -> 0 per connection borrow/return, ~658 MiB over a 5,593-segment file), and coalesce to 4 pushes/sec per provider when the UI is open. The connections panel is refreshed on subscriber connect so skipping publishes cannot leave it stale. Also repairs the --test-full-nzb --mock-server benchmark, which measured a single segment regardless of --size.");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-STATS-CHURN-AND-PROVIDER-FALLBACK");
+        Log.Warning("  FEATURE: Connection-pool stats no longer build a websocket message when nobody is subscribed (61,683 bytes -> 0 per connection borrow/return, ~658 MiB over a 5,593-segment file), and coalesce to 4 pushes/sec per provider when the UI is open; the connections panel is refreshed on subscriber connect so skipping publishes cannot leave it stale. A stalled segment no longer fails outright when one provider is configured: excluded providers are offered as a last resort instead of emptying the candidate list. Also repairs the --test-full-nzb --mock-server benchmark, which measured a single segment regardless of --size.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
