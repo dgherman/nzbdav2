@@ -41,3 +41,4 @@ config/
 temp_config/
 backend/local_data/
 .worktrees/
+.DS_Store
