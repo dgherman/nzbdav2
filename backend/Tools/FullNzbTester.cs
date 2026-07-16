@@ -494,6 +494,7 @@ public class FullNzbTester
                         Console.WriteLine();
                         Console.WriteLine("--- STEP 7: SEQUENTIAL THROUGHPUT BENCHMARK ---");
                         double sequentialSpeed = 0;
+                        long sequentialBytesRead = 0;
 
                         // Reset timing stats for clean throughput measurement
                         BufferedSegmentStream.ResetGlobalTimingStats();
@@ -554,6 +555,7 @@ public class FullNzbTester
 
                             benchWatch.Stop();
                             sequentialSpeed = (totalBenchRead / 1024.0 / 1024.0) / benchWatch.Elapsed.TotalSeconds;
+                            sequentialBytesRead = totalBenchRead;
 
                             // Calculate statistics
                             var avgReadTime = totalReadTime / readCount;
@@ -600,6 +602,18 @@ public class FullNzbTester
                         Console.WriteLine("───────────────────────────────────────────────────────────────");
                         Console.WriteLine("  SEQUENTIAL THROUGHPUT:");
                         Console.WriteLine($"    Speed:              {sequentialSpeed,6:F2} MB/s");
+                        Console.WriteLine("───────────────────────────────────────────────────────────────");
+                        // Allocation is the metric that matters for the OOM investigation (see issue #14):
+                        // the heap is churn-bound, not leak-bound, so what kills a long stream is how much
+                        // garbage the streaming path produces per byte delivered.
+                        var allocatedBytes = GC.GetTotalAllocatedBytes(precise: false);
+                        var deliveredMb = sequentialBytesRead / 1024.0 / 1024.0;
+                        Console.WriteLine("  ALLOCATION:");
+                        Console.WriteLine($"    Total Allocated:    {allocatedBytes / 1024.0 / 1024.0,8:F0} MB");
+                        Console.WriteLine($"    Bytes Delivered:    {deliveredMb,8:F0} MB");
+                        Console.WriteLine($"    Alloc per MB read:  {(deliveredMb > 0 ? allocatedBytes / 1024.0 / 1024.0 / deliveredMb : 0),8:F1} MB");
+                        Console.WriteLine($"    Gen0/Gen1/Gen2:     {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)}");
+                        Console.WriteLine($"    Heap Now:           {GC.GetTotalMemory(false) / 1024.0 / 1024.0,8:F0} MB");
                         Console.WriteLine("═══════════════════════════════════════════════════════════════");
                     }
                     catch (Exception ex)
