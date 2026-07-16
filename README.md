@@ -116,6 +116,15 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.4 (2026-07-16)
+Cuts the largest avoidable allocator on the streaming path. See [issue #14](https://github.com/dgherman/nzbdav2/issues/14).
+
+*   **Performance (connection-pool stats built a UI message nobody was reading)**: `ConnectionPoolStats.OnEvent` serialized every active connection to JSON, computed a global and a per-provider usage breakdown, and formatted a message — on **every connection borrow and return**, from 11 raise sites in `ConnectionPool`, fanned out to every provider's pool by `UpdateUsageContext` on every buffer-starved read. It did all of this whether or not a websocket was attached, and during Plex playback none is: the message was built and dropped. Measured at **61,683 bytes per event** with 30 active connections — 120.5 KiB per segment, ~658 MiB over a 5,593-segment file. The event now updates its counters (integer work, always needed) and returns immediately when no subscriber is connected: **61,683 bytes → 0**. With the UI open the message is still built, but pushes are coalesced per provider to at most one per 250 ms, so a burst costs one message instead of thousands (3 bytes/event averaged over a burst).
+*   **Performance**: `WebsocketManager.SendMessage` serialized the topic message and UTF-8 encoded it before discovering it had no sockets to send to. It now checks first. The last-message cache is still updated, so replay-on-connect is unaffected for every topic.
+*   **Fix (stale connections panel on first page load)**: because a producer that skips publishing leaves its cached message stale, `WebsocketManager` now takes a state refresher that runs after a newly-connected subscriber replays cached state; `ConnectionPoolStats` republishes every provider over the top. This also corrects a pre-existing quirk — the cache holds one message per *topic*, so a multi-provider setup only ever replayed the last provider to change, and the rest of the panel stayed blank until each happened to fire.
+
+End to end on the mock harness (300 MB, 30 connections, single provider, UI closed), averaged over 3 runs: allocation per MB read **3.63 → 3.13 MB**, ~96 MB less garbage per 200 MB delivered, or ~219 KB per segment. Extrapolated to a 5,593-segment file that is ~1.2 GB of garbage removed, and more on a multi-provider setup where the per-read fan-out multiplies. Streaming throughput was not the target and the run-to-run ranges overlap, though the spread narrowed (611–649 MB vs 676–775 MB).
+
 ## v0.11.3 (2026-07-16)
 Repairs the `--test-full-nzb --mock-server` benchmark harness so it measures something real. Tooling and tests only — no change to streaming behaviour. See [issue #15](https://github.com/dgherman/nzbdav2/issues/15).
 

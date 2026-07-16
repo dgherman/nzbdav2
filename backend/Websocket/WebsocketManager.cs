@@ -11,6 +11,7 @@ public class WebsocketManager
 {
     private readonly HashSet<WebSocket> _authenticatedSockets = [];
     private readonly Dictionary<WebsocketTopic, string> _lastMessage = new();
+    private Action? _stateRefresher;
 
     public async Task HandleRoute(HttpContext context)
     {
@@ -35,6 +36,17 @@ public class WebsocketManager
                 if (message.Key.Type == WebsocketTopic.TopicType.State)
                     await SendMessage(webSocket, message.Key, message.Value).ConfigureAwait(false);
 
+            // Refresh after the replay, not before: producers that went quiet while nobody was
+            // listening have a stale cached message, and this overwrites it with current state.
+            try
+            {
+                Volatile.Read(ref _stateRefresher)?.Invoke();
+            }
+            catch (Exception e)
+            {
+                Log.Debug($"State refresher threw on subscriber connect. {e.Message}");
+            }
+
             // wait for the socket to disconnect
             await WaitForDisconnected(webSocket).ConfigureAwait(false);
             lock (_authenticatedSockets)
@@ -53,12 +65,44 @@ public class WebsocketManager
     /// <param name="message">The message to send</param>
     public Task SendMessage(WebsocketTopic topic, string message)
     {
+        // Still cached even with nobody listening: a socket that connects later replays this.
         lock (_lastMessage) _lastMessage[topic] = message;
-        List<WebSocket>? authenticatedSockets;
-        lock (_authenticatedSockets) authenticatedSockets = _authenticatedSockets.ToList();
+
+        List<WebSocket> authenticatedSockets;
+        lock (_authenticatedSockets)
+        {
+            // Serializing and encoding for an empty socket list produces nothing but garbage.
+            if (_authenticatedSockets.Count == 0) return Task.CompletedTask;
+            authenticatedSockets = _authenticatedSockets.ToList();
+        }
+
         var topicMessage = new TopicMessage(topic, message);
         var bytes = new ArraySegment<byte>(Encoding.UTF8.GetBytes(topicMessage.ToJson()));
         return Task.WhenAll(authenticatedSockets.Select(x => SendMessage(x, bytes)));
+    }
+
+    /// <summary>
+    /// True when at least one authenticated websocket is connected. Lets producers of expensive
+    /// stateful messages skip building them when nothing would consume the result.
+    /// </summary>
+    public bool HasSubscribers
+    {
+        get { lock (_authenticatedSockets) return _authenticatedSockets.Count > 0; }
+    }
+
+    /// <summary>
+    /// Registers a callback invoked once a subscriber has connected and replayed cached state.
+    /// A producer that skips publishing while <see cref="HasSubscribers"/> is false leaves the
+    /// cached message stale; this is its chance to publish a current snapshot over the top.
+    /// Single slot — registering again replaces the previous callback, so a producer rebuilt on
+    /// config reload does not accumulate.
+    /// </summary>
+    public void RegisterStateRefresher(Action refresher) => Volatile.Write(ref _stateRefresher, refresher);
+
+    /// <summary>Test seam: marks a socket authenticated without performing the handshake.</summary>
+    internal void AddSubscriberForTest(WebSocket socket)
+    {
+        lock (_authenticatedSockets) _authenticatedSockets.Add(socket);
     }
 
     /// <summary>
