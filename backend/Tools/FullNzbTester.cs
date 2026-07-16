@@ -637,6 +637,11 @@ public class FullNzbTester
                                               $"  (fragmentation {g.FragmentationAfterBytes / 1024.0 / 1024.0:F1} MB)");
                         }
                         Console.WriteLine($"    LOH alloc share is the number that matters — NAS runs ~71%.");
+                        if (SegmentBufferPoolDiagnostics.Enabled)
+                        {
+                            Console.WriteLine("───────────────────────────────────────────────────────────────");
+                            Console.WriteLine(SegmentBufferPoolDiagnostics.Report());
+                        }
                         Console.WriteLine("═══════════════════════════════════════════════════════════════");
                     }
                     catch (Exception ex)

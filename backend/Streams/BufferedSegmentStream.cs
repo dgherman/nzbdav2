@@ -563,6 +563,18 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             var segmentSlots = new PooledSegmentData?[segmentIds.Length];
             var nextIndexToWrite = 0;
 
+            // How far ahead of the reader a segment may be dispatched. A completed segment parks a
+            // ~1MB pooled buffer in segmentSlots until the ordering task drains it, and segmentSlots
+            // is sized to the whole file. _bufferChannel bounds only the ordering task, which is
+            // downstream of the slots, so it is not backpressure on the fetchers. The window covers
+            // everything that can hold a buffer at once: the channel plus the in-flight workers.
+            var maxPrefetchWindow = bufferSegmentCount + concurrentConnections;
+            if (int.TryParse(Environment.GetEnvironmentVariable("NZBDAV_PREFETCH_WINDOW"), out var windowOverride)
+                && windowOverride > 0)
+            {
+                maxPrefetchWindow = windowOverride;
+            }
+
             // Producer: Queue segment IDs up to effectiveSegmentCount (may be < segmentIds.Length
             // when bounded by an HTTP Range end byte to prevent over-prefetching).
             var producerTask = Task.Run(async () =>
@@ -571,6 +583,19 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 {
                     for (int i = 0; i < effectiveSegmentCount; i++)
                     {
+                        if (ct.IsCancellationRequested) break;
+
+                        // Backpressure: hold the segment back until the reader is close enough to
+                        // need it. Without this the workers race to the end of the file and the
+                        // resident set scales with file size instead of with bufferSegmentCount —
+                        // which is the OOM in issue #19. Index _nextIndexToRead is always inside the
+                        // window, so the segment the reader is waiting on can never be gated.
+                        while (i >= Volatile.Read(ref _nextIndexToRead) + maxPrefetchWindow
+                               && !ct.IsCancellationRequested)
+                        {
+                            await Task.Delay(10, ct).ConfigureAwait(false);
+                        }
+
                         if (ct.IsCancellationRequested) break;
                         await segmentQueue.Writer.WriteAsync((i, segmentIds[i]), ct).ConfigureAwait(false);
                     }
@@ -1234,6 +1259,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                     ? (int)Math.Min(_segmentSizes[index] + 4096, int.MaxValue)
                     : Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
                 var buffer = ArrayPool<byte>.Shared.Rent(initialRentSize);
+                SegmentBufferPoolDiagnostics.RecordRent(buffer);
                 var totalRead = 0;
 
                 // Time network read
@@ -1251,8 +1277,10 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                         {
                             // Resize via ArrayPool to avoid LOH churn
                             var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
+                            SegmentBufferPoolDiagnostics.RecordResizeRent();
                             Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
                             ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                            SegmentBufferPoolDiagnostics.RecordReturn();
                             buffer = newBuffer;
                         }
 
@@ -1327,6 +1355,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 {
                     // Return the rented buffer on failure to avoid pool leaks
                     ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                    SegmentBufferPoolDiagnostics.RecordReturn();
                     throw;
                 }
             }
@@ -1555,6 +1584,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
 
             var initialSize = Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
             var buffer = ArrayPool<byte>.Shared.Rent(initialSize);
+            SegmentBufferPoolDiagnostics.RecordRent(buffer);
             var totalRead = 0;
             try
             {
@@ -1899,6 +1929,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             if (buf != null && _pooled)
             {
                 ArrayPool<byte>.Shared.Return(buf, clearArray: false);
+                SegmentBufferPoolDiagnostics.RecordReturn();
             }
         }
     }

@@ -59,8 +59,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-STATS-CHURN-AND-PROVIDER-FALLBACK");
-        Log.Warning("  FEATURE: Connection-pool stats no longer build a websocket message when nobody is subscribed (61,683 bytes -> 0 per connection borrow/return, ~658 MiB over a 5,593-segment file), and coalesce to 4 pushes/sec per provider when the UI is open; the connections panel is refreshed on subscriber connect so skipping publishes cannot leave it stale. A stalled segment no longer fails outright when one provider is configured: excluded providers are offered as a last resort instead of emptying the candidate list. Also repairs the --test-full-nzb --mock-server benchmark, which measured a single segment regardless of --size.");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-BOUNDED-PREFETCH-WINDOW");
+        Log.Warning("  FEATURE: Segment prefetch is now bounded by the reader's position. Fetch workers wrote completed ~1MB segment buffers into a slots array sized to the whole file, and the only bounded queue sat downstream of it, so nothing tied fetch rate to read rate: the workers raced to the end of the file and the resident set scaled with file size instead of with the configured buffer. That is the streaming OOM (#19). A 200 MB file kept 299 buffers resident for 293 segments -- the entire file -- and 400 MB reproduced OutOfMemoryException in the harness. Prefetch now stops at bufferSegmentCount + connections ahead of the reader: peak resident is flat at ~180 buffers across 200/400/1000 MB, 400 MB no longer OOMs, and the sequential read fetches 294 segments instead of 427.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested

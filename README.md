@@ -116,6 +116,17 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.5 (2026-07-16)
+Fixes the streaming OOM ([#19](https://github.com/dgherman/nzbdav2/issues/19)): segment prefetch had no backpressure, so memory scaled with file size instead of with the configured buffer.
+
+### Streaming
+
+*   **Fix (the backend died with `Internal CLR error (0x80131506)` during large-file playback)**: fetch workers pulled segments as fast as the providers would serve them and parked each completed ~1MB pooled buffer in `segmentSlots`, an array sized to the **whole file**. The only bounded queue, `_bufferChannel`, sits *downstream* of those slots and throttles the ordering task, not the fetchers — so nothing tied the fetch rate to the read rate and the workers raced to the end of the file. The resident set was therefore a function of file size, not of `bufferSegmentCount`: on the mock harness a 200 MB file held **299 buffers for 293 segments — the entire file in memory** — and 400 MB reproduced `OutOfMemoryException` outright. The producer now holds a segment back until the reader is within `bufferSegmentCount + connections` of needing it. The index the reader is waiting on is always inside the window, so it can never be gated. Peak resident is now **flat at ~180 buffers across 200 MB, 400 MB and 1000 MB**, 400 MB and 1000 MB complete with zero OOM, and LOH after collection drops **376 → 238 MB** on the 200 MB run with allocation per MB read **2.8 → 1.9 MB**.
+*   **Performance (redundant re-fetching)**: bounding the window also cuts wasted work. A 200 MB sequential read fetched **427 segments to deliver 293** (the straggler monitor re-racing segments whose fetches had been slowed by the workers' own contention); it now fetches **294**, and mean per-fetch time halves (1.72s → 0.85s cumulative-per-worker).
+*   **Tooling**: `SegmentBufferPoolDiagnostics` (set `NZBDAV_POOL_DIAG=1`) reports segment-buffer rents, returns, distinct arrays and the peak checked-out count in the harness. This is what settled #19: distinct arrays tracked the peak working set almost exactly (303 vs 299), which showed `ArrayPool` was reusing correctly and the fault was the size of the working set, not the pool. `NZBDAV_PREFETCH_WINDOW` overrides the window for tuning.
+
+Sequential throughput in the harness reads lower after the change (~13 vs ~23 MB/s), but the comparison is confounded and the harness is a poor instrument for it: ~99% of fetch time there is connection-pool acquire ([#18](https://github.com/dgherman/nzbdav2/issues/18)), the mock provider's circuit breaker trips ~28 times per run on **baseline** too, and run-to-run spread is 7.6–34.1 MB/s. The baseline bought its number by fetching 1.43× the segments and holding the whole file in RAM — which is the bug. Pool contention (#18) is the real throughput limiter and is unaddressed here.
+
 ## v0.11.4 (2026-07-16)
 Cuts the largest avoidable allocator on the streaming path ([#14](https://github.com/dgherman/nzbdav2/issues/14)), stops a stalled segment from failing outright on single-provider setups ([#16](https://github.com/dgherman/nzbdav2/issues/16)), and repairs the benchmark harness that measures the first ([#15](https://github.com/dgherman/nzbdav2/issues/15)).
 
