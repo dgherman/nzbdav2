@@ -89,16 +89,18 @@ public class FullNzbTester
             BufferedSegmentStream.EnableDetailedTiming = true;
             BufferedSegmentStream.ResetGlobalTimingStats();
 
-            // Start mock server
-            Console.WriteLine($"Starting mock NNTP server on port {port}...");
-            mockServer = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, stallRate);
-            mockServer.Start();
-
-            // Generate mock NZB
+            // Generate the mock NZB first: the server serves per-segment yEnc headers derived from
+            // this layout, so it has to know the geometry before it answers anything.
             nzbPath = "mock.nzb";
             var totalSize = (long)totalSizeMb * 1024 * 1024;
             Console.WriteLine($"Generating {nzbPath} ({totalSizeMb}MB)...");
-            await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize);
+            var layout = await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize);
+            Console.WriteLine($"Generated {layout.TotalSegments} segments across {layout.Files.Count} file(s).");
+
+            // Start mock server
+            Console.WriteLine($"Starting mock NNTP server on port {port}...");
+            mockServer = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, stallRate, layout);
+            mockServer.Start();
 
             var mockConfig = new UsenetProviderConfig
             {
@@ -154,7 +156,11 @@ public class FullNzbTester
         services.AddSingleton<ProviderErrorService>();
         services.AddSingleton<NzbProviderAffinityService>();
         services.AddSingleton<UsenetStreamingClient>();
-        services.AddDbContext<DavDatabaseContext>();
+        // Construct the context directly rather than AddDbContext<T>(): the DI overload injects an
+        // unconfigured DbContextOptions, so every query throws "No database provider has been
+        // configured". The parameterless ctor carries the app's real SQLite options, which is what
+        // makes provider affinity behave here the way it does in production.
+        services.AddScoped<DavDatabaseContext>(_ => new DavDatabaseContext());
 
         var sp = services.BuildServiceProvider();
         var client = sp.GetRequiredService<UsenetStreamingClient>();
@@ -494,6 +500,7 @@ public class FullNzbTester
                         Console.WriteLine();
                         Console.WriteLine("--- STEP 7: SEQUENTIAL THROUGHPUT BENCHMARK ---");
                         double sequentialSpeed = 0;
+                        long sequentialBytesRead = 0;
 
                         // Reset timing stats for clean throughput measurement
                         BufferedSegmentStream.ResetGlobalTimingStats();
@@ -554,6 +561,7 @@ public class FullNzbTester
 
                             benchWatch.Stop();
                             sequentialSpeed = (totalBenchRead / 1024.0 / 1024.0) / benchWatch.Elapsed.TotalSeconds;
+                            sequentialBytesRead = totalBenchRead;
 
                             // Calculate statistics
                             var avgReadTime = totalReadTime / readCount;
@@ -600,6 +608,18 @@ public class FullNzbTester
                         Console.WriteLine("───────────────────────────────────────────────────────────────");
                         Console.WriteLine("  SEQUENTIAL THROUGHPUT:");
                         Console.WriteLine($"    Speed:              {sequentialSpeed,6:F2} MB/s");
+                        Console.WriteLine("───────────────────────────────────────────────────────────────");
+                        // Allocation is the metric that matters for the OOM investigation (see issue #14):
+                        // the heap is churn-bound, not leak-bound, so what kills a long stream is how much
+                        // garbage the streaming path produces per byte delivered.
+                        var allocatedBytes = GC.GetTotalAllocatedBytes(precise: false);
+                        var deliveredMb = sequentialBytesRead / 1024.0 / 1024.0;
+                        Console.WriteLine("  ALLOCATION:");
+                        Console.WriteLine($"    Total Allocated:    {allocatedBytes / 1024.0 / 1024.0,8:F0} MB");
+                        Console.WriteLine($"    Bytes Delivered:    {deliveredMb,8:F0} MB");
+                        Console.WriteLine($"    Alloc per MB read:  {(deliveredMb > 0 ? allocatedBytes / 1024.0 / 1024.0 / deliveredMb : 0),8:F1} MB");
+                        Console.WriteLine($"    Gen0/Gen1/Gen2:     {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)}");
+                        Console.WriteLine($"    Heap Now:           {GC.GetTotalMemory(false) / 1024.0 / 1024.0,8:F0} MB");
                         Console.WriteLine("═══════════════════════════════════════════════════════════════");
                     }
                     catch (Exception ex)

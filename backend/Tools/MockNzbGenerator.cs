@@ -13,6 +13,12 @@ public static class MockNzbGenerator
         public int SegmentCount { get; init; }
         public int FirstSegmentIndex { get; init; }
         public List<string> SegmentIds { get; init; } = new();
+
+        /// <summary>Total size of this file, so the mock server can emit a truthful =ybegin size=.</summary>
+        public long FileSize { get; init; }
+
+        /// <summary>True when part 1 of this file must carry RAR5 magic bytes.</summary>
+        public bool IsRar { get; init; }
     }
 
     /// <summary>
@@ -25,11 +31,22 @@ public static class MockNzbGenerator
     }
 
     /// <summary>
+    /// Size of segment <paramref name="index"/>. Every segment is full except the last,
+    /// which carries the remainder.
+    /// </summary>
+    public static int SegmentSizeAt(int index, int segmentCount, long fileSize, int segmentSize)
+    {
+        if (index < segmentCount - 1) return segmentSize;
+        var remainder = fileSize - (long)(segmentCount - 1) * segmentSize;
+        return (int)remainder;
+    }
+
+    /// <summary>
     /// Generate a simple flat file NZB
     /// </summary>
-    public static async Task GenerateAsync(string path, long totalSize, int segmentSize)
+    public static Task<GenerationResult> GenerateAsync(string path, long totalSize, int segmentSize)
     {
-        await GenerateAsync(path, totalSize, segmentSize, useRar: false, rarVolumeCount: 1);
+        return GenerateAsync(path, totalSize, segmentSize, useRar: false, rarVolumeCount: 1);
     }
 
     /// <summary>
@@ -77,7 +94,9 @@ public static class MockNzbGenerator
                     FileName = fileName,
                     SegmentCount = segmentsPerVolume,
                     FirstSegmentIndex = globalSegmentIndex,
-                    SegmentIds = new List<string>()
+                    SegmentIds = new List<string>(),
+                    FileSize = sizePerVolume,
+                    IsRar = true
                 };
 
                 sb.Append($" <file poster='Mock' date='{date}' subject='{fileName} (1/{rarVolumeCount})'>\n");
@@ -89,7 +108,8 @@ public static class MockNzbGenerator
                     // Encode file index and segment index in message ID for server to decode
                     var msgId = $"mock-{vol:D3}-{i:D6}-{Guid.NewGuid():N}@mock.server";
                     fileInfo.SegmentIds.Add(msgId);
-                    sb.Append($"   <segment bytes='{segmentSize}' number='{i + 1}'>{msgId}</segment>\n");
+                    var partBytes = SegmentSizeAt(i, segmentsPerVolume, sizePerVolume, segmentSize);
+                    sb.Append($"   <segment bytes='{partBytes}' number='{i + 1}'>{msgId}</segment>\n");
                     globalSegmentIndex++;
                 }
 
@@ -109,7 +129,9 @@ public static class MockNzbGenerator
                 FileName = fileName,
                 SegmentCount = segments,
                 FirstSegmentIndex = 0,
-                SegmentIds = new List<string>()
+                SegmentIds = new List<string>(),
+                FileSize = totalSize,
+                IsRar = true
             };
 
             sb.Append($" <file poster='Mock' date='{date}' subject='{fileName}'>\n");
@@ -120,7 +142,8 @@ public static class MockNzbGenerator
             {
                 var msgId = $"mock-000-{i:D6}-{Guid.NewGuid():N}@mock.server";
                 fileInfo.SegmentIds.Add(msgId);
-                sb.Append($"   <segment bytes='{segmentSize}' number='{i + 1}'>{msgId}</segment>\n");
+                var partBytes = SegmentSizeAt(i, segments, totalSize, segmentSize);
+                sb.Append($"   <segment bytes='{partBytes}' number='{i + 1}'>{msgId}</segment>\n");
             }
 
             sb.AppendLine("  </segments>");
@@ -139,7 +162,9 @@ public static class MockNzbGenerator
                 FileName = subject,
                 SegmentCount = segments,
                 FirstSegmentIndex = 0,
-                SegmentIds = new List<string>()
+                SegmentIds = new List<string>(),
+                FileSize = totalSize,
+                IsRar = false
             };
 
             sb.Append($" <file poster='Mock' date='{date}' subject='{subject}'>\n");
@@ -150,7 +175,8 @@ public static class MockNzbGenerator
             {
                 var msgId = $"mock-flat-{i:D6}-{Guid.NewGuid():N}@mock.server";
                 fileInfo.SegmentIds.Add(msgId);
-                sb.Append($"   <segment bytes='{segmentSize}' number='{i + 1}'>{msgId}</segment>\n");
+                var partBytes = SegmentSizeAt(i, segments, totalSize, segmentSize);
+                sb.Append($"   <segment bytes='{partBytes}' number='{i + 1}'>{msgId}</segment>\n");
             }
 
             sb.AppendLine("  </segments>");

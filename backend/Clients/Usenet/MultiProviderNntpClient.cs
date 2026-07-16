@@ -332,7 +332,14 @@ public class MultiProviderNntpClient : INntpClient
             return result;
 
         lastException?.Throw();
-        throw new Exception("There are no usenet providers configured.");
+
+        // Reached only when selection yielded nothing to attempt, so no provider ever ran and there
+        // is no lastException to rethrow. Distinguish the two causes: "none configured" sends
+        // someone to their provider settings, which is the wrong place to look when providers are
+        // configured but were all disabled or filtered out of selection.
+        throw new Exception(Providers.Count == 0
+            ? "There are no usenet providers configured."
+            : $"No usenet provider was available to try: all {Providers.Count} configured provider(s) were disabled or filtered out of selection.");
     }
 
     private void RecordMissingArticle(int providerIndex, string segmentId, CancellationToken ct, string operation)
@@ -427,7 +434,7 @@ public class MultiProviderNntpClient : INntpClient
             .OrderBy(x => x.IsTripped);
     }
 
-    private IEnumerable<MultiConnectionNntpClient> GetBalancedProviders(CancellationToken cancellationToken = default)
+    internal IEnumerable<MultiConnectionNntpClient> GetBalancedProviders(CancellationToken cancellationToken = default)
     {
         // Check for forced provider (used for testing individual provider performance)
         var context = cancellationToken.GetContext<ConnectionUsageContext>();
@@ -552,14 +559,30 @@ public class MultiProviderNntpClient : INntpClient
                 .OrderByDescending(x => x.AvailableConnections)
             : Enumerable.Empty<MultiConnectionNntpClient>();
 
+        // Excluded providers, as an absolute last resort — mirroring the tier GetOrderedProviders
+        // has always had. Exclusion is a preference ("fetch this segment somewhere else"), not a
+        // verdict that the provider is unusable: the straggler race excludes a slow provider to
+        // hedge the segment on a different one. Dropping excluded providers outright means that
+        // when exclusion empties the list there is nothing left to try, and the caller is told
+        // there are no providers configured — while a working provider sat there the whole time.
+        // A single-provider setup hits this on *every* straggler (issue #16).
+        var excluded = hasExcluded
+            ? Providers
+                .Where(x => x.ProviderType != ProviderType.Disabled)
+                .Where(x => excludedIndices!.Contains(x.ProviderIndex))
+                .OrderBy(x => x.ProviderType)
+                .ThenByDescending(x => x.AvailableConnections)
+            : Enumerable.Empty<MultiConnectionNntpClient>();
+
         // Provider ordering:
         // 1. Affinity provider (if available and not excluded/deprioritized)
         // 2. Pooled providers (sorted by availability)
         // 3. Other providers (backups)
         // 4. Deprioritized providers (per-stream cooldown)
         // 5. Low success rate providers (global job-level)
-        // Excluded providers are NEVER included
-        return pooled.Concat(others).Concat(deprioritized).Concat(lowSuccessRate)
+        // 6. Excluded providers (last resort — only reached once every preferred provider errored)
+        // Disabled providers are never included.
+        return pooled.Concat(others).Concat(deprioritized).Concat(lowSuccessRate).Concat(excluded)
             .Prepend(affinityProvider)  // NZB-level affinity takes priority
             .Where(x => x is not null)
             .Select(x => x!)
