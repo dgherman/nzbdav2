@@ -59,9 +59,10 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-17-PER-STREAM-MEMORY-INSTRUMENTATION");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-17-PER-STREAM-MEMORY-AND-GC-DIAGNOSTICS");
         Log.Warning("  FIX (#19, shipped v0.11.5): segment prefetch is bounded by the reader's position, with a floor of 300 segments. Confirmed on production 2026-07-17 running the default (floored) path: zero fetch-path memory failures on the 6924-segment file that used to fail. Tune with the 'usenet.prefetch-window' setting (0 = auto).");
-        Log.Warning("  INSTRUMENT (#18): each stream now logs its effective segment count and memory ceiling alongside the window, so a stream's cost can be read from the log instead of inferred. Two videos opened 15 streams -- 8 of them on a single file within 5 seconds, saturating every buffered-stream slot -- and the per-stream ceiling is what tells us which of those are expensive. NOTE: this banner deliberately does not quote the per-stream log's literal text; when it did, every grep for that text also matched the banner and inflated the count.");
+        Log.Warning("  INSTRUMENT (#18): each stream now logs its effective segment count and memory ceiling alongside the window, so a stream's cost can be read from the log instead of inferred. Measured: one video opens 5 streams but only 2 are expensive -- the other 3 are range-bounded and cost 7MB between them, so counting streams overstates memory badly. NOTE: this banner deliberately does not quote the per-stream log's literal text; when it did, every grep for that text also matched the banner and inflated a production stream count from 15 to 17.");
+        Log.Warning("  INSTRUMENT (heap): POST /api/gc-diagnostics forces a full compacting collection and reports generation sizes either side of it, separating rooted memory from garbage. Needs NZBDAV_GC_DIAG=1; it stalls every thread while it runs. Exists because last_collection_heap_size freezes when the process goes idle -- the heap becomes unreadable exactly when you want its floor.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
