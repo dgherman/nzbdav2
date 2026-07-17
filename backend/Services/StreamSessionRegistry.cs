@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using NzbWebDAV.Database.Models;
 
 namespace NzbWebDAV.Services;
 
@@ -58,7 +59,48 @@ public sealed class StreamSessionRegistry
         }
         return result;
     }
+
+    /// <summary>
+    /// Enriches raw sessions with cumulative per-provider byte tallies (from affinity stats,
+    /// which are per-title and persisted — NOT per-session) and maps provider indices to the
+    /// current config's hosts, dropping stale indices from prior configs.
+    /// </summary>
+    public static IReadOnlyList<ActiveStreamDto> BuildDtos(
+        IReadOnlyList<ActiveStreamSnapshot> sessions,
+        Func<string, Dictionary<int, NzbProviderStats>> jobStatsLookup,
+        IReadOnlyList<string> providerHosts)
+    {
+        var dtos = new List<ActiveStreamDto>(sessions.Count);
+        foreach (var s in sessions)
+        {
+            var jobStats = jobStatsLookup(s.AffinityKey);
+            var tallies = jobStats
+                .Where(kv => kv.Key >= 0 && kv.Key < providerHosts.Count)
+                .Where(kv => kv.Value.TotalBytes > 0)
+                .Select(kv => new StreamProviderTally(kv.Key, providerHosts[kv.Key], kv.Value.TotalBytes))
+                .OrderByDescending(t => t.TotalBytes)
+                .ToList();
+
+            var progress = s.FileSize > 0
+                ? (int)Math.Clamp(s.CurrentBytePosition * 100 / s.FileSize, 0, 100)
+                : 0;
+
+            dtos.Add(new ActiveStreamDto(
+                s.DavItemId, s.FileName, s.CurrentBytePosition, s.FileSize, progress, tallies));
+        }
+        return dtos;
+    }
 }
+
+public sealed record StreamProviderTally(int ProviderIndex, string Host, long TotalBytes);
+
+public sealed record ActiveStreamDto(
+    Guid DavItemId,
+    string FileName,
+    long CurrentBytePosition,
+    long FileSize,
+    int ProgressPercent,
+    IReadOnlyList<StreamProviderTally> Providers);
 
 public sealed record ActiveStreamSnapshot(
     Guid DavItemId,
