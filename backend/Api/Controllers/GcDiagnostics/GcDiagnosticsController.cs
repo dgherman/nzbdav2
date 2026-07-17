@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using Microsoft.AspNetCore.Mvc;
 using NzbWebDAV.Api.Controllers;
+using NzbWebDAV.Streams;
 using Serilog;
 
 namespace NzbWebDAV.Api.Controllers.GcDiagnostics;
@@ -101,11 +102,23 @@ public class GcDiagnosticsController : BaseApiController
             after.TotalHeapBytes / (1024 * 1024),
             reclaimed / (1024 * 1024));
 
+        // Reported after the collection on purpose: "still checked out" is only meaningful once the
+        // garbage is gone. Measured on production 2026-07-17, LOH held 2854 MB before a forced
+        // compacting gen2 and 2854 MB after, while the prefetch windows accounted for 607 MB — so
+        // ~2.25 GB is reachable and unattributed. If the outstanding count tracks that number, the
+        // buffers are still referenced by something; if it tracks the windows, the LOH is not
+        // buffers at all and the search moves elsewhere.
+        var poolReport = SegmentBufferPoolDiagnostics.Enabled
+            ? SegmentBufferPoolDiagnostics.Report()
+            : "Segment buffer pool diagnostics are disabled. Set NZBDAV_POOL_DIAG=1 to enable " +
+              "(it takes a lock on every rent, so it costs throughput).";
+
         return Task.FromResult<IActionResult>(Ok(new
         {
             status = true,
             forcedCollectionMs = stopwatch.ElapsedMilliseconds,
             reclaimedBytes = reclaimed,
+            segmentBufferPool = poolReport,
             // After a forced collection this is live+retained, with no garbage left to hide behind.
             // A number that stays high here is rooted by something and is worth chasing; a number
             // that collapses was never a leak.
