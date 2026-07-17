@@ -53,7 +53,9 @@ export function Dashboard({ initialData, initialConnections }: Props) {
 
                 const parts = message.split('|');
                 if (parts.length >= 9) {
-                    const providerIndex = parseInt(parts[1]);
+                    // Wire format (ConnectionPoolStats.Push):
+                    // providerIndex|live|idle|totalLive|max|totalIdle|usage|providerBreakdown|connsJson
+                    const providerIndex = parseInt(parts[0]);
                     const connsJson = parts[8];
                     try {
                         const rawConns = JSON.parse(connsJson) as any[];

@@ -155,6 +155,14 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.7 (2026-07-17)
+Fixes the System Dashboard "Active Streaming" panel, which invented phantom providers and drowned each real one in duplicate rows.
+
+### UI
+
+*   **Fix (dashboard keyed live connections by connection count, not provider)**: the websocket connection frame is `providerIndex|live|idle|...|connsJson`, but the dashboard read field `[1]` (the *live count*) as the provider index. A provider with 24 live connections was filed under index 24 and rendered as an unnamed "Provider 24" card; real providers only matched their names by coincidence when their index happened to equal their live count. One 7-provider stream painted a wall of phantom cards up to "Provider 24". Now reads field `[0]`, so every card maps to a real configured provider and is named correctly.
+*   **UI (one row per open connection collapsed to one row per file)**: a single stream fans across many connections (the prefetch window), so a busy provider printed dozens of identical rows behind a "+N more". Each card now shows one row per distinct file with an `xN` connection count and the leading read position (`%` of the furthest-along connection).
+
 ## v0.11.6 (2026-07-17)
 Re-denominates the streaming prefetch floor in bytes instead of segments — a fixed segment count held 8x different memory on different files for the same playback guarantee — and instruments what the v0.11.5 fix exposed underneath.
 

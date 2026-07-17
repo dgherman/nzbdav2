@@ -39,7 +39,44 @@ export function ActiveStreaming({ connections, providerNames }: Props) {
     );
 }
 
+type FileGroup = {
+    fileName: string;
+    count: number;
+    progress: number | null;
+};
+
+// Collapse a provider's connections into one row per file. A single stream fans
+// out across many connections (prefetch window), so without this a busy provider
+// prints dozens of identical rows. Progress is the leading read edge — the
+// furthest-along connection — i.e. how much of the file has been fetched.
+function groupByFile(connections: ConnectionUsageContext[]): FileGroup[] {
+    const groups = new Map<string, FileGroup>();
+
+    for (const conn of connections) {
+        const fileName = conn.jobName || conn.details?.split('/').pop() || 'Unknown';
+        const progress = conn.currentBytePosition && conn.fileSize
+            ? Math.round((conn.currentBytePosition / conn.fileSize) * 100)
+            : null;
+
+        const existing = groups.get(fileName);
+        if (existing) {
+            existing.count += 1;
+            if (progress !== null) {
+                existing.progress = existing.progress === null
+                    ? progress
+                    : Math.max(existing.progress, progress);
+            }
+        } else {
+            groups.set(fileName, { fileName, count: 1, progress });
+        }
+    }
+
+    return Array.from(groups.values()).sort((a, b) => b.count - a.count);
+}
+
 function ProviderGroup({ providerName, connections }: { providerName: string; connections: ConnectionUsageContext[] }) {
+    const files = groupByFile(connections);
+
     return (
         <div className="bg-black bg-opacity-25 rounded p-3" style={{ minWidth: '200px' }}>
             <div className="d-flex justify-content-between align-items-center mb-2">
@@ -47,34 +84,34 @@ function ProviderGroup({ providerName, connections }: { providerName: string; co
                 <span className="badge bg-secondary">{connections.length}</span>
             </div>
             <div className="d-flex flex-column gap-1">
-                {connections.slice(0, 5).map((conn, idx) => (
-                    <StreamItem key={idx} connection={conn} />
+                {files.slice(0, 5).map((file, idx) => (
+                    <StreamItem key={idx} file={file} />
                 ))}
-                {connections.length > 5 && (
-                    <small className="text-muted">+{connections.length - 5} more</small>
+                {files.length > 5 && (
+                    <small className="text-muted">+{files.length - 5} more</small>
                 )}
             </div>
         </div>
     );
 }
 
-function StreamItem({ connection }: { connection: ConnectionUsageContext }) {
-    const fileName = connection.details?.split('/').pop() || 'Unknown';
-    const shortName = fileName.length > 25 ? fileName.substring(0, 22) + '...' : fileName;
-
-    // Calculate progress if we have byte position and file size
-    const progress = connection.currentBytePosition && connection.fileSize
-        ? Math.round((connection.currentBytePosition / connection.fileSize) * 100)
-        : null;
+function StreamItem({ file }: { file: FileGroup }) {
+    const baseName = file.fileName.split('/').pop() || file.fileName;
+    const shortName = baseName.length > 25 ? baseName.substring(0, 22) + '...' : baseName;
 
     return (
         <div className="d-flex justify-content-between align-items-center small">
-            <span className="text-truncate" style={{ maxWidth: '150px' }} title={fileName}>
+            <span className="text-truncate" style={{ maxWidth: '150px' }} title={file.fileName}>
                 {shortName}
             </span>
-            {progress !== null && (
-                <span className="text-muted ms-2">{progress}%</span>
-            )}
+            <span className="d-flex align-items-center gap-2 ms-2">
+                {file.count > 1 && (
+                    <span className="text-muted" title={`${file.count} connections`}>x{file.count}</span>
+                )}
+                {file.progress !== null && (
+                    <span className="text-muted">{file.progress}%</span>
+                )}
+            </span>
         </div>
     );
 }
