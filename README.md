@@ -116,36 +116,38 @@ Streaming holds segment buffers in memory while it reads ahead of the player. Tw
 
 | Setting | Default | What it does |
 | --- | --- | --- |
-| `usenet.prefetch-window` | `0` (auto) | How many segments the fetchers may run ahead of the reader. Auto = `stream buffer + connections`, raised to a floor of **300**. |
+| `usenet.prefetch-window` | `0` (auto) | How many segments the fetchers may run ahead of the reader. Auto floors the window at **256 MB of data in flight**, converted to a segment count per file using that file's average segment size. Setting a non-zero value overrides in **segments**. |
 | `usenet.max-concurrent-buffered-streams` | `8` | How many buffered streams can exist at once. Note this is **not** "number of videos" — a multipart/RAR playback needs a slot per active part, plus the player's head/tail probes. |
 
 ### The arithmetic
 
 ```
-peak resident ≈ prefetch-window × 1 MB × concurrent streams
+data in flight per stream ≈ min(prefetch-window, remaining segments) × average segment size
 ```
 
-So the defaults imply roughly `300 MB` per active stream, and a worst case of `~2.4 GB` if all 8 slots are in use. Two concurrent videos is about `600 MB`.
+On auto, the floor targets **~256 MB per active stream** regardless of segment size — a 4 MB-segment file gets ~64 segments, a 700 KB-segment file ~366, both holding ~256 MB. Worst case is `256 MB × concurrent streams`; two concurrent videos is about `512 MB`. (Resident RAM runs somewhat higher: `ArrayPool` rounds each buffer up to the next power-of-two, so a 4.19 MB segment occupies an 8 MB slot.)
+
+The floor used to be a fixed **300 segments**, which held 215 MB on one file and 2.4 GB on another for the identical guarantee — segment size varies ~8x between releases. Denominating in bytes fixes that.
 
 ### If you are memory-constrained
 
-Lower `usenet.prefetch-window` (say to 150), or lower `usenet.max-concurrent-buffered-streams`, or raise the container's heap limit (`DOTNET_GCHeapHardLimit`) if the host has room. Prefer raising the heap limit if you can: the streaming working set is now **bounded by these settings rather than by file size**, so headroom actually covers it.
+Lower `usenet.prefetch-window` to a fixed segment count (it overrides the byte floor), or lower `usenet.max-concurrent-buffered-streams`, or raise the container's heap limit (`DOTNET_GCHeapHardLimit`) if the host has room. Prefer raising the heap limit if you can: the streaming working set is now **bounded by these settings rather than by file size**, so headroom actually covers it.
 
 ### Do not set the window too low
 
-This is the one that bites. Too *large* a window costs memory you can tune away. Too *small* a window **breaks playback outright** — the reader starves, playback dies on NNTP body-read timeouts, and the retries trip your providers' circuit breakers. During development, an effective window of 90 at 30 connections made a second concurrent video unplayable; 300 ran three concurrent streams clean. If you lower this and streams start failing with `Invalid NNTP Response` and breaker trips, raise it back before suspecting your provider.
+This is the one that bites. Too *large* a window costs memory you can tune away. Too *small* a window **breaks playback outright** — the reader starves, playback dies on NNTP body-read timeouts, and the retries trip your providers' circuit breakers. During development, 64 MB in flight starved a second concurrent video; 215–256 MB ran multiple concurrent streams clean. Because a manual `usenet.prefetch-window` is a fixed segment count, its memory cost depends on the file's segment size — 90 segments is 64 MB on a 700 KB-segment file but 360 MB on a 4 MB-segment one. If you lower it and streams start failing with `Invalid NNTP Response` and breaker trips, raise it back before suspecting your provider.
 
-The window has to be this generous mainly because connection-acquire contention dominates fetch latency ([#18](https://github.com/dgherman/nzbdav2/issues/18)); if that improves, the floor can come down.
+The floor has to be this generous mainly because connection-acquire contention dominates fetch latency ([#18](https://github.com/dgherman/nzbdav2/issues/18)); if that improves, it can come down.
 
 ### Checking what you are actually running
 
 Each stream logs its effective window:
 
 ```
-[BufferedStream] PREFETCH WINDOW: 300 segments (10.0x of 30 connections, source=configured, bufferSegmentCount=60), Job=...
+[BufferedStream] PREFETCH WINDOW: 64 segments (2.1x of 30 connections, source=byte-floor, avgSeg=4192KB, bufferSegmentCount=60), holds~256MB data (bound=window, effective=1338 of 1338 segments), Job=...
 ```
 
-`source` is `configured` (from the setting), `floor` (the computed value was below the floor), or `computed`.
+`source` is `configured` (a non-zero `usenet.prefetch-window`), `byte-floor` (the 256 MB data floor, converted via `avgSeg`), or `computed` (`stream buffer + connections`, when that already exceeds the floor).
 
 ## Upstream Sync
 
@@ -154,11 +156,12 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 ## Changelog
 
 ## v0.11.6 (2026-07-17)
-Confirms the v0.11.5 OOM fix on production running its *default* path, and instruments what that fix exposed underneath: the number of streams a single file open creates.
+Re-denominates the streaming prefetch floor in bytes instead of segments — a fixed segment count held 8x different memory on different files for the same playback guarantee — and instruments what the v0.11.5 fix exposed underneath.
 
 ### Streaming
 
-*   **Logging (a stream's memory cost can now be read from the log instead of inferred)**: `[BufferedStream] PREFETCH WINDOW` reported the window but not the effective segment count, and the two differ whenever a client sends a bounded HTTP Range — the producer stops at the range end, so such a stream never costs a full window. Reading the window alone overstates a ranged read by an order of magnitude. The line now carries `holds<=NMB`, which bound applied (`window` or `segments`), and the effective/total segment counts.
+*   **Fix (a fixed 300-segment prefetch floor buffered 43% of some movies in RAM)**: the floor from v0.11.5 guaranteed enough *data in flight* to keep playback fed, but expressed that as a segment count. Segment size is a property of how a release was posted and varies roughly 8x, so 300 segments held **215 MB** on a 717 KB-segment file and **2.4 GB** on a 4.19 MB-segment one — the identical starvation guarantee at 11x the memory. The floor is now **256 MB of data in flight**, converted per file to a segment count via its average segment size. Validated on production: the 4.19 MB-segment movie played clean at the equivalent window with outstanding buffers down from **2.4 GB to 432 MB**, zero errors. 256 MB is the empirically clean 215 MB (proven at both 300 segments of 717 KB and 51 of 4.19 MB) plus margin; the reverted PR #21's 64 MB starved. Still overridable in segments via `usenet.prefetch-window`.
+*   **Logging (a stream's memory cost can now be read from the log instead of inferred)**: `[BufferedStream] PREFETCH WINDOW` reported the window but not the effective segment count, and the two differ whenever a client sends a bounded HTTP Range — the producer stops at the range end, so such a stream never costs a full window. Reading the window alone overstates a ranged read by an order of magnitude. The line now carries the average segment size, `holds~NMB data`, which bound applied (`window` or `segments`), and the effective/total segment counts. (The earlier `holds<=NMB` figure assumed 1 MB/segment and undercounted large-segment files 4x — the same assumption that made 2.4 GB read as 300 MB.)
 *   **Logging (the startup banner quoted the per-stream log's own text, so every `grep` for that text also matched the banner)**: this inflated a production stream count from 15 to 17 and had already corrupted an earlier window verification. The banner no longer quotes log strings it wants operators to search for.
 
 ### Diagnostics
@@ -168,7 +171,7 @@ Confirms the v0.11.5 OOM fix on production running its *default* path, and instr
 ### Notes
 
 *   **v0.11.5 verified on production ([#19](https://github.com/dgherman/nzbdav2/issues/19))**: previous validations all ran with `NZBDAV_PREFETCH_WINDOW` set, exercising the `configured` branch; the shipped default (`source=floor`, 300 segments) had never run under load. It now has, on the same 6924-segment file that reliably failed on v0.11.4: **0 fetch-path memory failures, 0 fetch errors, 0 timeouts, 0 breaker trips** across two concurrent videos. Peak LOH reached 4.19 GB against the 4 GiB heap limit and the GC held the line with ~31 blocking gen2 collections in a minute — the fix converts an out-of-memory failure into GC pressure, which is a better failure mode with no headroom left.
-*   **The remaining constraint is stream count, not window size ([#18](https://github.com/dgherman/nzbdav2/issues/18))**: opening a single movie created **8 streams in 5 seconds**, saturating every `usenet.max-concurrent-buffered-streams` slot, each parking its own 300-segment window — which is exactly the measured 2.4 GB. The window fix is per-stream; the multiplier is #18.
+*   **The remaining constraints are stream count and pool retention ([#18](https://github.com/dgherman/nzbdav2/issues/18))**: opening a single movie created **8 streams in 5 seconds**, saturating every `usenet.max-concurrent-buffered-streams` slot — the byte floor cuts each stream's cost but not their number, so #18 (a seek builds a full new stream instead of attaching to the existing one) is now the larger lever. Separately, a forced compacting GC mid-playback left **~1.7 GB of Large Object Heap resident with only 3 buffers checked out** — `ArrayPool<byte>.Shared` retains freed buffers per-thread/per-core and the retention scales with segment size, so it does not trim under the container's memory view. Both are follow-ups, not regressions; the byte floor lands the per-stream win now.
 
 ## v0.11.5 (2026-07-16)
 Fixes the streaming OOM ([#19](https://github.com/dgherman/nzbdav2/issues/19)) and the allocation bursts filed as [#22](https://github.com/dgherman/nzbdav2/issues/22), which turned out to be the same bug. Segment prefetch had no backpressure, so memory scaled with file size instead of with the configured buffer — but bounding it alone breaks playback, so the window also carries a floor.

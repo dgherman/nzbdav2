@@ -117,55 +117,70 @@ public class BufferedSegmentStreamPrefetchWindowTests
         }
     }
 
-    [Fact]
-    public async Task Prefetch_AppliesTheFloor_WhenTheComputedWindowIsTooSmall()
+    // The other half of issue #19 is now pure arithmetic in ComputePrefetchWindow, tested directly.
+    // Bounding prefetch is necessary but not sufficient: too small a window starves the reader (PR #21
+    // shipped an effective 90 for 30 connections and the second concurrent video would not play at
+    // all). The floor is denominated in BYTES because segment size varies ~8x between releases, so a
+    // fixed segment count buys wildly different memory for the same starvation guarantee.
+
+    [Theory]
+    // 4 MiB segments (~Backrooms, whose real 4.19 MB average yields 64): 256 MiB / 4 MiB = 64 segments.
+    // Validated clean on production at a hand-set 51; 64 is the same region with more headroom. The
+    // fixed 300-segment floor it replaces held 2.4 GB here for the identical guarantee.
+    [InlineData(4L * 1024 * 1024, 64)]
+    // 1 MiB segments: 256 MiB / 1 MiB = 256 segments.
+    [InlineData(1L * 1024 * 1024, 256)]
+    // 512 KiB segments (~Alone's 717 KB, which yields 374): smaller segments buy proportionally more of
+    // them for the same bytes in flight. 256 MiB / 512 KiB = 512 segments.
+    [InlineData(512L * 1024, 512)]
+    public void ByteFloor_ConvertsTheBudgetUsingAverageSegmentSize(long avgSegmentSize, int expectedWindow)
     {
-        // The other half of issue #19. Bounding prefetch is necessary but not sufficient: PR #21
-        // shipped an effective window of 90 for 30 connections and the second concurrent video would
-        // not play at all — the reader starved, playback died on NNTP body-read timeouts, and the
-        // retries tripped the providers' breakers. A window of 300 ran three concurrent production
-        // streams clean. So a computed window below the floor must be raised to it.
-        const int connections = 4;
-        const int bufferSegments = 8;
-        var computedWindow = bufferSegments + connections; // 12 — far below the 300 floor
+        // computedWindow small so the floor is what binds; no explicit override.
+        var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
+            computedWindow: 12, configuredWindow: 0, avgSegmentSize: avgSegmentSize);
 
-        var segmentIds = new string[SegmentCount];
-        var segmentSizes = new long[SegmentCount];
-        for (var i = 0; i < SegmentCount; i++)
-        {
-            segmentIds[i] = $"seg-{i}@test";
-            segmentSizes[i] = SegmentSize;
-        }
+        Assert.Equal("byte-floor", source);
+        Assert.Equal(expectedWindow, window);
+        // The whole point: the byte budget holds regardless of segment size.
+        Assert.InRange(
+            window * avgSegmentSize,
+            BufferedSegmentStream.MinPrefetchWindowBytes - avgSegmentSize,
+            BufferedSegmentStream.MinPrefetchWindowBytes + avgSegmentSize);
+    }
 
-        var client = new CountingNntpClient();
-        var context = new ConnectionUsageContext(ConnectionUsageType.BufferedStreaming, new ConnectionUsageDetails { Text = "test" });
+    [Fact]
+    public void ByteFloor_NeverStarvesParallelism_WhenComputedWindowExceedsIt()
+    {
+        // A large-segment file whose byte budget buys only a few segments must still keep enough in
+        // flight to feed every worker: the floor never drops the window below the computed value.
+        // 32 MB segments => 256 MB / 32 MB = 8, but the computed window is 40.
+        var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
+            computedWindow: 40, configuredWindow: 0, avgSegmentSize: 32L * 1024 * 1024);
 
-        BufferedSegmentStream.SetPrefetchWindow(0); // 0 = auto, so the floor decides
-        await using var stream = new BufferedSegmentStream(
-            segmentIds,
-            fileSize: (long)SegmentSize * SegmentCount,
-            client,
-            concurrentConnections: connections,
-            bufferSegmentCount: bufferSegments,
-            cancellationToken: CancellationToken.None,
-            usageContext: context,
-            segmentSizes: segmentSizes);
+        Assert.Equal("computed", source);
+        Assert.Equal(40, window);
+    }
 
-        var buffer = new byte[SegmentSize];
-        var read = await ReadFully(stream, buffer).WaitAsync(TimeSpan.FromSeconds(20));
-        Assert.Equal(SegmentSize, read);
+    [Fact]
+    public void ExplicitOverride_WinsVerbatim_OverTheByteFloor()
+    {
+        var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
+            computedWindow: 12, configuredWindow: 150, avgSegmentSize: 4_194_304);
 
-        await Task.Delay(TimeSpan.FromSeconds(2));
+        Assert.Equal("configured", source);
+        Assert.Equal(150, window);
+    }
 
-        // Above the computed window: the floor was applied rather than the raw computation.
-        Assert.True(client.Served > computedWindow * 2,
-            $"expected the {BufferedSegmentStream.MinPrefetchWindowSegments}-segment floor to apply, " +
-            $"but only {client.Served} segments were served — that is the computed window ({computedWindow}), not the floor.");
+    [Fact]
+    public void UnknownAverageSize_FallsBackToTheSegmentFloor()
+    {
+        // No size table or an empty stream: the byte budget can't be converted, so the segment-count
+        // fallback applies rather than a division by zero.
+        var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
+            computedWindow: 12, configuredWindow: 0, avgSegmentSize: 0);
 
-        // Still a function of the window and not of the file length: the file is 500 segments and
-        // the floor is 300, so a bounded stream cannot have fetched all of them.
-        Assert.True(client.Served < SegmentCount,
-            $"prefetch served {client.Served} of {SegmentCount} segments — the whole file, i.e. unbounded.");
+        Assert.Equal("byte-floor", source);
+        Assert.Equal(BufferedSegmentStream.MinPrefetchWindowSegments, window);
     }
 
     private static async Task<int> ReadFully(Stream stream, byte[] buffer)
