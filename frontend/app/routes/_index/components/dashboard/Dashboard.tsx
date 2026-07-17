@@ -39,7 +39,7 @@ export function Dashboard({ initialData, initialStreams }: Props) {
 
             ws.onopen = () => {
                 backoff.reset();
-                ws?.send(JSON.stringify({ 'cxs': 'state' }));
+                ws?.send(JSON.stringify({ 'str': 'state' }));
             };
 
             ws.onmessage = receiveMessage((topic, message) => {

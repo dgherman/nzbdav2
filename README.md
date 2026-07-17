@@ -155,6 +155,13 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.8 (2026-07-17)
+Replaces the flickering per-provider socket panel on the dashboard with a persistent Active Streams panel.
+
+### UI
+*   **Feature (persistent Active Streams panel)**: the old panel measured instantaneous borrowed sockets, which for a well-buffered stream sit idle between prefetch bursts — so it read "No active streams" during active playback. A new heartbeat registry (`StreamSessionRegistry`) tracks stream sessions keyed by file and survives the fetch/coast sawtooth, so the panel shows one stable row per streaming file with progress and a cumulative per-provider byte breakdown (sourced from the in-memory affinity stats, i.e. totals for the title, not just the current session). The strobing socket-burst panel is removed.
+*   **Reliability (session tracking is TTL-based, not dispose-paired)**: sessions are upserted from the streaming path's existing `UpdateUsageContext` (off the fetch loop, a single dictionary write) and expire after 15s of inactivity, so a missed stream-teardown path can never leak a phantom row. A 1-second broadcaster pushes the list over a new `str` websocket topic only when a subscriber is attached.
+
 ## v0.11.7 (2026-07-17)
 Fixes the System Dashboard "Active Streaming" panel, which invented phantom providers and drowned each real one in duplicate rows.
 
