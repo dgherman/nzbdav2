@@ -1,4 +1,5 @@
 import { type ConnectionUsageContext, ConnectionUsageType } from "~/types/connections";
+import type { StreamSession } from "~/types/streams";
 import type { BandwidthSample, ProviderBandwidthSnapshot } from "~/types/bandwidth";
 import type { HealthCheckResult, MissingArticleItem, MappedFile } from "~/types/stats";
 import type {
@@ -285,6 +286,14 @@ class BackendClient {
         const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
         const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
         if (!response.ok) throw new Error(`Failed to get active connections: ${(await response.json()).error}`);
+        return response.json();
+    }
+
+    public async getActiveStreams(): Promise<StreamSession[]> {
+        const url = process.env.BACKEND_URL + "/api/stats/streams";
+        const apiKey = process.env.FRONTEND_BACKEND_API_KEY || "";
+        const response = await this.fetchWithTimeout(url, { headers: { "x-api-key": apiKey } });
+        if (!response.ok) throw new Error(`Failed to get active streams: ${(await response.json()).error}`);
         return response.json();
     }
 

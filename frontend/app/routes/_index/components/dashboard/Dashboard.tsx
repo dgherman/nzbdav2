@@ -2,8 +2,8 @@ import { useState, useEffect } from 'react';
 import { ButtonGroup, Button, Row, Col } from 'react-bootstrap';
 import type { DashboardData } from '~/types/dashboard';
 import { TIME_WINDOW_OPTIONS } from '~/types/dashboard';
-import type { ConnectionUsageContext } from '~/types/connections';
-import { ActiveStreaming } from './ActiveStreaming';
+import type { StreamSession } from '~/types/streams';
+import { ActiveStreams } from './ActiveStreams';
 import { TotalDownloaded } from './TotalDownloaded';
 import { ProviderHealth } from './ProviderHealth';
 import { ProviderUsage } from './ProviderUsage';
@@ -12,22 +12,16 @@ import { createWebsocketBackoff, getBrowserWebsocketUrl, receiveMessage } from '
 
 type Props = {
     initialData: DashboardData;
-    initialConnections: Record<number, ConnectionUsageContext[]>;
+    initialStreams: StreamSession[];
 };
 
-export function Dashboard({ initialData, initialConnections }: Props) {
+export function Dashboard({ initialData, initialStreams }: Props) {
     const [data, setData] = useState(initialData);
-    const [connections, setConnections] = useState(initialConnections);
+    const [streams, setStreams] = useState(initialStreams);
     const [selectedHours, setSelectedHours] = useState(initialData.timeWindowHours);
     const [isLoading, setIsLoading] = useState(false);
 
-    // Build provider name lookup
-    const providerNames = data.providerHealth.reduce((acc, p) => {
-        acc[p.providerIndex] = p.providerHost.replace(/^news\.|^bonus\./, '');
-        return acc;
-    }, {} as Record<number, string>);
-
-    // WebSocket for real-time connections
+    // WebSocket for real-time active streams
     useEffect(() => {
         let ws: WebSocket | null = null;
         let disposed = false;
@@ -49,38 +43,11 @@ export function Dashboard({ initialData, initialConnections }: Props) {
             };
 
             ws.onmessage = receiveMessage((topic, message) => {
-                if (topic !== 'cxs') return;
-
-                const parts = message.split('|');
-                if (parts.length >= 9) {
-                    // Wire format (ConnectionPoolStats.Push):
-                    // providerIndex|live|idle|totalLive|max|totalIdle|usage|providerBreakdown|connsJson
-                    const providerIndex = parseInt(parts[0]);
-                    const connsJson = parts[8];
-                    try {
-                        const rawConns = JSON.parse(connsJson) as any[];
-                        const transformedConns = rawConns.map(c => ({
-                            usageType: c.t,
-                            details: c.d,
-                            jobName: c.jn,
-                            isBackup: c.b,
-                            isSecondary: c.s,
-                            bufferedCount: c.bc,
-                            bufferWindowStart: c.ws,
-                            bufferWindowEnd: c.we,
-                            totalSegments: c.ts,
-                            davItemId: c.i,
-                            currentBytePosition: c.bp,
-                            fileSize: c.fs
-                        } as ConnectionUsageContext));
-
-                        setConnections(prev => ({
-                            ...prev,
-                            [providerIndex]: transformedConns
-                        }));
-                    } catch (e) {
-                        console.error('Failed to parse connections JSON from websocket', e);
-                    }
+                if (topic !== 'str') return;
+                try {
+                    setStreams(JSON.parse(message) as StreamSession[]);
+                } catch (e) {
+                    console.error('Failed to parse active-streams message', e);
                 }
             });
 
@@ -142,7 +109,7 @@ export function Dashboard({ initialData, initialConnections }: Props) {
             </div>
 
             {/* Active Streaming - Full Width */}
-            <ActiveStreaming connections={connections} providerNames={providerNames} />
+            <ActiveStreams streams={streams} />
 
             {/* Total Downloaded + Provider Health */}
             <Row className="mb-4">
