@@ -52,6 +52,11 @@ public class FullNzbTester
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
 
+        // Program.Main wires this after the tool dispatch, so the harness never reaches it and would
+        // silently run the floor no matter what the setting says — while this is the instrument the
+        // window is tuned with. Apply it here too.
+        BufferedSegmentStream.SetPrefetchWindow(configManager.GetPrefetchWindow());
+
         // Check for --mock-server option (built-in mock server)
         MockNntpServer? mockServer = null;
         string? nzbPath = null;

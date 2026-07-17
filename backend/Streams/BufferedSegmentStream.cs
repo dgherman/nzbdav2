@@ -19,6 +19,30 @@ namespace NzbWebDAV.Streams;
 /// </summary>
 public class BufferedSegmentStream : Stream, ITouchableStream
 {
+    /// <summary>
+    /// Floor for the prefetch window, in segments. The window is what stops the fetchers racing to
+    /// the end of the file (issue #19) — but set it too low and the reader starves, playback dies on
+    /// NNTP body-read timeouts, and the retries trip the providers' breakers. PR #21 shipped an
+    /// effective window of 90 at 30 connections and the second concurrent video would not play at
+    /// all; 300 at 30 connections ran three concurrent streams clean (0 corruption, 0 breaker trips,
+    /// 0 fetch errors).
+    ///
+    /// 300 is a measurement, not a formula: one production run plus harness runs at 150 and 300. The
+    /// underlying quantity is a bandwidth-delay product — the window has to cover worst-case refill
+    /// latency at the video's bitrate, and refill latency here is ~99% connection-acquire contention
+    /// (issue #18). Fix #18 and this floor can come down. Until then it errs generous on purpose: too
+    /// large costs memory the operator can tune away, too small breaks playback.
+    /// </summary>
+    public const int MinPrefetchWindowSegments = 300;
+
+    // 0 = auto. Set from config at startup (see Program.cs), overridable at runtime.
+    private static volatile int s_prefetchWindow;
+
+    public static void SetPrefetchWindow(int window)
+    {
+        s_prefetchWindow = Math.Max(0, window);
+    }
+
     // Concurrent stream cap — limits how many BufferedSegmentStreams can exist simultaneously
     private static volatile SemaphoreSlim s_concurrentStreamSlots = new(2, 2);
     private SemaphoreSlim? _acquiredSemaphore; // Tracks which semaphore instance we acquired from
@@ -568,13 +592,24 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             // is sized to the whole file. _bufferChannel bounds only the ordering task, which is
             // downstream of the slots, so it is not backpressure on the fetchers. The window covers
             // everything that can hold a buffer at once: the channel plus the in-flight workers.
-            var maxPrefetchWindow = bufferSegmentCount + concurrentConnections;
-            var windowSource = "computed";
-            if (int.TryParse(Environment.GetEnvironmentVariable("NZBDAV_PREFETCH_WINDOW"), out var windowOverride)
-                && windowOverride > 0)
+            var computedWindow = bufferSegmentCount + concurrentConnections;
+            var configuredWindow = s_prefetchWindow;
+            int maxPrefetchWindow;
+            string windowSource;
+            if (configuredWindow > 0)
             {
-                maxPrefetchWindow = windowOverride;
-                windowSource = "NZBDAV_PREFETCH_WINDOW";
+                maxPrefetchWindow = configuredWindow;
+                windowSource = "configured";
+            }
+            else if (computedWindow < MinPrefetchWindowSegments)
+            {
+                maxPrefetchWindow = MinPrefetchWindowSegments;
+                windowSource = "floor";
+            }
+            else
+            {
+                maxPrefetchWindow = computedWindow;
+                windowSource = "computed";
             }
 
             // Warning level on purpose: production runs LOG_LEVEL=warning, and a window that cannot be

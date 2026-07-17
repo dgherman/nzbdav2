@@ -59,8 +59,8 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-PREFETCH-WINDOW-STARVATION-TEST");
-        Log.Warning("  EXPERIMENT (#19/#21, theory #7): does a bounded prefetch window break playback because it STARVES the reader, rather than because of any shared-stream coupling? PR #21 shipped an effective window of 60 (bufferSegmentCount 40 + connections 20) = 3x connections. The mock harness had already measured 3x as failing (window 90 / 30 connections: 2 of 3 runs died on NNTP body-read timeouts plus provider trips -- the same signature production then showed: 21 Invalid NNTP Response, 58 breaker trips) and 5x as stable (window 150 / 30 connections: 3 of 3 pass). Set NZBDAV_PREFETCH_WINDOW to override; the effective window is logged per stream below as [BufferedStream] PREFETCH WINDOW. If two videos play at window 300 the breakage was starvation and the fix is a window floor; if they still break, starvation is out. NOT A FIX -- an experiment. Do not merge.");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-BOUNDED-PREFETCH-WINDOW-WITH-FLOOR");
+        Log.Warning("  FIX (#19): segment prefetch is bounded by the reader's position, with a floor of 300 segments. Fetch workers parked completed ~1MB buffers in a slots array sized to the whole file and nothing tied fetch rate to read rate, so resident memory scaled with FILE SIZE rather than with the configured buffer: a 6924-segment file demanded ~6.9 GB and hit the 4 GiB heap limit around segment 4870, and the resulting storm of forced blocking collections is what issue #22 measured as unexplained ~1 GB/s allocation bursts. Bounding alone is not enough -- too small a window starves the reader, playback dies on NNTP body-read timeouts, and the retries trip the providers' breakers (that was the reverted PR #21, at an effective window of 90 for 30 connections). Verified on production hardware: 3 concurrent streams at window 300, zero corruption, zero breaker trips, zero fetch errors, zero fetch-path memory failures, heap flat around 750 MB against 153 MB/s and a 4 GiB ceiling before. Tune with the 'usenet.prefetch-window' setting (0 = auto); costs about window x 1 MB per active stream. The effective window is logged per stream below as [BufferedStream] PREFETCH WINDOW.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -212,6 +212,7 @@ class Program
 
         // Set initial concurrent buffered stream cap
         BufferedSegmentStream.SetMaxConcurrentStreams(configManager.GetMaxConcurrentBufferedStreams());
+        BufferedSegmentStream.SetPrefetchWindow(configManager.GetPrefetchWindow());
 
         // Update on config change
         configManager.OnConfigChanged += (_, eventArgs) =>
@@ -219,6 +220,11 @@ class Program
             if (eventArgs.NewConfig.ContainsKey("usenet.max-concurrent-buffered-streams"))
             {
                 BufferedSegmentStream.SetMaxConcurrentStreams(configManager.GetMaxConcurrentBufferedStreams());
+            }
+
+            if (eventArgs.NewConfig.ContainsKey("usenet.prefetch-window"))
+            {
+                BufferedSegmentStream.SetPrefetchWindow(configManager.GetPrefetchWindow());
             }
         };
 

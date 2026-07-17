@@ -110,6 +110,43 @@ For all environment variables and configuration options, see [`CLAUDE.md`](./CLA
 
 For a complete deployment guide including RClone mount configuration, Sonarr/Radarr integration, and Docker Compose setup, see the [upstream README](https://github.com/nzbdav-dev/nzbdav#readme). nzbdav2-specific architectural differences (e.g., in-DB Zstd compression instead of blobstore) are documented in [`CLAUDE.md`](./CLAUDE.md) and [`docs/upstream-sync-2026-03-10.md`](./docs/upstream-sync-2026-03-10.md).
 
+## Tuning Streaming Memory
+
+Streaming holds segment buffers in memory while it reads ahead of the player. Two settings decide how much, and the defaults are tuned for ~30 streaming connections against a 4 GiB heap limit. **If playback is fine, leave them alone.**
+
+| Setting | Default | What it does |
+| --- | --- | --- |
+| `usenet.prefetch-window` | `0` (auto) | How many segments the fetchers may run ahead of the reader. Auto = `stream buffer + connections`, raised to a floor of **300**. |
+| `usenet.max-concurrent-buffered-streams` | `8` | How many buffered streams can exist at once. Note this is **not** "number of videos" — a multipart/RAR playback needs a slot per active part, plus the player's head/tail probes. |
+
+### The arithmetic
+
+```
+peak resident ≈ prefetch-window × 1 MB × concurrent streams
+```
+
+So the defaults imply roughly `300 MB` per active stream, and a worst case of `~2.4 GB` if all 8 slots are in use. Two concurrent videos is about `600 MB`.
+
+### If you are memory-constrained
+
+Lower `usenet.prefetch-window` (say to 150), or lower `usenet.max-concurrent-buffered-streams`, or raise the container's heap limit (`DOTNET_GCHeapHardLimit`) if the host has room. Prefer raising the heap limit if you can: the streaming working set is now **bounded by these settings rather than by file size**, so headroom actually covers it.
+
+### Do not set the window too low
+
+This is the one that bites. Too *large* a window costs memory you can tune away. Too *small* a window **breaks playback outright** — the reader starves, playback dies on NNTP body-read timeouts, and the retries trip your providers' circuit breakers. During development, an effective window of 90 at 30 connections made a second concurrent video unplayable; 300 ran three concurrent streams clean. If you lower this and streams start failing with `Invalid NNTP Response` and breaker trips, raise it back before suspecting your provider.
+
+The window has to be this generous mainly because connection-acquire contention dominates fetch latency ([#18](https://github.com/dgherman/nzbdav2/issues/18)); if that improves, the floor can come down.
+
+### Checking what you are actually running
+
+Each stream logs its effective window:
+
+```
+[BufferedStream] PREFETCH WINDOW: 300 segments (10.0x of 30 connections, source=configured, bufferSegmentCount=60), Job=...
+```
+
+`source` is `configured` (from the setting), `floor` (the computed value was below the floor), or `computed`.
+
 ## Upstream Sync
 
 nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and periodically cherry-picks relevant upstream changes manually. Each sync documents which changes were adopted, which were skipped, and the rationale for each decision. Sync history is in [`docs/upstream-sync-*.md`](./docs/). The most recent file contains the last reviewed upstream commit and a table of all items evaluated.
@@ -117,15 +154,17 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 ## Changelog
 
 ## v0.11.5 (2026-07-16)
-Fixes the streaming OOM ([#19](https://github.com/dgherman/nzbdav2/issues/19)): segment prefetch had no backpressure, so memory scaled with file size instead of with the configured buffer.
+Fixes the streaming OOM ([#19](https://github.com/dgherman/nzbdav2/issues/19)) and the allocation bursts filed as [#22](https://github.com/dgherman/nzbdav2/issues/22), which turned out to be the same bug. Segment prefetch had no backpressure, so memory scaled with file size instead of with the configured buffer — but bounding it alone breaks playback, so the window also carries a floor.
 
 ### Streaming
 
-*   **Fix (the backend died with `Internal CLR error (0x80131506)` during large-file playback)**: fetch workers pulled segments as fast as the providers would serve them and parked each completed ~1MB pooled buffer in `segmentSlots`, an array sized to the **whole file**. The only bounded queue, `_bufferChannel`, sits *downstream* of those slots and throttles the ordering task, not the fetchers — so nothing tied the fetch rate to the read rate and the workers raced to the end of the file. The resident set was therefore a function of file size, not of `bufferSegmentCount`: on the mock harness a 200 MB file held **299 buffers for 293 segments — the entire file in memory** — and 400 MB reproduced `OutOfMemoryException` outright. The producer now holds a segment back until the reader is within `bufferSegmentCount + connections` of needing it. The index the reader is waiting on is always inside the window, so it can never be gated. Peak resident is now **flat at ~180 buffers across 200 MB, 400 MB and 1000 MB**, 400 MB and 1000 MB complete with zero OOM, and LOH after collection drops **376 → 238 MB** on the 200 MB run with allocation per MB read **2.8 → 1.9 MB**.
-*   **Performance (redundant re-fetching)**: bounding the window also cuts wasted work. A 200 MB sequential read fetched **427 segments to deliver 293** (the straggler monitor re-racing segments whose fetches had been slowed by the workers' own contention); it now fetches **294**, and mean per-fetch time halves (1.72s → 0.85s cumulative-per-worker).
-*   **Tooling**: `SegmentBufferPoolDiagnostics` (set `NZBDAV_POOL_DIAG=1`) reports segment-buffer rents, returns, distinct arrays and the peak checked-out count in the harness. This is what settled #19: distinct arrays tracked the peak working set almost exactly (303 vs 299), which showed `ArrayPool` was reusing correctly and the fault was the size of the working set, not the pool. `NZBDAV_PREFETCH_WINDOW` overrides the window for tuning.
+*   **Fix (the backend died with `Internal CLR error (0x80131506)` during large-file playback)**: fetch workers pulled segments as fast as the providers would serve them and parked each completed ~1MB pooled buffer in `segmentSlots`, an array sized to the **whole file**. The only bounded queue, `_bufferChannel`, sits *downstream* of those slots and throttles the ordering task, not the fetchers — so nothing tied the fetch rate to the read rate and the workers raced to the end of the file. The resident set was therefore a function of file size, not of `bufferSegmentCount`. Caught on production: a **6924-segment file demanded ~6.9 GB** and hit the 4 GiB heap limit around segment 4870, with 15 fetch-path memory failures inside 2 seconds. The producer now holds a segment back until the reader is within the prefetch window of needing it; the index the reader is waiting on is always inside the window, so it can never be gated.
+*   **Fix (bounding the window alone made a second concurrent video unplayable)**: too small a window starves the reader — playback dies on NNTP body-read timeouts and the retries trip the providers' breakers. An earlier build shipped an effective window of **90 for 30 connections** and the second stream would not play at all (14 corruption detections, 21 `Invalid NNTP Response`, 58 breaker trips in 8 minutes); it was reverted. The window is now floored at **300 segments**. Verified on production hardware at 3 concurrent streams: **0 corruption, 0 breaker trips, 0 fetch errors, 0 fetch-path memory failures**, heap flat at ~750 MB against 153 MB/s allocation and a 1.15 GB → 4 GiB cycle before. The floor is generous on purpose — too large costs memory an operator can tune away, too small breaks playback. It is this large mainly because connection-acquire contention dominates fetch latency ([#18](https://github.com/dgherman/nzbdav2/issues/18)).
+*   **Fix (~1 GB/s allocation bursts with almost no network activity, [#22](https://github.com/dgherman/nzbdav2/issues/22))**: not a separate allocator. Each fetch worker that hit the memory limit forced a blocking, compacting Gen2 collection and backed off — deliberately not single-flighted — so a prefetch OOM storm became ~15 forced collections in 2 seconds, CPU at 342%, and a network that went quiet because the recovery path had suppressed it. No prefetch OOM, no storm: peak allocation is now **29 MB/s** with Gen2 collections back to roughly one per 45s.
+*   **Feature — `usenet.prefetch-window`**: new setting (0 = auto) exposing the window. Costs about `window × 1 MB` per active stream; see [Tuning Streaming Memory](#tuning-streaming-memory). Each stream logs its effective window as `[BufferedStream] PREFETCH WINDOW`, with a `source` of `configured`, `floor` or `computed`, so a deployment can be tied to the window it actually ran.
+*   **Tooling**: `SegmentBufferPoolDiagnostics` (set `NZBDAV_POOL_DIAG=1`) reports segment-buffer rents, returns, distinct arrays and the peak checked-out count in the harness. This is what settled #19: distinct arrays tracked the peak working set almost exactly (303 vs 299), which showed `ArrayPool` was reusing correctly and the fault was the size of the working set, not the pool.
 
-Sequential throughput in the harness reads lower after the change (~13 vs ~23 MB/s), but the comparison is confounded and the harness is a poor instrument for it: ~99% of fetch time there is connection-pool acquire ([#18](https://github.com/dgherman/nzbdav2/issues/18)), the mock provider's circuit breaker trips ~28 times per run on **baseline** too, and run-to-run spread is 7.6–34.1 MB/s. The baseline bought its number by fetching 1.43× the segments and holding the whole file in RAM — which is the bug. Pool contention (#18) is the real throughput limiter and is unaddressed here.
+Harness throughput numbers are not a useful comparison here: ~99% of fetch time there is connection-pool acquire ([#18](https://github.com/dgherman/nzbdav2/issues/18)), the mock provider's circuit breaker trips ~28 times per run on **baseline** too, and run-to-run spread is 7.6–34.1 MB/s. The pre-fix baseline bought its throughput by fetching 1.43× the segments and holding the whole file in RAM — which is the bug. Pool contention (#18) is the real throughput limiter and is unaddressed here.
 
 ## v0.11.4 (2026-07-16)
 Cuts the largest avoidable allocator on the streaming path ([#14](https://github.com/dgherman/nzbdav2/issues/14)), stops a stalled segment from failing outright on single-provider setups ([#16](https://github.com/dgherman/nzbdav2/issues/16)), and repairs the benchmark harness that measures the first ([#15](https://github.com/dgherman/nzbdav2/issues/15)).

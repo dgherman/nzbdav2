@@ -68,6 +68,14 @@ public class BufferedSegmentStreamPrefetchWindowTests
         const int connections = 4;
         const int bufferSegments = 8;
 
+        // Pin the window. Production floors it at MinPrefetchWindowSegments (300) because too small
+        // a window starves the reader and kills playback — but that floor is a separate concern from
+        // the bounding this test covers, and at 300 the window would exceed the 500-segment file and
+        // the test could not tell bounded from unbounded. Test 2 covers the floor.
+        BufferedSegmentStream.SetPrefetchWindow(bufferSegments + connections);
+        try
+        {
+
         var segmentIds = new string[SegmentCount];
         var segmentSizes = new long[SegmentCount];
         for (var i = 0; i < SegmentCount; i++)
@@ -101,6 +109,63 @@ public class BufferedSegmentStreamPrefetchWindowTests
         // function of the configured window and not of the file length.
         var ceiling = (bufferSegments + connections) * 2;
         Assert.InRange(client.Served, 1, ceiling);
+
+        }
+        finally
+        {
+            BufferedSegmentStream.SetPrefetchWindow(0);
+        }
+    }
+
+    [Fact]
+    public async Task Prefetch_AppliesTheFloor_WhenTheComputedWindowIsTooSmall()
+    {
+        // The other half of issue #19. Bounding prefetch is necessary but not sufficient: PR #21
+        // shipped an effective window of 90 for 30 connections and the second concurrent video would
+        // not play at all — the reader starved, playback died on NNTP body-read timeouts, and the
+        // retries tripped the providers' breakers. A window of 300 ran three concurrent production
+        // streams clean. So a computed window below the floor must be raised to it.
+        const int connections = 4;
+        const int bufferSegments = 8;
+        var computedWindow = bufferSegments + connections; // 12 — far below the 300 floor
+
+        var segmentIds = new string[SegmentCount];
+        var segmentSizes = new long[SegmentCount];
+        for (var i = 0; i < SegmentCount; i++)
+        {
+            segmentIds[i] = $"seg-{i}@test";
+            segmentSizes[i] = SegmentSize;
+        }
+
+        var client = new CountingNntpClient();
+        var context = new ConnectionUsageContext(ConnectionUsageType.BufferedStreaming, new ConnectionUsageDetails { Text = "test" });
+
+        BufferedSegmentStream.SetPrefetchWindow(0); // 0 = auto, so the floor decides
+        await using var stream = new BufferedSegmentStream(
+            segmentIds,
+            fileSize: (long)SegmentSize * SegmentCount,
+            client,
+            concurrentConnections: connections,
+            bufferSegmentCount: bufferSegments,
+            cancellationToken: CancellationToken.None,
+            usageContext: context,
+            segmentSizes: segmentSizes);
+
+        var buffer = new byte[SegmentSize];
+        var read = await ReadFully(stream, buffer).WaitAsync(TimeSpan.FromSeconds(20));
+        Assert.Equal(SegmentSize, read);
+
+        await Task.Delay(TimeSpan.FromSeconds(2));
+
+        // Above the computed window: the floor was applied rather than the raw computation.
+        Assert.True(client.Served > computedWindow * 2,
+            $"expected the {BufferedSegmentStream.MinPrefetchWindowSegments}-segment floor to apply, " +
+            $"but only {client.Served} segments were served — that is the computed window ({computedWindow}), not the floor.");
+
+        // Still a function of the window and not of the file length: the file is 500 segments and
+        // the floor is 300, so a bounded stream cannot have fetched all of them.
+        Assert.True(client.Served < SegmentCount,
+            $"prefetch served {client.Served} of {SegmentCount} segments — the whole file, i.e. unbounded.");
     }
 
     private static async Task<int> ReadFully(Stream stream, byte[] buffer)
