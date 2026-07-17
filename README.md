@@ -153,6 +153,19 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.6 (2026-07-17)
+Confirms the v0.11.5 OOM fix on production running its *default* path, and instruments what that fix exposed underneath: the number of streams a single file open creates.
+
+### Streaming
+
+*   **Logging (a stream's memory cost can now be read from the log instead of inferred)**: `[BufferedStream] PREFETCH WINDOW` reported the window but not the effective segment count, and the two differ whenever a client sends a bounded HTTP Range — the producer stops at the range end, so such a stream never costs a full window. Reading the window alone overstates a ranged read by an order of magnitude. The line now carries `holds<=NMB`, which bound applied (`window` or `segments`), and the effective/total segment counts.
+*   **Logging (the startup banner quoted the per-stream log's own text, so every `grep` for that text also matched the banner)**: this inflated a production stream count from 15 to 17 and had already corrupted an earlier window verification. The banner no longer quotes log strings it wants operators to search for.
+
+### Notes
+
+*   **v0.11.5 verified on production ([#19](https://github.com/dgherman/nzbdav2/issues/19))**: previous validations all ran with `NZBDAV_PREFETCH_WINDOW` set, exercising the `configured` branch; the shipped default (`source=floor`, 300 segments) had never run under load. It now has, on the same 6924-segment file that reliably failed on v0.11.4: **0 fetch-path memory failures, 0 fetch errors, 0 timeouts, 0 breaker trips** across two concurrent videos. Peak LOH reached 4.19 GB against the 4 GiB heap limit and the GC held the line with ~31 blocking gen2 collections in a minute — the fix converts an out-of-memory failure into GC pressure, which is a better failure mode with no headroom left.
+*   **The remaining constraint is stream count, not window size ([#18](https://github.com/dgherman/nzbdav2/issues/18))**: opening a single movie created **8 streams in 5 seconds**, saturating every `usenet.max-concurrent-buffered-streams` slot, each parking its own 300-segment window — which is exactly the measured 2.4 GB. The window fix is per-stream; the multiplier is #18.
+
 ## v0.11.5 (2026-07-16)
 Fixes the streaming OOM ([#19](https://github.com/dgherman/nzbdav2/issues/19)) and the allocation bursts filed as [#22](https://github.com/dgherman/nzbdav2/issues/22), which turned out to be the same bug. Segment prefetch had no backpressure, so memory scaled with file size instead of with the configured buffer — but bounding it alone breaks playback, so the window also carries a floor.
 

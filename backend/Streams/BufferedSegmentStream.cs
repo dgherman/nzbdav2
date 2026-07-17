@@ -612,13 +612,22 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 windowSource = "computed";
             }
 
+            // The producer stops at effectiveSegmentCount, so the window is only the binding constraint
+            // on a stream long enough to reach it. A range-bounded read stops earlier and never costs a
+            // full window. This is the stream's actual memory ceiling, and without it the window alone
+            // invites reading every stream as if it held the full window — which overstates a ranged
+            // read by an order of magnitude and understates nothing.
+            var holdSegments = Math.Min(effectiveSegmentCount, maxPrefetchWindow);
+            var boundedBy = holdSegments == effectiveSegmentCount ? "segments" : "window";
+
             // Warning level on purpose: production runs LOG_LEVEL=warning, and a window that cannot be
             // read back from the log is a window nobody can attribute a result to. The ratio is the
             // number to watch — the harness failed 2 of 3 runs at 3x and passed 3 of 3 at 5x.
-            Log.Warning("[BufferedStream] PREFETCH WINDOW: {Window} segments ({Ratio:F1}x of {Connections} connections, source={Source}, bufferSegmentCount={BufferSegmentCount}), Job={Job}",
+            Log.Warning("[BufferedStream] PREFETCH WINDOW: {Window} segments ({Ratio:F1}x of {Connections} connections, source={Source}, bufferSegmentCount={BufferSegmentCount}), holds<={HoldMB}MB (bound={BoundedBy}, effective={Effective} of {Total} segments), Job={Job}",
                 maxPrefetchWindow,
                 concurrentConnections > 0 ? (double)maxPrefetchWindow / concurrentConnections : 0,
                 concurrentConnections, windowSource, bufferSegmentCount,
+                holdSegments, boundedBy, effectiveSegmentCount, segmentIds.Length,
                 _usageContext?.DetailsObject?.Text ?? "Unknown");
 
             // Producer: Queue segment IDs up to effectiveSegmentCount (may be < segmentIds.Length
