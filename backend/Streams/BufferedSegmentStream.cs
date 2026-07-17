@@ -569,11 +569,22 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             // downstream of the slots, so it is not backpressure on the fetchers. The window covers
             // everything that can hold a buffer at once: the channel plus the in-flight workers.
             var maxPrefetchWindow = bufferSegmentCount + concurrentConnections;
+            var windowSource = "computed";
             if (int.TryParse(Environment.GetEnvironmentVariable("NZBDAV_PREFETCH_WINDOW"), out var windowOverride)
                 && windowOverride > 0)
             {
                 maxPrefetchWindow = windowOverride;
+                windowSource = "NZBDAV_PREFETCH_WINDOW";
             }
+
+            // Warning level on purpose: production runs LOG_LEVEL=warning, and a window that cannot be
+            // read back from the log is a window nobody can attribute a result to. The ratio is the
+            // number to watch — the harness failed 2 of 3 runs at 3x and passed 3 of 3 at 5x.
+            Log.Warning("[BufferedStream] PREFETCH WINDOW: {Window} segments ({Ratio:F1}x of {Connections} connections, source={Source}, bufferSegmentCount={BufferSegmentCount}), Job={Job}",
+                maxPrefetchWindow,
+                concurrentConnections > 0 ? (double)maxPrefetchWindow / concurrentConnections : 0,
+                concurrentConnections, windowSource, bufferSegmentCount,
+                _usageContext?.DetailsObject?.Text ?? "Unknown");
 
             // Producer: Queue segment IDs up to effectiveSegmentCount (may be < segmentIds.Length
             // when bounded by an HTTP Range end byte to prevent over-prefetching).
