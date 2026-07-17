@@ -8,6 +8,26 @@ Throughout this document, "upstream" refers to [nzbdav-dev/nzbdav](https://githu
 
 ## What nzbdav2 Adds
 
+### Screenshots of the most exciting features
+
+<img width="1228" height="689" alt="Screenshot 2026-07-17 at 5 13 52 PM" src="https://github.com/user-attachments/assets/bb232dcb-6bc6-4a0a-b979-599a9df0bbdb" />
+
+
+<img width="1215" height="690" alt="Screenshot 2026-07-17 at 5 14 08 PM" src="https://github.com/user-attachments/assets/7f35638e-c4e7-46e6-a608-247a6288c127" />
+
+
+<img width="1207" height="681" alt="Screenshot 2026-07-17 at 5 14 30 PM" src="https://github.com/user-attachments/assets/9e53d970-9887-40b6-836d-fe77ee0fee26" />
+
+
+<img width="1169" height="672" alt="Screenshot 2026-07-17 at 5 14 48 PM" src="https://github.com/user-attachments/assets/a2e463b2-c0ea-4e55-a35c-5791129a40d6" />
+
+
+<img width="1185" height="424" alt="Screenshot 2026-07-17 at 5 14 54 PM" src="https://github.com/user-attachments/assets/3596eacb-2dfe-42f9-969f-554d93f53068" />
+
+
+<img width="667" height="694" alt="Screenshot 2026-07-17 at 5 16 59 PM" src="https://github.com/user-attachments/assets/a5913887-d416-40a2-8020-536cd2f999b5" />
+
+
 These features are original to nzbdav2 and not present in [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav).
 
 ### BufferedSegmentStream
