@@ -7,9 +7,12 @@
 > tracked the peak working set (299) almost exactly.
 >
 > **PR #21 bounded the window, fixed the memory on the NAS, and broke playback. It was reverted.**
-> The prefetch is load-bearing: `SharedStreamEntry.TryAttachReader` depends on the pump running
-> ahead of the reader. Read "How it actually resolved" *and* "Deployed, and reverted" at the bottom
-> before touching this — the second section is the one that will save you a rollback.
+> **Why it broke playback is NOT known.** This document previously claimed the prefetch was
+> "load-bearing" via `SharedStreamEntry.TryAttachReader` and a 2-slot semaphore. **Both halves of
+> that story are false and were disproved on 2026-07-16** — see "Five wrong theories" and
+> "Corrections (2026-07-16, later session)" at the bottom. Do not build on it.
+>
+> **#22 is not an independent bug — it is this bug's OOM-recovery storm.** Also settled below.
 
 State of the hunt for the streaming OOM that kills the backend with
 `Internal CLR error (0x80131506)` during large-file playback.
@@ -273,24 +276,25 @@ The **second concurrent video would not play at all** — multiple different sho
 `existing_entry_unattachable=43` / `position_out_of_range=43` against 22 hits. Rollback to v0.11.4
 → two videos play fine immediately.
 
-### The coupling nobody knew about
+### The coupling nobody knew about — WRONG, see corrections below
 
-`SharedStreamEntry.TryAttachReader` accepts a reader only within
-`[ValidRangeStart, WritePosition + ringBufferSize]` — **a function of how far the pump has run
-ahead of the reader**. Bounding prefetch ties the pump's frontier to reader consumption, so joining
+> **Struck 2026-07-16.** Both halves of this section are false. `s_concurrentStreamSlots` is **8** in
+> production, not 2, and the attach misses it cites occur on the *working* build at the same ratio.
+> Kept only so the next reader recognises the shape of the error. **Why PR #21 broke playback is
+> unknown.**
+
+~~`SharedStreamEntry.TryAttachReader` accepts a reader only within
+`[ValidRangeStart, WritePosition + ringBufferSize]` — a function of how far the pump has run
+ahead of the reader. Bounding prefetch ties the pump's frontier to reader consumption, so joining
 readers fail to attach, fall back to a *private* `BufferedSegmentStream`, and those need a slot
-from `s_concurrentStreamSlots` — which is **`new SemaphoreSlim(2, 2)`**. Two videos exhaust it.
+from `s_concurrentStreamSlots` — which is `new SemaphoreSlim(2, 2)`. Two videos exhaust it.~~
 
-**The unbounded prefetch is load-bearing.** The window, the attach range, and the 2-slot cap are
-**one coupled design**. Change them together or not at all. (Unverified: it fits every metric, but
-so did four earlier theories. Reproduce it.)
+~~**The unbounded prefetch is load-bearing.**~~ (Unverified when written; disproved since.)
 
-### Still unexplained
+### Still unexplained — RESOLVED, see corrections below
 
-Allocation bursts of **103–1104 MB/s at 1–3 busy connections with CPU at 342%** (13 Gen2 in 15s).
-Not network-fed — three connections cannot pull 1 GB/s — so **not** segment fetching, and not
-anything this investigation has accounted for. Roughly 1 GB/s from an unknown source during
-playback. Worth its own issue.
+> **Resolved 2026-07-16.** The 103–1104 MB/s bursts are **this bug's own OOM-recovery machinery**
+> (`HandleOomPressure`), not a second allocator. See "#22 is #19's OOM storm" below.
 
 ### The harness gap that let this ship
 
@@ -298,7 +302,9 @@ The harness runs **one stream, no `SharedStreamManager`, no idle connections, on
 could not have caught this. Preconditions for the next attempt:
 
 1. Reproduce **2 concurrent streams through `SharedStreamManager`**.
-2. Treat the attach range and the 2-slot cap as **part of** the window change.
+2. ~~Treat the attach range and the 2-slot cap as part of the window change.~~ **Struck** — the
+   2-slot cap does not exist (it is 8), and the attach misses are normal. Instead: **find out what
+   actually broke playback**, because as of 2026-07-16 nobody knows.
 3. Model **idle** connections — bounded prefetch newly lets them idle, and idle connections go
    stale (`Health check failed for idle connection (idle: 455s)`). Pre-fix they were never idle
    because the workers raced constantly.
@@ -314,3 +320,104 @@ production for exactly this reason."* The next session read that rule, quoted it
 a fix validated on a single-stream harness into a multi-stream production path. The memory numbers
 were true; the harness simply could not see the thing that mattered. **A green harness number is
 evidence about the harness.**
+
+## Corrections (2026-07-16, later session)
+
+Three claims above are wrong. All three were settled by reading the **running v0.11.4 container** —
+no repro, no deploy, no trace. The container had the answer the whole time.
+
+### #22 is #19's OOM storm, not a second bug
+
+v0.11.4, 2h uptime, **clean log** — 0 `CORRUPTION DETECTED`, 0 `Invalid NNTP`, 0 breaker trips:
+
+```
+15 × [BufferedStream] OOM during fetch   (6 at 22:58:35, 9 at 22:58:36)
+1 job. Segments 4859–4889 of 6924.
+```
+
+That is #19's mechanism caught in the act: unbounded prefetch races a 6924-segment (~6.9 GB if
+resident) file into the 4 GiB `GCHeapHardLimit` and every racing worker hits the wall within the
+same ~2 seconds, in a tight band of consecutive segment indices.
+
+Each of those workers then runs `HandleOomPressure()` (`BufferedSegmentStream.cs:1428`):
+
+```csharp
+GC.Collect(2, GCCollectionMode.Forced, blocking: true, compacting: true);
+GC.WaitForPendingFinalizers();
+```
+
+**Deliberately not single-flighted** — the comment above it explains why, and that reasoning still
+stands. So 15 OOMs ⇒ 15 blocking compacting Gen2 collections in ~2s, plus `WaitForOomCooldownAsync`
+suppressing fetches 750ms and a `500 + attempt*500` ms retry backoff.
+
+That accounts for three of #22's four signatures:
+
+| #22 observed | mechanism |
+| --- | --- |
+| 13 Gen2 in 15s | one forced blocking Gen2 per OOM'ing worker |
+| CPU 342% | repeated blocking **compacting** Gen2 on a multi-GB heap |
+| busy=1–3 | OOM cooldown + retry backoff **suppress fetching** |
+
+The bursts look like "allocating with no network" because **the OOM handler is what stopped the
+network**. #22 is downstream of #19, not a rival to it — and the candidate list it proposed (RAR
+`Unpack`/`RarStream`/`RarVM`, `AesDecoderStream`, yEnc, `CombinedStream.DiscardBytesAsync`, Par2)
+is aimed at a path that is not involved.
+
+**Still genuinely open:** the **1104 MB/s** figure itself. `GC.Collect` does not allocate. The
+metric is single-line, so it is not a sampling artifact of the loop's `awk`. The retry loop
+re-renting ~1MB per attempt is a candidate and is **not** confirmed. If anything here deserves an
+EventPipe `GCAllocationTick` trace, it is this — **aimed at v0.11.4 during an OOM storm**.
+
+### The 2-slot semaphore does not exist
+
+`new SemaphoreSlim(2, 2)` at `BufferedSegmentStream.cs:23` is a **field initializer**, unconditionally
+overwritten at startup by `Program.cs:214`:
+
+```csharp
+BufferedSegmentStream.SetMaxConcurrentStreams(configManager.GetMaxConcurrentBufferedStreams());
+```
+
+Production config `usenet.max-concurrent-buffered-streams = **8**`. Log shows **0** occurrences of
+"No semaphore slot available". `ConfigManager.GetMaxConcurrentBufferedStreams()` already documents
+the 2→8 change — *"Default 8 (was 2): a single multipart/RAR playback needs a buffered-stream slot
+per active part, plus the player's parallel head/tail probes — 2 caused 'No semaphore slot
+available' and stalls."* — i.e. the fix **predates this investigation**, and PR #21's post-mortem
+re-derived the old failure from a stale constant it read out of the source.
+
+### The attach misses are normal
+
+v0.11.4 — the build that plays two videos fine:
+
+```
+hits 22 | no_entry 36 | position_out_of_range 23 | existing_entry_unattachable 23
+```
+
+PR #21 read `position_out_of_range=43 / existing_entry_unattachable=43 vs 22 hits` as its smoking
+gun. The **working** build has the same pattern. Caveat, stated: these are cumulative counters over
+different uptimes and workloads, so v0.11.5's miss *rate* may still have been higher — but the miss
+*kind* is not novel, and the mechanism that was supposed to convert misses into unplayability (slot
+exhaustion) never fired.
+
+### A theory, flagged as a theory
+
+`GC.WaitForPendingFinalizers()` called concurrently from ~15 threads under memory pressure is a
+candidate for converting a *survivable* OOM into `Internal CLR error (0x80131506)` — which is
+specifically **an allocation failing inside a finalizer**. If that holds, the recovery machinery
+manufactures the crash it exists to prevent. **Unverified.** It is theory #6; theories #1–5 were all
+wrong. Measure it.
+
+### Five wrong theories
+
+1. Stream retention leak.
+2. Retention growing 1:1 with bytes streamed.
+3. Stats-event churn is the dominant allocator.
+4. `ArrayPool` pathology / the pool misses.
+5. **Prefetch is load-bearing via `TryAttachReader` + a 2-slot cap.**
+
+#1–4 were read from code and disproved by measurement. **#5 was also read from code** — including
+a constant that the running process overwrites at startup. The pattern is not "we lacked data", it
+is **"source was read as if it were runtime state."** #5 was written into this doc, PR #21's
+post-mortem, issue #22's framing, and the project memory, and was believed for a full session.
+
+**Check the running process, not the source.** `docker exec … /metrics`, the config table, and the
+container's own log settled all three corrections above in about ten minutes.
