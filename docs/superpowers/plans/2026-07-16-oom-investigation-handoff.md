@@ -174,7 +174,12 @@ Prints an ALLOCATION block (total allocated, alloc per MB read, Gen0/1/2, heap n
 **Two caveats:** it has no websocket (so it cannot model the relay), and it runs a **single**
 provider (so it cannot model the 7× fan-out). Neither limitation is fixed.
 
-## How it actually resolved (v0.11.5)
+## How the cause was actually found (v0.11.5 — which did NOT resolve it)
+
+> **Title corrected 2026-07-16.** This section used to be called "How it actually resolved". It did
+> not resolve: v0.11.5 was reverted (see "Deployed, and reverted"), the OOM is live on v0.11.4
+> today, and everything below the "The fix" heading describes a **reverted** change. What survives
+> is the *diagnosis* and the *method*.
 
 The fourth theory — the one this document proposed above — was also wrong, and wrong in the same
 way as the first three: it was inferred from reading code, and it named the pool as the culprit.
