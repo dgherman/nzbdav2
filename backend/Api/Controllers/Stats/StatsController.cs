@@ -27,6 +27,7 @@ public class StatsController(
     ProviderErrorService providerErrorService,
     HealthCheckService healthCheckService,
     ConfigManager configManager,
+    StreamSessionRegistry streamSessionRegistry,
     IServiceScopeFactory scopeFactory
 ) : ControllerBase
 {
@@ -179,6 +180,16 @@ public class StatsController(
             }
 
             return Ok(transformed);
+        });
+    }
+
+    [HttpGet("streams")]
+    public Task<IActionResult> GetActiveStreams()
+    {
+        return ExecuteSafely(() =>
+        {
+            var dtos = streamSessionRegistry.GetActiveStreamDtos();
+            return Task.FromResult<IActionResult>(Ok(dtos));
         });
     }
 

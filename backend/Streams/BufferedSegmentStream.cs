@@ -572,6 +572,20 @@ public class BufferedSegmentStream : Stream, ITouchableStream
         // FileSize is already set by NzbFileStream to total file size, don't overwrite it
         details.CurrentBytePosition = (details.BaseByteOffset ?? 0) + _position;
 
+        // Heartbeat the live-streams registry that powers the dashboard's Active Streams panel.
+        // Keyed by DavItem so seeks/multipart parts of one file collapse to a single session.
+        // Off the fetch loop (this method is called on progress, not per segment) and null-safe
+        // so streaming tools/tests without a registry are unaffected.
+        if (details.DavItemId is { } davItemId && details.FileSize is { } fileSize)
+        {
+            NzbWebDAV.Services.StreamSessionRegistry.Current?.Touch(
+                davItemId,
+                details.Text,
+                _usageContext.Value.AffinityKey ?? details.Text,
+                details.CurrentBytePosition ?? 0,
+                fileSize);
+        }
+
         // Occasionally trigger a UI update via ConnectionPool if possible
         var multiClient = GetMultiProviderClient(_client);
         if (multiClient != null)

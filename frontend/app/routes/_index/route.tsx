@@ -10,17 +10,17 @@ export function meta({}: Route.MetaArgs) {
 }
 
 export async function loader({ request }: Route.LoaderArgs) {
-    const [dashboardData, connections] = await Promise.all([
+    const [dashboardData, streams] = await Promise.all([
         backendClient.getDashboard(24),
-        backendClient.getActiveConnections()
+        backendClient.getActiveStreams()
     ]);
-    return { dashboardData, connections };
+    return { dashboardData, streams };
 }
 
 export default function Index({ loaderData }: Route.ComponentProps) {
-    const { dashboardData, connections } = loaderData;
+    const { dashboardData, streams } = loaderData;
 
     return (
-        <Dashboard initialData={dashboardData} initialConnections={connections} />
+        <Dashboard initialData={dashboardData} initialStreams={streams} />
     );
 }
