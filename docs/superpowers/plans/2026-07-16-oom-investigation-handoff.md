@@ -1,12 +1,15 @@
 # OOM investigation — handoff (2026-07-16)
 
-> **Resolved in v0.11.5.** The root cause was **unbounded prefetch**, not an `ArrayPool`
-> pathology. Fetch workers parked completed ~1MB buffers in `segmentSlots` (sized to the whole
-> file) with no gate tied to the reader, so the resident set scaled with **file size** rather than
-> with `bufferSegmentCount`. The pool was reusing correctly the whole time: distinct arrays (303)
-> tracked the peak working set (299) almost exactly. See the "How it actually resolved" section at
-> the bottom. The rest of this document is preserved as the state of the hunt before the fix —
-> including the fourth wrong theory, which this document itself proposed.
+> **Diagnosed, NOT fixed.** The cause is **unbounded prefetch**, not an `ArrayPool` pathology:
+> fetch workers park completed ~1MB buffers in `segmentSlots` (sized to the whole file) with no
+> gate tied to the reader, so the resident set scales with **file size** rather than with
+> `bufferSegmentCount`. The pool was reusing correctly the whole time — distinct arrays (303)
+> tracked the peak working set (299) almost exactly.
+>
+> **PR #21 bounded the window, fixed the memory on the NAS, and broke playback. It was reverted.**
+> The prefetch is load-bearing: `SharedStreamEntry.TryAttachReader` depends on the pump running
+> ahead of the reader. Read "How it actually resolved" *and* "Deployed, and reverted" at the bottom
+> before touching this — the second section is the one that will save you a rollback.
 
 State of the hunt for the streaming OOM that kills the backend with
 `Internal CLR error (0x80131506)` during large-file playback.
@@ -251,3 +254,63 @@ Four theories, four wrong, all from reading code. The measurements were right ev
 that cracked it took ~20 lines of counters. **Instrument the thing before theorising about it** —
 and note that "the call site is identified" is not the same as "the cause is identified": the
 allocation trace named the exact line, and the line was innocent.
+
+## Deployed, and reverted (2026-07-16, same day)
+
+PR #21 shipped to the NAS and was rolled back within the hour. **Read this before re-attempting.**
+
+### The memory fix worked. On production.
+
+With bounded prefetch and 30 busy connections: **20–26 MB/s allocation, heap stable 353–512 MB**,
+against 153 MB/s and the heap cycling 1.15 GB → 4 GiB every ~25s before. No OOM in ~27 min. When
+the client stopped pulling, connections went idle and allocation fell to ~1 MB/s. The diagnosis and
+the memory result are **confirmed on real hardware**.
+
+### And it broke playback.
+
+The **second concurrent video would not play at all** — multiple different shows. In 8 minutes: 14
+`CORRUPTION DETECTED`, 21 `Invalid NNTP Response`, 58 circuit-breaker trips. Shared-stream misses
+`existing_entry_unattachable=43` / `position_out_of_range=43` against 22 hits. Rollback to v0.11.4
+→ two videos play fine immediately.
+
+### The coupling nobody knew about
+
+`SharedStreamEntry.TryAttachReader` accepts a reader only within
+`[ValidRangeStart, WritePosition + ringBufferSize]` — **a function of how far the pump has run
+ahead of the reader**. Bounding prefetch ties the pump's frontier to reader consumption, so joining
+readers fail to attach, fall back to a *private* `BufferedSegmentStream`, and those need a slot
+from `s_concurrentStreamSlots` — which is **`new SemaphoreSlim(2, 2)`**. Two videos exhaust it.
+
+**The unbounded prefetch is load-bearing.** The window, the attach range, and the 2-slot cap are
+**one coupled design**. Change them together or not at all. (Unverified: it fits every metric, but
+so did four earlier theories. Reproduce it.)
+
+### Still unexplained
+
+Allocation bursts of **103–1104 MB/s at 1–3 busy connections with CPU at 342%** (13 Gen2 in 15s).
+Not network-fed — three connections cannot pull 1 GB/s — so **not** segment fetching, and not
+anything this investigation has accounted for. Roughly 1 GB/s from an unknown source during
+playback. Worth its own issue.
+
+### The harness gap that let this ship
+
+The harness runs **one stream, no `SharedStreamManager`, no idle connections, one provider**. It
+could not have caught this. Preconditions for the next attempt:
+
+1. Reproduce **2 concurrent streams through `SharedStreamManager`**.
+2. Treat the attach range and the 2-slot cap as **part of** the window change.
+3. Model **idle** connections — bounded prefetch newly lets them idle, and idle connections go
+   stale (`Health check failed for idle connection (idle: 455s)`). Pre-fix they were never idle
+   because the workers raced constantly.
+
+Confound, stated: the revert also restarted the container, resetting pools and breakers. Against
+that, the failure persisted ~25 min across multiple shows. Strong, but n=1.
+
+### The lesson, a third time
+
+This document already said: *"Do not claim a production win from a harness number without
+confirming the deployment takes that path — a previous fix measured green and is inert in
+production for exactly this reason."* The next session read that rule, quoted it, and then shipped
+a fix validated on a single-stream harness into a multi-stream production path. The memory numbers
+were true; the harness simply could not see the thing that mattered. **A green harness number is
+evidence about the harness.**
