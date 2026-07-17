@@ -1,18 +1,21 @@
 # OOM investigation — handoff (2026-07-16)
 
-> **Diagnosed, NOT fixed.** The cause is **unbounded prefetch**, not an `ArrayPool` pathology:
-> fetch workers park completed ~1MB buffers in `segmentSlots` (sized to the whole file) with no
-> gate tied to the reader, so the resident set scales with **file size** rather than with
-> `bufferSegmentCount`. The pool was reusing correctly the whole time — distinct arrays (303)
-> tracked the peak working set (299) almost exactly.
+> **FIXED (v0.11.5, 2026-07-16) — verified on production hardware at 3 concurrent streams.**
+> Skip to **"Resolved"** at the bottom for the current state, what to test next, and what is left.
+> Everything above it is the hunt, preserved because five of its seven theories were wrong and the
+> shapes of those errors are the useful part.
 >
-> **PR #21 bounded the window, fixed the memory on the NAS, and broke playback. It was reverted.**
-> **Why it broke playback is NOT known.** This document previously claimed the prefetch was
-> "load-bearing" via `SharedStreamEntry.TryAttachReader` and a 2-slot semaphore. **Both halves of
-> that story are false and were disproved on 2026-07-16** — see "Five wrong theories" and
-> "Corrections (2026-07-16, later session)" at the bottom. Do not build on it.
+> **The fix has two halves and shipping either alone fails:**
+> 1. **Bound the prefetch window** — fetch workers parked ~1MB buffers in `segmentSlots` (sized to
+>    the whole file) with no gate tied to the reader, so the resident set scaled with **file size**.
+>    A 6924-segment file demanded ~6.9 GB against a 4 GiB limit.
+> 2. **Floor it at 300 segments** — bounding alone starves the reader; playback dies on NNTP
+>    body-read timeouts and the retries trip the providers' breakers. That was PR #21, at an
+>    effective window of **90 for 30 connections**. It was reverted.
 >
-> **#22 is not an independent bug — it is this bug's OOM-recovery storm.** Also settled below.
+> **The `ArrayPool` was never at fault** (distinct arrays 303 ≈ peak checked out 299). **#22 was
+> never an independent bug** — it was this bug's own OOM-recovery storm. **The "load-bearing
+> prefetch / `TryAttachReader` / 2-slot cap" story was false in both halves.**
 
 State of the hunt for the streaming OOM that kills the backend with
 `Internal CLR error (0x80131506)` during large-file playback.
@@ -451,3 +454,116 @@ post-mortem, issue #22's framing, and the project memory, and was believed for a
 
 **Check the running process, not the source.** `docker exec … /metrics`, the config table, and the
 container's own log settled all three corrections above in about ten minutes.
+
+## Resolved (2026-07-16, late session) — read this first
+
+### The fix
+
+`maxPrefetchWindow = Math.Max(bufferSegmentCount + connections, 300)`, exposed as
+`usenet.prefetch-window` (0 = auto). Branch `fix/oom-bounded-prefetch-window`.
+
+**Both halves are load-bearing.** Bounding fixes the memory; the floor keeps playback alive. PR #21
+shipped only the first and broke the second video.
+
+### What theory #7 was, and how it was confirmed
+
+**PR #21 starved the reader.** Not a shared-stream coupling — the window was simply too small.
+
+`bufferSegmentCount = Math.Max(streamBufferSize, connections * 2)` = 60, so
+`maxPrefetchWindow = 60 + 30` = **90 at 30 connections**. Note `DatabaseStoreNzbFile.cs:78` passes
+`GetTotalStreamingConnections()` (30) as the per-stream `concurrentConnections` — *not*
+`connections-per-stream` (20). Every stream asks for 30 workers against a **30-connection global
+budget**, so N streams contend N-way.
+
+**The harness had already measured exactly that configuration failing, 23 minutes before the
+deploy:**
+
+| window | ratio | result |
+| --- | --- | --- |
+| **90** | **3.0×** | **2 of 3 runs failed** — NNTP body-read timeouts + provider trips |
+| 150 | 5.0× | 3/3 pass |
+| 300 | 10× | 3/3 pass |
+
+Production then showed the *same signature*: 21 `Invalid NNTP Response`, 58 breaker trips. The
+harness's own default window is also 90, so PR #21 validated itself inside the failing band and read
+the 8.87–17 MB/s spread as noise. **The answer was in the session's own measurements, unread** —
+because the window was *computed* and never *logged*, so nobody knew which number it produced.
+
+Confirmation: same code, same bounded prefetch, `NZBDAV_PREFETCH_WINDOW=300`, one env var different.
+
+| marker | PR #21 @ win 90 (8 min) | @ win 300 (8 min) |
+| --- | --- | --- |
+| playback | **2nd video unplayable** | **3 videos, all fine** |
+| `CORRUPTION DETECTED` | 14 | **0** |
+| breaker trips | 58 | **0** |
+| `ERROR FETCHING SEGMENT` | — | **0** |
+| `OOM during fetch` | (v0.11.4: 15 in 2s) | **0** |
+| heap | 1.15 GB → 4 GiB cycle | **~750 MB flat** |
+| allocation | 153 MB/s | **0–29 MB/s** |
+
+### The real coupling: #18 and #19 are one problem
+
+**The unbounded prefetch was masking #18.** ~99% of fetch time is connection *acquire*, ~0% network.
+Racing ahead unbounded hid that latency. Bound the window too tightly and #18's contention surfaces
+as reader starvation. **300 is a measurement, not a formula** — one production run plus harness runs
+at 150 and 300. The underlying quantity is a **bandwidth-delay product**: the window must cover
+worst-case refill latency at the video's bitrate. Fix #18 and the floor can come down.
+
+Err **generous**: too large costs memory an operator can tune away; too small breaks playback, which
+is a *regression from the unbounded default*.
+
+### What to test next
+
+Tonight's run was ~10 minutes on the **test** build. None of the below is done.
+
+1. **Deploy the final build and re-verify.** The NAS ran `BUILD v2026-07-16-PREFETCH-WINDOW-STARVATION-TEST`
+   with `NZBDAV_PREFETCH_WINDOW=300`. The shipped build is
+   `BUILD v2026-07-16-BOUNDED-PREFETCH-WINDOW-WITH-FLOOR`; **drop the env var** and confirm the log
+   reads `source=floor` (not `configured`) at 300. Different code path — the floor, not the override.
+2. **Soak longer than 25 minutes.** PR #21's failure persisted ~25 min; 10 minutes clean is not yet
+   a refutation of it.
+3. **Play the file that actually OOMed**: `Alone.S13E03` — **6924 segments**, the one that produced
+   15 `OOM during fetch` in 2 seconds on v0.11.4. Tonight's files were not necessarily that large.
+   This is the real regression test.
+4. **Seeking.** Untested tonight. Stremio issues many range requests; every seek stacks a new
+   full-width stream onto the pool (#18). A bounded window interacts with that and nobody has looked.
+5. **The 8-slot worst case.** `max-concurrent-buffered-streams = 8` × 300 MB ≈ **2.4 GB**, and 8
+   slots is *not* 8 videos — multipart/RAR needs a slot per part. The ~3.9 GB projection against a
+   4 GiB limit is **arithmetic, not a measurement**. Drive it (multipart RAR + several videos) before
+   trusting it.
+6. **Idle-connection churn over hours.** Benign so far; bounded prefetch makes it permanent.
+
+Verification gate, always: read the banner **and** the per-stream
+`[BufferedStream] PREFETCH WINDOW: N segments (…, source=…)` line. Do not trust a number without it.
+
+### What is left
+
+- **PR #20 needs a `VERSION` bump before merge.** It changes `backend/Tools/FullNzbTester.cs` with no
+  bump and no changelog entry, so CI would republish `latest` and **overwrite the `0.11.4` tag**.
+- **PR #21**: retarget to `main` once #20 merges, and take it out of draft.
+- **#18 — now the headline.** Not just the throughput limiter: it is *why the floor must be 300*.
+- **Buffer right-sizing**: every buffer is 1 MB serving ~700 KB (720,896 rounds into `ArrayPool`'s
+  1 MB bucket). ~30% off the window's memory cost; helps small deployments most.
+- **Idle-connection reconnect churn**: its own issue.
+- **Theory #6, unverified**: `GC.WaitForPendingFinalizers()` from ~15 threads under memory pressure
+  may be what converts a *survivable* OOM into `Internal CLR error (0x80131506)` — literally "an
+  allocation failed inside a finalizer". If so the fatal crash is **separable** from the memory
+  growth and worth hardening on its own terms. Much harder to trigger now that the OOMs are gone.
+- **#14**: still reopened. Decide whether the debounce stays or it closes as a micro-optimisation.
+
+### Seven theories, five wrong, and the one pattern
+
+1. Stream retention leak. 2. Retention growing 1:1 with bytes streamed. 3. Stats-event churn.
+4. `ArrayPool` pathology. 5. Prefetch is load-bearing via `TryAttachReader` + a 2-slot cap.
+6. *(open)* Finalizer storm makes the OOM fatal. **7. The window starved the reader — correct.**
+
+#1–4 were read from code and killed by measurement. **#5 was read from a constant the running
+process overwrites at startup** (`new SemaphoreSlim(2, 2)` is a field initializer; production runs
+8). **#7 — the first to survive — came from data already on disk**, a sweep taken 23 minutes before
+the deploy that contradicted it.
+
+The pattern is not "we lacked data". Three times the data existed and was not consulted: the config
+table said 8, the sweep said 90 fails, and the container's own log said `OOM during fetch`. **Read
+the running system, and re-read your own measurements, before theorising about either.** Every
+computed knob that matters should be logged with its effective value and its source — the absence of
+exactly that is what let PR #21 ship blind.
