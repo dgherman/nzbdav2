@@ -247,6 +247,7 @@ class Program
             .AddSingleton(websocketManager)
             .AddSingleton<BandwidthService>()
             .AddSingleton<NzbProviderAffinityService>()
+            .AddSingleton<StreamSessionRegistry>()
             .AddSingleton<ProviderErrorService>()
             .AddSingleton<ArrReplacementSearchService>()
             .AddSingleton<UsenetStreamingClient>()
@@ -285,6 +286,7 @@ class Program
         app.Services.GetRequiredService<ArrMonitoringService>();
         app.Services.GetRequiredService<HealthCheckService>();
         app.Services.GetRequiredService<BandwidthService>();
+        app.Services.GetRequiredService<StreamSessionRegistry>();
 
         // Backfill JobNames for missing article events (Background, delayed)
         _ = Task.Run(async () =>

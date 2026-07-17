@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Websocket;
 
 namespace NzbWebDAV.Services;
 
@@ -29,9 +31,52 @@ public sealed class StreamSessionRegistry
     /// BufferedSegmentStream which is not DI-managed. Mirrors BufferedSegmentStream's static config.</summary>
     public static StreamSessionRegistry? Current { get; private set; }
 
+    private readonly WebsocketManager _websocketManager;
+    private readonly NzbProviderAffinityService _affinityService;
+    private readonly ConfigManager _configManager;
+    private readonly Timer _broadcastTimer;
+
+    private static readonly System.Text.Json.JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+    };
+
+    public StreamSessionRegistry(
+        WebsocketManager websocketManager,
+        NzbProviderAffinityService affinityService,
+        ConfigManager configManager)
+    {
+        _websocketManager = websocketManager;
+        _affinityService = affinityService;
+        _configManager = configManager;
+        Current = this;
+        _broadcastTimer = new Timer(Broadcast, null, TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(1));
+    }
+
+    // Test-only: builds a registry with no broadcaster wired up.
     public StreamSessionRegistry()
     {
+        _websocketManager = null!;
+        _affinityService = null!;
+        _configManager = null!;
+        _broadcastTimer = new Timer(_ => { }, null, Timeout.Infinite, Timeout.Infinite);
         Current = this;
+    }
+
+    /// <summary>Builds the current enriched stream list using live config + affinity stats.</summary>
+    public IReadOnlyList<ActiveStreamDto> GetActiveStreamDtos()
+    {
+        var hosts = _configManager.GetUsenetProviderConfig().Providers.Select(p => p.Host).ToList();
+        return BuildDtos(GetActiveSessions(), _affinityService.GetJobStats, hosts);
+    }
+
+    private void Broadcast(object? state)
+    {
+        // Nothing painting the panel -> skip the serialize entirely (mirrors other producers).
+        if (!_websocketManager.HasSubscribers) return;
+        var dtos = GetActiveStreamDtos();
+        var json = System.Text.Json.JsonSerializer.Serialize(dtos, JsonOptions);
+        _websocketManager.SendMessage(WebsocketTopic.ActiveStreams, json);
     }
 
     public void Touch(Guid davItemId, string fileName, string affinityKey, long currentBytePosition, long fileSize)
