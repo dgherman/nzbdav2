@@ -56,14 +56,17 @@ worker forces a blocking compacting Gen2 (`HandleOomPressure`, not single-flight
 which is why the network goes quiet during them. Fixing this removes #22. See "Corrections" at the
 bottom.
 
-**Status: NOT fixed.** PR #21 bounded the window, fixed the memory on the NAS, broke playback, and
-was reverted. **Why it broke playback is unknown** — the "load-bearing / 2-slot cap" explanation is
-false (theory #5). The fix direction is still right; it is blocked on a 2-concurrent-stream
-reproduction through `SharedStreamManager`, which has never existed.
+**Status: FIXED in v0.11.5** — see "Resolved" at the bottom. PR #21 bounded the window, fixed the
+memory on the NAS, broke playback, and was reverted; the missing half was a **floor of 300
+segments**, because bounding alone starves the reader. PR #21 shipped an effective window of 90 at
+30 connections, which the harness had already measured as failing. The "load-bearing / 2-slot cap"
+explanation for that breakage was false (theory #5).
 
 **The harness reproduces the memory growth** (400 MB threw `OutOfMemoryException`; bounding made
 peak resident flat across 200/400/1000 MB) with no NAS access. It **cannot** reproduce the playback
-break: one stream, no `SharedStreamManager`, no idle connections, one provider.
+break by observation — one stream, no `SharedStreamManager`, no idle connections, one provider — but
+note it *did* contain the answer as data: its window sweep measured the failing configuration before
+that configuration shipped. The harness was a better instrument than anyone read it as.
 
 ## Three wrong diagnoses, and why each survived
 
@@ -269,9 +272,11 @@ can never be gated.
 Peak resident is **flat across 200/400/1000 MB** — memory is now a function of configuration, not
 of file length. That flatness is the result; the LOH reduction is a side effect of it.
 
-### What is still open
+### What was still open at the time (superseded — see "Resolved")
 
-- **Throughput.** Harness sequential speed reads ~13 MB/s after vs ~23 MB/s before. The comparison
+- **Throughput.** Harness sequential speed reads ~13 MB/s after vs ~23 MB/s before. **Note in
+  hindsight:** those "after" runs were at window 90, i.e. inside the failing band — the degraded
+  throughput was the starvation, not a cost of bounding. The comparison
   is confounded and the harness is a poor instrument for it: ~99% of fetch time there is connection
   acquire (**#18**), the mock provider's breaker trips ~28 times per run on **baseline** too, and
   the run-to-run spread is 7.6–34.1 MB/s. The baseline bought its number by fetching 1.43× the
@@ -336,8 +341,9 @@ could not have caught this. Preconditions for the next attempt:
 
 1. Reproduce **2 concurrent streams through `SharedStreamManager`**.
 2. ~~Treat the attach range and the 2-slot cap as part of the window change.~~ **Struck** — the
-   2-slot cap does not exist (it is 8), and the attach misses are normal. Instead: **find out what
-   actually broke playback**, because as of 2026-07-16 nobody knows.
+   2-slot cap does not exist (it is 8), and the attach misses are normal. **Answered since:** what
+   broke playback was a window of 90 starving the reader. The floor fixed it, and precondition 1
+   turned out not to be needed — the harness's *existing* window sweep already held the answer.
 3. Model **idle** connections — bounded prefetch newly lets them idle, and idle connections go
    stale (`Health check failed for idle connection (idle: 455s)`). Pre-fix they were never idle
    because the workers raced constantly.
