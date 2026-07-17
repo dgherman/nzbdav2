@@ -22,27 +22,52 @@ document is the surrounding context: what shipped, what was wrong, and what not 
 
 ## Bottom line
 
-The OOM is **LOH churn at ~109 MB/s (71% of all allocation)**, refilling the 4 GiB
-`DOTNET_GCHeapHardLimit` from a stable ~1.15 GB floor every ~25 seconds. At the top of that cycle
-there is no headroom, and an allocation failing inside a finalizer produces the fatal CLR error.
+> **Rewritten 2026-07-16.** This section used to conclude that `ArrayPool<byte>.Shared.Rent`
+> "misses on roughly every segment" and ask *why the pool misses*. **That was wrong theory #4** and
+> it is preserved only under "Three wrong diagnoses" below. The pool is innocent: distinct arrays
+> (303) ≈ peak checked out (299). **Do not go looking for a pool pathology.**
 
-It is **not** a leak, and it is **not** the connection-pool stats event that #14 was reopened to
-correct.
+**The OOM is unbounded prefetch.** Fetch workers park completed ~1MB buffers in `segmentSlots`,
+which is sized to the whole file, and nothing gates them on the reader — the only bounded queue
+(`_bufferChannel`) sits *downstream*. So resident memory scales with **file size**, not with
+`bufferSegmentCount`. A large enough file reaches the 4 GiB `DOTNET_GCHeapHardLimit` no matter how
+the buffers are pooled.
 
-**The call site is now identified** (see #19 for the trace). `ArrayPool<byte>.Shared.Rent` at
-`BufferedSegmentStream.cs:1236`, inside `FetchSegmentWithRetryAsync`, **misses on roughly every
-segment** and allocates a fresh 1 MB LOH array instead of reusing one — 272+ MB over 272+ allocations
-of exactly 1 MB for ~286 segments. The stack frame is `AllocateNewArrayWorker` *under*
-`SharedArrayPool.Rent`, so the pool is providing essentially no reuse.
+**Caught in the act on v0.11.4** (2026-07-16, clean log — 0 `CORRUPTION DETECTED`, 0 `Invalid NNTP`,
+0 breaker trips):
 
-**It reproduces in the mock harness**, which matches the NAS signature (70.7% LOH vs 71%) with no
-websocket and a single provider. The OOM can be investigated with no NAS access at all.
+```
+15 × [BufferedStream] OOM during fetch   (6 at 22:58:35, 9 at 22:58:36)
+1 job. Segments 4859–4889 of 6924.
+```
 
-Remaining question: *why* the pool misses. Candidates in #19 — trim-under-memory-pressure feedback
-loop, bucket capacity vs 30-way concurrency, or cross-thread rent/return defeating the TLS slot.
-Note the harness has no heap limit and still misses, so trimming is not the whole story.
+A 6924-segment file wants ~6.9 GB resident; the racing workers all hit the wall inside ~2 seconds,
+in a tight band of consecutive indices. That is the mechanism, on production, not in a harness.
+
+**The ~109 MB/s LOH churn is real but it is the symptom**, not the cause — it is what
+file-size-scaled buffering looks like from the GC's side. It is **not** a leak, and **not** the
+connection-pool stats event #14 was reopened to correct.
+
+**#22's "unexplained" 103–1104 MB/s bursts are this bug's own OOM-recovery storm** — each OOM'ing
+worker forces a blocking compacting Gen2 (`HandleOomPressure`, not single-flighted) and backs off,
+which is why the network goes quiet during them. Fixing this removes #22. See "Corrections" at the
+bottom.
+
+**Status: NOT fixed.** PR #21 bounded the window, fixed the memory on the NAS, broke playback, and
+was reverted. **Why it broke playback is unknown** — the "load-bearing / 2-slot cap" explanation is
+false (theory #5). The fix direction is still right; it is blocked on a 2-concurrent-stream
+reproduction through `SharedStreamManager`, which has never existed.
+
+**The harness reproduces the memory growth** (400 MB threw `OutOfMemoryException`; bounding made
+peak resident flat across 200/400/1000 MB) with no NAS access. It **cannot** reproduce the playback
+break: one stream, no `SharedStreamManager`, no idle connections, one provider.
 
 ## Three wrong diagnoses, and why each survived
+
+> **There are now five.** #4 (the `ArrayPool` pathology) and #5 (the "load-bearing prefetch /
+> 2-slot cap") were both written into this document as conclusions and both were disproved. The
+> full list is under "Five wrong theories" at the bottom. This section is theories #1–3 as
+> originally recorded.
 
 Worth reading before forming a fourth. Each was stated confidently and each was wrong.
 
