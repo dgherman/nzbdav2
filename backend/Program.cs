@@ -59,8 +59,10 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-16-STATS-CHURN-AND-PROVIDER-FALLBACK");
-        Log.Warning("  FEATURE: Connection-pool stats no longer build a websocket message when nobody is subscribed (61,683 bytes -> 0 per connection borrow/return, ~658 MiB over a 5,593-segment file), and coalesce to 4 pushes/sec per provider when the UI is open; the connections panel is refreshed on subscriber connect so skipping publishes cannot leave it stale. A stalled segment no longer fails outright when one provider is configured: excluded providers are offered as a last resort instead of emptying the candidate list. Also repairs the --test-full-nzb --mock-server benchmark, which measured a single segment regardless of --size.");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-17-BYTE-DENOMINATED-PREFETCH-FLOOR");
+        Log.Warning("  FIX (#19): segment prefetch is bounded by the reader's position, with a floor denominated in BYTES of data in flight (256 MB), not segments. Segment size is a property of how the file was posted and varies ~8x between releases, so a fixed 300-segment floor held 215 MB on a 717 KB-segment file but 2.4 GB on a 4.19 MB-segment one for the identical guarantee. 256 MB is the production-validated 215 MB (clean at both 300 segments of 717 KB and 51 of 4.19 MB) plus margin; PR #21's 64 MB starved and tripped breakers. Tune with the 'usenet.prefetch-window' setting (0 = auto, in segments).");
+        Log.Warning("  INSTRUMENT (#18): each stream now logs its effective segment count and memory ceiling alongside the window, so a stream's cost can be read from the log instead of inferred. Measured: one video opens 5 streams but only 2 are expensive -- the other 3 are range-bounded and cost 7MB between them, so counting streams overstates memory badly. NOTE: this banner deliberately does not quote the per-stream log's literal text; when it did, every grep for that text also matched the banner and inflated a production stream count from 15 to 17.");
+        Log.Warning("  INSTRUMENT (heap): POST /api/gc-diagnostics forces a full compacting collection and reports generation sizes either side of it, separating rooted memory from garbage. Needs NZBDAV_GC_DIAG=1; it stalls every thread while it runs. Exists because last_collection_heap_size freezes when the process goes idle -- the heap becomes unreadable exactly when you want its floor.");
         Log.Warning("═══════════════════════════════════════════════════════════════");
 
         // Run Arr History Tester if requested
@@ -212,6 +214,7 @@ class Program
 
         // Set initial concurrent buffered stream cap
         BufferedSegmentStream.SetMaxConcurrentStreams(configManager.GetMaxConcurrentBufferedStreams());
+        BufferedSegmentStream.SetPrefetchWindow(configManager.GetPrefetchWindow());
 
         // Update on config change
         configManager.OnConfigChanged += (_, eventArgs) =>
@@ -219,6 +222,11 @@ class Program
             if (eventArgs.NewConfig.ContainsKey("usenet.max-concurrent-buffered-streams"))
             {
                 BufferedSegmentStream.SetMaxConcurrentStreams(configManager.GetMaxConcurrentBufferedStreams());
+            }
+
+            if (eventArgs.NewConfig.ContainsKey("usenet.prefetch-window"))
+            {
+                BufferedSegmentStream.SetPrefetchWindow(configManager.GetPrefetchWindow());
             }
         };
 

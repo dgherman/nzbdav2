@@ -42,3 +42,6 @@ temp_config/
 backend/local_data/
 .worktrees/
 .DS_Store
+
+# Local benchmark harness config/db (docs/superpowers/plans OOM harness)
+/cfg/

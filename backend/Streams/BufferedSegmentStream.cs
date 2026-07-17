@@ -19,6 +19,69 @@ namespace NzbWebDAV.Streams;
 /// </summary>
 public class BufferedSegmentStream : Stream, ITouchableStream
 {
+    /// <summary>
+    /// Floor for the prefetch window, in BYTES of segment data in flight. The window is what stops the
+    /// fetchers racing to the end of the file (issue #19) — but set it too low and the reader starves,
+    /// playback dies on NNTP body-read timeouts, and the retries trip the providers' breakers.
+    ///
+    /// The floor is denominated in bytes, not segments, because the quantity that must not starve is a
+    /// bandwidth-delay product — data in flight covering worst-case refill latency — and segment COUNT
+    /// is a terrible proxy for it: segment size is a property of how the file was posted and varies by
+    /// ~8x between releases. Measured on production: 215 MB in flight plays clean at BOTH 300 segments
+    /// of 717 KB (Alone) and 51 segments of 4.19 MB (Backrooms); PR #21's 90 segments of 717 KB = 64 MB
+    /// starved the second stream and tripped breakers. A fixed 300-segment floor held 215 MB on Alone
+    /// but 2.4 GB on Backrooms (43% of the movie resident) for the identical guarantee. 256 MB is the
+    /// proven-good 215 MB plus margin.
+    ///
+    /// Refill latency here is ~99% connection-acquire contention (issue #18); fix #18 and this floor can
+    /// come down. Until then it errs generous on purpose: too large costs memory the operator can tune
+    /// away via usenet.prefetch-window, too small breaks playback.
+    /// </summary>
+    public const long MinPrefetchWindowBytes = 256L * 1024 * 1024;
+
+    /// <summary>
+    /// Fallback floor in segments, used only when the average segment size is unknown (no size table,
+    /// or a zero-length stream) so the byte floor cannot be computed. Kept at the value the byte floor
+    /// was validated against on the 717 KB-segment file.
+    /// </summary>
+    public const int MinPrefetchWindowSegments = 300;
+
+    // 0 = auto. Set from config at startup (see Program.cs), overridable at runtime.
+    private static volatile int s_prefetchWindow;
+
+    public static void SetPrefetchWindow(int window)
+    {
+        s_prefetchWindow = Math.Max(0, window);
+    }
+
+    /// <summary>
+    /// Resolve the prefetch window (in segments) and a source label for logging, from the auto-computed
+    /// window, an explicit operator override, and this file's average segment size. Pure and
+    /// deterministic — the arithmetic lives here so it can be tested without running a real stream.
+    ///
+    /// Precedence: an explicit override wins verbatim; otherwise the byte-denominated floor
+    /// (<see cref="MinPrefetchWindowBytes"/> converted to segments via the average size) applies when it
+    /// exceeds the computed window; otherwise the computed window stands. The floor never drops the
+    /// window below the computed value, so a large-segment file whose byte budget buys only a few
+    /// segments is never starved of parallelism.
+    /// </summary>
+    public static (int window, string source) ComputePrefetchWindow(
+        int computedWindow, int configuredWindow, long avgSegmentSize)
+    {
+        if (configuredWindow > 0)
+            return (configuredWindow, "configured");
+
+        // Convert the byte budget to a segment count for this file. A zero/unknown average (no size
+        // table, empty stream) can't be converted — fall back to the segment-count floor.
+        var byteFloorSegments = avgSegmentSize > 0
+            ? (int)Math.Min(int.MaxValue, MinPrefetchWindowBytes / avgSegmentSize)
+            : MinPrefetchWindowSegments;
+
+        return byteFloorSegments > computedWindow
+            ? (byteFloorSegments, "byte-floor")
+            : (computedWindow, "computed");
+    }
+
     // Concurrent stream cap — limits how many BufferedSegmentStreams can exist simultaneously
     private static volatile SemaphoreSlim s_concurrentStreamSlots = new(2, 2);
     private SemaphoreSlim? _acquiredSemaphore; // Tracks which semaphore instance we acquired from
@@ -563,6 +626,41 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             var segmentSlots = new PooledSegmentData?[segmentIds.Length];
             var nextIndexToWrite = 0;
 
+            // How far ahead of the reader a segment may be dispatched. A completed segment parks a
+            // ~1MB pooled buffer in segmentSlots until the ordering task drains it, and segmentSlots
+            // is sized to the whole file. _bufferChannel bounds only the ordering task, which is
+            // downstream of the slots, so it is not backpressure on the fetchers. The window covers
+            // everything that can hold a buffer at once: the channel plus the in-flight workers.
+            var computedWindow = bufferSegmentCount + concurrentConnections;
+            // Length is this stream's remaining bytes and segmentIds.Length its remaining segments, so
+            // the ratio is the average segment size over exactly the slice being fetched.
+            var avgSegmentSize = segmentIds.Length > 0 ? Length / segmentIds.Length : 0;
+            var (maxPrefetchWindow, windowSource) =
+                ComputePrefetchWindow(computedWindow, s_prefetchWindow, avgSegmentSize);
+
+            // The producer stops at effectiveSegmentCount, so the window is only the binding constraint
+            // on a stream long enough to reach it. A range-bounded read stops earlier and never costs a
+            // full window. This is the stream's actual memory ceiling, and without it the window alone
+            // invites reading every stream as if it held the full window — which overstates a ranged
+            // read by an order of magnitude and understates nothing.
+            var holdSegments = Math.Min(effectiveSegmentCount, maxPrefetchWindow);
+            var boundedBy = holdSegments == effectiveSegmentCount ? "segments" : "window";
+            // Data in flight, in MB. Uses the actual average segment size — the earlier 1 MB/segment
+            // assumption undercounted a 4.19 MB-segment file 4x and is exactly how 2.4 GB read as
+            // 300 MB. Resident is higher still because ArrayPool rounds each rent up to the next
+            // power-of-two bucket (a separate issue), so this is a data floor, not the resident ceiling.
+            var holdMb = holdSegments * avgSegmentSize / (1024 * 1024);
+            var avgSegKb = avgSegmentSize / 1024;
+
+            // Warning level on purpose: production runs LOG_LEVEL=warning, and a window that cannot be
+            // read back from the log is a window nobody can attribute a result to.
+            Log.Warning("[BufferedStream] PREFETCH WINDOW: {Window} segments ({Ratio:F1}x of {Connections} connections, source={Source}, avgSeg={AvgKB}KB, bufferSegmentCount={BufferSegmentCount}), holds~{HoldMB}MB data (bound={BoundedBy}, effective={Effective} of {Total} segments), Job={Job}",
+                maxPrefetchWindow,
+                concurrentConnections > 0 ? (double)maxPrefetchWindow / concurrentConnections : 0,
+                concurrentConnections, windowSource, avgSegKb, bufferSegmentCount,
+                holdMb, boundedBy, effectiveSegmentCount, segmentIds.Length,
+                _usageContext?.DetailsObject?.Text ?? "Unknown");
+
             // Producer: Queue segment IDs up to effectiveSegmentCount (may be < segmentIds.Length
             // when bounded by an HTTP Range end byte to prevent over-prefetching).
             var producerTask = Task.Run(async () =>
@@ -571,6 +669,19 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 {
                     for (int i = 0; i < effectiveSegmentCount; i++)
                     {
+                        if (ct.IsCancellationRequested) break;
+
+                        // Backpressure: hold the segment back until the reader is close enough to
+                        // need it. Without this the workers race to the end of the file and the
+                        // resident set scales with file size instead of with bufferSegmentCount —
+                        // which is the OOM in issue #19. Index _nextIndexToRead is always inside the
+                        // window, so the segment the reader is waiting on can never be gated.
+                        while (i >= Volatile.Read(ref _nextIndexToRead) + maxPrefetchWindow
+                               && !ct.IsCancellationRequested)
+                        {
+                            await Task.Delay(10, ct).ConfigureAwait(false);
+                        }
+
                         if (ct.IsCancellationRequested) break;
                         await segmentQueue.Writer.WriteAsync((i, segmentIds[i]), ct).ConfigureAwait(false);
                     }
@@ -1234,6 +1345,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                     ? (int)Math.Min(_segmentSizes[index] + 4096, int.MaxValue)
                     : Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
                 var buffer = ArrayPool<byte>.Shared.Rent(initialRentSize);
+                SegmentBufferPoolDiagnostics.RecordRent(buffer);
                 var totalRead = 0;
 
                 // Time network read
@@ -1251,8 +1363,10 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                         {
                             // Resize via ArrayPool to avoid LOH churn
                             var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
+                            SegmentBufferPoolDiagnostics.RecordResizeRent();
                             Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
                             ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                            SegmentBufferPoolDiagnostics.RecordReturn();
                             buffer = newBuffer;
                         }
 
@@ -1327,6 +1441,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 {
                     // Return the rented buffer on failure to avoid pool leaks
                     ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                    SegmentBufferPoolDiagnostics.RecordReturn();
                     throw;
                 }
             }
@@ -1555,6 +1670,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
 
             var initialSize = Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
             var buffer = ArrayPool<byte>.Shared.Rent(initialSize);
+            SegmentBufferPoolDiagnostics.RecordRent(buffer);
             var totalRead = 0;
             try
             {
@@ -1899,6 +2015,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             if (buf != null && _pooled)
             {
                 ArrayPool<byte>.Shared.Return(buf, clearArray: false);
+                SegmentBufferPoolDiagnostics.RecordReturn();
             }
         }
     }

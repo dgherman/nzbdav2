@@ -197,6 +197,21 @@ public class ConfigManager
         );
     }
 
+    /// <summary>
+    /// How many segments the fetchers may run ahead of the reader. 0 = auto (derived from the
+    /// buffer and connection count, with a floor — see BufferedSegmentStream.MinPrefetchWindowSegments).
+    /// Costs roughly window × 1 MB of resident memory per active stream, so it is the main memory
+    /// knob for streaming; too small breaks playback outright (see issue #19).
+    /// </summary>
+    public int GetPrefetchWindow()
+    {
+        return int.Parse(
+            StringUtil.EmptyToNull(GetConfigValue("usenet.prefetch-window"))
+            ?? StringUtil.EmptyToNull(Environment.GetEnvironmentVariable("NZBDAV_PREFETCH_WINDOW"))
+            ?? "0"
+        );
+    }
+
     public int GetMaxConcurrentBufferedStreams()
     {
         // Default 8 (was 2): a single multipart/RAR playback needs a buffered-stream slot per active

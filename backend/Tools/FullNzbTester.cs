@@ -52,6 +52,11 @@ public class FullNzbTester
         var configManager = new ConfigManager();
         await configManager.LoadConfig().ConfigureAwait(false);
 
+        // Program.Main wires this after the tool dispatch, so the harness never reaches it and would
+        // silently run the floor no matter what the setting says — while this is the instrument the
+        // window is tuned with. Apply it here too.
+        BufferedSegmentStream.SetPrefetchWindow(configManager.GetPrefetchWindow());
+
         // Check for --mock-server option (built-in mock server)
         MockNntpServer? mockServer = null;
         string? nzbPath = null;
@@ -609,7 +614,7 @@ public class FullNzbTester
                         Console.WriteLine("  SEQUENTIAL THROUGHPUT:");
                         Console.WriteLine($"    Speed:              {sequentialSpeed,6:F2} MB/s");
                         Console.WriteLine("───────────────────────────────────────────────────────────────");
-                        // Allocation is the metric that matters for the OOM investigation (see issue #14):
+                        // Allocation is the metric that matters for the OOM investigation (issue #19):
                         // the heap is churn-bound, not leak-bound, so what kills a long stream is how much
                         // garbage the streaming path produces per byte delivered.
                         var allocatedBytes = GC.GetTotalAllocatedBytes(precise: false);
@@ -619,7 +624,29 @@ public class FullNzbTester
                         Console.WriteLine($"    Bytes Delivered:    {deliveredMb,8:F0} MB");
                         Console.WriteLine($"    Alloc per MB read:  {(deliveredMb > 0 ? allocatedBytes / 1024.0 / 1024.0 / deliveredMb : 0),8:F1} MB");
                         Console.WriteLine($"    Gen0/Gen1/Gen2:     {GC.CollectionCount(0)}/{GC.CollectionCount(1)}/{GC.CollectionCount(2)}");
-                        Console.WriteLine($"    Heap Now:           {GC.GetTotalMemory(false) / 1024.0 / 1024.0,8:F0} MB");
+
+                        // Per-generation sizes, not GC.GetTotalMemory: that number includes uncollected
+                        // garbage, so under Server GC with a heap limit a high allocation rate is
+                        // indistinguishable from a leak. It caused three wrong diagnoses before the
+                        // generation breakdown showed the NAS heap was 3.46 GiB of LOH with Gen2 at 29 MB.
+                        // Segments are ~700 KB and the LOH threshold is 85,000 bytes, so every segment
+                        // buffer is an LOH allocation by definition — this is the line to watch.
+                        var info = GC.GetGCMemoryInfo();
+                        Console.WriteLine($"    Heap Now (w/ garbage): {GC.GetTotalMemory(false) / 1024.0 / 1024.0,5:F0} MB");
+                        foreach (var gen in info.GenerationInfo.Length >= 5
+                                     ? new[] { (0, "gen0"), (1, "gen1"), (2, "gen2"), (3, "loh "), (4, "poh ") }
+                                     : Array.Empty<(int, string)>())
+                        {
+                            var g = info.GenerationInfo[gen.Item1];
+                            Console.WriteLine($"      {gen.Item2} after last GC: {g.SizeAfterBytes / 1024.0 / 1024.0,8:F1} MB" +
+                                              $"  (fragmentation {g.FragmentationAfterBytes / 1024.0 / 1024.0:F1} MB)");
+                        }
+                        Console.WriteLine($"    LOH alloc share is the number that matters — NAS runs ~71%.");
+                        if (SegmentBufferPoolDiagnostics.Enabled)
+                        {
+                            Console.WriteLine("───────────────────────────────────────────────────────────────");
+                            Console.WriteLine(SegmentBufferPoolDiagnostics.Report());
+                        }
                         Console.WriteLine("═══════════════════════════════════════════════════════════════");
                     }
                     catch (Exception ex)
