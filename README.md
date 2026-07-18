@@ -197,6 +197,22 @@ Measured on the repaired harness (600 MB, 150 segments of 4 MB, 16 connections),
 
 47% less memory for identical segment data, with 0 fetch errors and 0 corruption on both sides.
 
+**Verified in production** (NAS, 2026-07-18, 4 GiB `DOTNET_GCHeapHardLimit` in an 8 GiB container). Two movies played *sequentially* — a 698 KB-segment file then a 4093 KB-segment one — 14 streams created across the run, peaking around 5 concurrent on a single file open. The pool counters are cumulative since process start, so the 768 KB class below is the first movie's history and the 4.25 MB class is the second's:
+
+| | before (#23 measurement) | after |
+| --- | --- | --- |
+| heap before forced gen2 | 3381 MB | 1699 MB |
+| heap after forced gen2 | 1780 MB | 1692 MB |
+| LOH after forced gen2 | 1757 MB | 1672 MB |
+| garbage reclaimed by the collection | ~1600 MB | ~7 MB |
+| idle pool retention | ~770 MB, unbounded (2854 MB in one run) | 506 MB, hard-capped at 512 MB |
+| pool reuse rate | 71.3% | 71.0% |
+| resize re-rents | 197 (harness) | 0 |
+
+Reuse is unchanged while retention is bounded — the trade the byte cap was meant to make. Counterfactual on the same production rents (1096 × 768 KB + 240 × 4.25 MB = 1846 MB): `ArrayPool` would have rounded those to 1096 × 1 MB + 240 × 8 MB = 3020 MB, 39% more. The near-total collapse in reclaimed garbage is the headroom fix — those needless doublings were pure LOH garbage. 0 corruption, 0 fetch errors, 0 OOM, 0 breaker trips, 0 restarts.
+
+Note that the 512 MB cap **saturates** under this load (506/512) without costing reuse. Raise `NZBDAV_SEGMENT_POOL_MAX_IDLE_MB` only if the reuse rate drops materially below ~70%; a higher cap buys reuse at the cost of a higher floor.
+
 ## v0.11.8 (2026-07-17)
 Replaces the flickering per-provider socket panel on the dashboard with a persistent Active Streams panel.
 
