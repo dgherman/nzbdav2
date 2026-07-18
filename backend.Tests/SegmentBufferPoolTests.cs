@@ -172,7 +172,7 @@ public class SegmentBufferPoolTests
     }
 
     [Fact]
-    public void Return_EvictsAStaleClassToMakeRoomForALiveOne()
+    public void Return_ReclaimsAStaleClassToMakeRoomForALiveOne()
     {
         var clock = new FakeClock();
         // Cap admits exactly two 4 MB buffers.
@@ -182,69 +182,86 @@ public class SegmentBufferPoolTests
         // before either is returned; returning one at a time would just pop it straight back.
         var dead1 = pool.Rent(4 * Mb);
         var dead2 = pool.Rent(4 * Mb);
+        // Rent the live class's buffer now too, so no rent happens after the clock moves — that
+        // isolates the *pressure* path from the opportunistic rent-path trim.
+        var live = pool.Rent(2 * Mb);
         pool.Return(dead1);
         pool.Return(dead2);
         Assert.Equal(8 * Mb, pool.IdleBytes);
 
-        // That stream has now been gone long enough for its class to count as stale.
         clock.Advance(SegmentBufferPool.StaleAfter + TimeSpan.FromSeconds(1));
 
-        // A different, live class wants space. Without eviction its return is dropped and the dead
-        // class keeps the whole cap — the production failure this exists to prevent.
-        var live = pool.Rent(2 * Mb);
+        // The cap is full and this return would be dropped — so it reclaims the stale class instead.
         pool.Return(live);
 
         var idleByClass = pool.DescribeIdleBuffers().ToDictionary(x => x.SizeClass, x => x.IdleCount);
         Assert.Equal(1, idleByClass.GetValueOrDefault(2 * Mb));
-        Assert.True(pool.IdleBytes <= 8 * Mb, "eviction must not breach the cap");
-
-        // The whole point of admitting it: the next rent of that class is a hit.
-        Assert.Same(live, pool.Rent(2 * Mb));
+        Assert.True(pool.IdleBytes <= 8 * Mb, "reclaiming must not breach the cap");
+        Assert.True(pool.PressureTrims > 0, "the pressure path should have been recorded");
     }
 
     [Fact]
-    public void Return_DoesNotEvictAClassThatIsStillLive()
+    public void TrimStale_ReleasesADeadClassEvenWhenNobodyNeedsTheSpace()
     {
         var clock = new FakeClock();
-        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 8 * Mb, nowTicks: clock.Now);
+        // Cap is generous, so nothing is ever under pressure — the production case where the
+        // demand-driven eviction path never fires and the dead class just sits there.
+        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 512 * Mb, nowTicks: clock.Now);
 
-        // Class A fills the cap and stays in use — well within the staleness window.
-        var a1 = pool.Rent(4 * Mb);
-        var a2 = pool.Rent(4 * Mb);
-        pool.Return(a1);
-        pool.Return(a2);
-        clock.Advance(TimeSpan.FromSeconds(1));
-
-        // A second live class returns a buffer. A's buffers are NOT stale, so they must survive and
-        // the incoming buffer is dropped instead. Two live streams share the cap; they must never
-        // take turns evicting each other, which would leave neither with a cache hit.
-        pool.Return(pool.Rent(2 * Mb));
-
-        var idleByClass = pool.DescribeIdleBuffers().ToDictionary(x => x.SizeClass, x => x.IdleCount);
-        Assert.Equal(2, idleByClass.GetValueOrDefault(4 * Mb));
-        Assert.Equal(0, idleByClass.GetValueOrDefault(2 * Mb));
-        Assert.True(pool.IdleBytes <= 8 * Mb);
-    }
-
-    [Fact]
-    public void Return_EvictionNeverExceedsWhatIsNeeded()
-    {
-        var clock = new FakeClock();
-        // Cap admits four 2 MB buffers.
-        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 8 * Mb, nowTicks: clock.Now);
-
-        var rented = Enumerable.Range(0, 4).Select(_ => pool.Rent(2 * Mb)).ToList();
-        foreach (var buffer in rented) pool.Return(buffer);
-        Assert.Equal(8 * Mb, pool.IdleBytes);
+        var dead = Enumerable.Range(0, 4).Select(_ => pool.Rent(768 * Kb)).ToList();
+        foreach (var buffer in dead) pool.Return(buffer);
+        Assert.Equal(3 * Mb, pool.IdleBytes);
 
         clock.Advance(SegmentBufferPool.StaleAfter + TimeSpan.FromSeconds(1));
 
-        // Admitting one 2 MB buffer should cost exactly one stale buffer, not the whole class.
-        pool.Return(pool.Rent(1 * Mb));
+        var trimmed = pool.TrimStale();
+
+        Assert.Equal(3 * Mb, trimmed);
+        Assert.Equal(0, pool.IdleBytes);
+        Assert.Equal(3 * Mb, pool.TrimmedBytes);
+    }
+
+    [Fact]
+    public void TrimStale_LeavesLiveClassesAlone()
+    {
+        var clock = new FakeClock();
+        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 512 * Mb, nowTicks: clock.Now);
+
+        var stale = Enumerable.Range(0, 2).Select(_ => pool.Rent(768 * Kb)).ToList();
+        foreach (var buffer in stale) pool.Return(buffer);
+
+        clock.Advance(SegmentBufferPool.StaleAfter + TimeSpan.FromSeconds(1));
+
+        // This class is rented *after* the clock moved, so it is live.
+        var live = Enumerable.Range(0, 2).Select(_ => pool.Rent(4 * Mb)).ToList();
+        foreach (var buffer in live) pool.Return(buffer);
+
+        pool.TrimStale();
 
         var idleByClass = pool.DescribeIdleBuffers().ToDictionary(x => x.SizeClass, x => x.IdleCount);
-        Assert.Equal(3, idleByClass.GetValueOrDefault(2 * Mb));
-        Assert.Equal(1, idleByClass.GetValueOrDefault(1 * Mb));
+        Assert.Equal(0, idleByClass.GetValueOrDefault(768 * Kb));
+        Assert.Equal(2, idleByClass.GetValueOrDefault(4 * Mb));
+    }
+
+    [Fact]
+    public void Rent_TrimsStaleClassesOpportunistically()
+    {
+        var clock = new FakeClock();
+        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 512 * Mb, nowTicks: clock.Now);
+
+        var dead = Enumerable.Range(0, 4).Select(_ => pool.Rent(768 * Kb)).ToList();
+        foreach (var buffer in dead) pool.Return(buffer);
+        Assert.Equal(3 * Mb, pool.IdleBytes);
+
+        clock.Advance(SegmentBufferPool.StaleAfter + TimeSpan.FromSeconds(1));
+
+        // A live class renting is enough to reclaim the dead one — no background timer, and no need
+        // for the pool to be under pressure first.
+        pool.Return(pool.Rent(4 * Mb));
+
+        Assert.Equal(0, pool.DescribeIdleBuffers().ToDictionary(x => x.SizeClass, x => x.IdleCount)
+            .GetValueOrDefault(768 * Kb));
+        Assert.True(pool.TrimmedBytes >= 3 * Mb);
     }
 
     [Fact]

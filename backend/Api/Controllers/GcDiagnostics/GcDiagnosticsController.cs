@@ -124,6 +124,11 @@ public class GcDiagnosticsController : BaseApiController
             idleMb = idleBytes / (1024 * 1024),
             idleBytesCap = SegmentBufferPool.Shared.MaxIdleBytes,
             idleMbCap = SegmentBufferPool.Shared.MaxIdleBytes / (1024 * 1024),
+            // Whether the reclaim paths actually ran. Without these the only way to tell was to
+            // reason about headroom after the fact, which is how a stale class was found sitting on
+            // half the cap for two minutes while everything "looked" bounded.
+            trimmedMb = SegmentBufferPool.Shared.TrimmedBytes / (1024 * 1024),
+            pressureTrims = SegmentBufferPool.Shared.PressureTrims,
             bySizeClass = SegmentBufferPool.Shared.DescribeIdleBuffers()
                 .OrderByDescending(x => (long)x.SizeClass * x.IdleCount)
                 .Select(x => $"{x.SizeClass / 1024} KB x {x.IdleCount}")

@@ -46,11 +46,17 @@ public sealed class SegmentBufferPool
     /// </summary>
     public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(30);
 
+    /// <summary>How often the rent path may run an opportunistic stale trim.</summary>
+    public static readonly TimeSpan TrimInterval = TimeSpan.FromSeconds(10);
+
     private readonly int _maxBufferSize;
     private readonly long _maxIdleBytes;
     private readonly Func<long> _nowTicks;
     private readonly ConcurrentDictionary<int, SizeClass> _sizeClasses = new();
     private long _idleBytes;
+    private long _trimmedBytes;    // released back to the GC because their class went idle
+    private long _pressureTrims;   // trims triggered by a return that would otherwise be dropped
+    private long _lastTrimTicks;
 
     /// <summary>
     /// The idle buffers of one size class, plus when that class was last rented from. The timestamp
@@ -90,6 +96,13 @@ public sealed class SegmentBufferPool
     /// <summary>The absolute ceiling on <see cref="IdleBytes"/>.</summary>
     public long MaxIdleBytes => _maxIdleBytes;
 
+    /// <summary>Trims triggered by cap pressure rather than by the opportunistic rent-path check.
+    /// Zero means the pool never actually ran out of room — worth knowing before tuning the cap.</summary>
+    public long PressureTrims => Interlocked.Read(ref _pressureTrims);
+
+    /// <summary>Bytes released back to the GC because their class went idle.</summary>
+    public long TrimmedBytes => Interlocked.Read(ref _trimmedBytes);
+
     /// <summary>
     /// Rents a buffer of at least <paramref name="minimumLength"/> bytes. Requests above the pool's
     /// maximum buffer size are satisfied with an unpooled allocation rather than distorting the pool
@@ -108,6 +121,8 @@ public sealed class SegmentBufferPool
         // Marks this class as live, which is what protects its idle buffers from eviction and marks
         // every staler class as a candidate.
         Volatile.Write(ref state.LastRentTicks, _nowTicks());
+
+        MaybeTrimStale();
 
         if (state.Idle.TryPop(out var pooled))
         {
@@ -138,8 +153,11 @@ public sealed class SegmentBufferPool
         // space it bounds follows demand instead of whichever stream happened to fill it first.
         if (!TryReserve(length))
         {
-            EvictStalerClasses(length, length);
-            if (!TryReserve(length)) return; // Still no room — drop it for the GC.
+            // At capacity. Reclaim whatever has gone stale and try once more; if nothing is stale,
+            // every class is live and the cap is genuinely full, so this buffer goes to the GC.
+            if (TrimStale() == 0) return;
+            Interlocked.Increment(ref _pressureTrims);
+            if (!TryReserve(length)) return;
         }
 
         _sizeClasses.GetOrAdd(length, _ => new SizeClass { LastRentTicks = _nowTicks() }).Idle.Push(buffer);
@@ -156,35 +174,53 @@ public sealed class SegmentBufferPool
     }
 
     /// <summary>
-    /// Discards idle buffers from classes that have not been rented from for <see cref="StaleAfter"/>,
-    /// stalest first, until <paramref name="needed"/> bytes are free.
+    /// Releases every idle buffer belonging to a class that has gone unrented for
+    /// <see cref="StaleAfter"/>, handing the memory back to the GC.
     ///
-    /// <para>The threshold is absolute rather than relative to the incoming class, and that distinction
-    /// is load-bearing. The incoming buffer's class was by definition just rented, so "staler than the
-    /// incoming class" matches almost every other class — two concurrently live streams would take
-    /// turns evicting each other's buffers and neither would ever get a cache hit. Requiring a class to
-    /// be genuinely idle means live classes are never evicted and simply share whatever the cap holds,
-    /// while a class belonging to a stream that has stopped becomes reclaimable.</para>
+    /// <para>Eviction alone is not enough, because it is <i>demand-driven</i> — it only runs when a
+    /// return would otherwise be dropped. Measured in production: after a 698 KB-segment movie stopped,
+    /// its class still held 323 idle buffers (242 MB of a 512 MB cap) two minutes later, because the
+    /// live 4.25 MB class had ~11 MB of headroom and so never had to reclaim anything. Retention stayed
+    /// within the cap, but half of it was doing nothing. Nobody demanding the space is precisely when
+    /// it should be given back rather than held.</para>
     /// </summary>
-    private void EvictStalerClasses(long needed, int incomingClass)
+    public long TrimStale()
+    {
+        long trimmed = 0;
+        foreach (var (_, state) in StaleClasses())
+        {
+            while (state.Idle.TryPop(out var buffer))
+            {
+                Interlocked.Add(ref _idleBytes, -buffer.Length);
+                trimmed += buffer.Length;
+            }
+        }
+        Interlocked.Add(ref _trimmedBytes, trimmed);
+        return trimmed;
+    }
+
+    /// <summary>
+    /// Runs <see cref="TrimStale"/> at most once per <see cref="TrimInterval"/>. Called from the rent
+    /// path so no background timer is needed: the case that matters — one class dead while another is
+    /// live — always has something renting. A process with no rents at all is idle anyway.
+    /// </summary>
+    private void MaybeTrimStale()
+    {
+        var now = _nowTicks();
+        var last = Interlocked.Read(ref _lastTrimTicks);
+        if (now - last < (long)(TrimInterval.TotalSeconds * Stopwatch.Frequency)) return;
+        if (Interlocked.CompareExchange(ref _lastTrimTicks, now, last) != last) return; // another thread is on it
+        TrimStale();
+    }
+
+    /// <summary>Classes idle for longer than <see cref="StaleAfter"/>, stalest first.</summary>
+    private KeyValuePair<int, SizeClass>[] StaleClasses()
     {
         var staleBefore = _nowTicks() - (long)(StaleAfter.TotalSeconds * Stopwatch.Frequency);
-
-        var candidates = _sizeClasses
-            .Where(kvp => kvp.Key != incomingClass && Volatile.Read(ref kvp.Value.LastRentTicks) < staleBefore)
+        return _sizeClasses
+            .Where(kvp => Volatile.Read(ref kvp.Value.LastRentTicks) < staleBefore)
             .OrderBy(kvp => Volatile.Read(ref kvp.Value.LastRentTicks))
             .ToArray();
-
-        long freed = 0;
-        foreach (var (_, state) in candidates)
-        {
-            while (freed < needed && state.Idle.TryPop(out var victim))
-            {
-                Interlocked.Add(ref _idleBytes, -victim.Length);
-                freed += victim.Length;
-            }
-            if (freed >= needed) return;
-        }
     }
 
     /// <summary>Drops every idle buffer. Used by the GC diagnostics endpoint to prove retention is ours.</summary>
