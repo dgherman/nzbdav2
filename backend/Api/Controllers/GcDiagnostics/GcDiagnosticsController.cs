@@ -113,12 +113,30 @@ public class GcDiagnosticsController : BaseApiController
             : "Segment buffer pool diagnostics are disabled. Set NZBDAV_POOL_DIAG=1 to enable " +
               "(it takes a lock on every rent, so it costs throughput).";
 
+        // Unlike the rent/return counters above, retention is free to read (two interlocked reads),
+        // so it is always reported. This is the number issue #23 is about: with ArrayPool.Shared it
+        // was ~770 MB of idle 8 MB arrays that no collection could reclaim and nothing bounded.
+        // Post-collection LOH should now track live buffers plus at most idleBytesCap.
+        var idleBytes = SegmentBufferPool.Shared.IdleBytes;
+        var retention = new
+        {
+            idleBytes,
+            idleMb = idleBytes / (1024 * 1024),
+            idleBytesCap = SegmentBufferPool.Shared.MaxIdleBytes,
+            idleMbCap = SegmentBufferPool.Shared.MaxIdleBytes / (1024 * 1024),
+            bySizeClass = SegmentBufferPool.Shared.DescribeIdleBuffers()
+                .OrderByDescending(x => (long)x.SizeClass * x.IdleCount)
+                .Select(x => $"{x.SizeClass / 1024} KB x {x.IdleCount}")
+                .ToArray()
+        };
+
         return Task.FromResult<IActionResult>(Ok(new
         {
             status = true,
             forcedCollectionMs = stopwatch.ElapsedMilliseconds,
             reclaimedBytes = reclaimed,
             segmentBufferPool = poolReport,
+            segmentBufferPoolRetention = retention,
             // After a forced collection this is live+retained, with no garbage left to hide behind.
             // A number that stays high here is rooted by something and is worth chasing; a number
             // that collapses was never a leak.

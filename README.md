@@ -175,6 +175,28 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.9 (2026-07-18)
+Cuts the streaming memory floor by replacing `ArrayPool<byte>.Shared` with a dedicated, byte-bounded segment buffer pool (#23).
+
+*   **Performance**: Segment buffers now come from a dedicated `SegmentBufferPool` with 256 KB size classes instead of `ArrayPool<byte>.Shared`'s `16 << i` power-of-two buckets. A 4.19 MB segment was being served an 8 MB array — 3.8 MB wasted per in-flight buffer, ~460 MB across a 90-segment window. Waste is now under one 256 KB granule.
+*   **Fix**: Idle buffer retention is capped in **bytes** (default 512 MB, override with `NZBDAV_SEGMENT_POOL_MAX_IDLE_MB`). `ArrayPool.Shared` trims only under memory pressure measured against the *container* limit (8 GiB) rather than `DOTNET_GCHeapHardLimit` (4 GiB), so at ~3 GB used it felt no pressure and held ~770 MB of idle 8 MB arrays that even a forced compacting gen2 could not reclaim.
+*   **Logic**: `ArrayPool<byte>.Create(maxArrayLength, maxArraysPerBucket)` — the fix originally proposed in #23 — was measured and rejected. It keeps the same power-of-two buckets (setting `maxArrayLength` to the exact segment size does not change the top bucket), and `maxArraysPerBucket` bounds an array *count*, which across ~20 doubling buckets permits ~2.5 GB — worse than the 770 MB residue it was meant to replace.
+*   **Logging**: `POST /api/gc-diagnostics` now always reports `segmentBufferPoolRetention` (idle bytes, cap, and a per-size-class breakdown). Unlike the rent/return counters it costs two interlocked reads, so it does not need `NZBDAV_POOL_DIAG=1`.
+*   **Performance**: The fallback rent size (`max(_lastSuccessfulSegmentSize, 1MB)`) carried no headroom, so on a file with uniform segments every segment after the first filled its buffer to the byte, tripped the grow check, doubled — then read 0 and returned, having taken twice the memory it needed. Measured on the harness: 146 rents of 4 MB against 145 needless doublings to 8 MB. Both rent branches now carry the same 4 KB of headroom; resize re-rents fell 162 → 30.
+*   **Fix**: `SegmentBufferPoolDiagnostics.RecordResizeRent` did not account a resize as a rent, so the outstanding tally ran one short for every segment that grew and "peak checked out" — the number the pool is sized from — read low. It reported a physically impossible `Still checked out: -47` on a run with 197 resizes. The fallback fetch path was missing its resize/return records entirely. **Note for #23:** the production figure of "peak checked out 123" was produced by this broken counter and is an undercount — any pool sizing derived from it was too small.
+*   **Fix (harness)**: `--mock-benchmark` constructed the mock NNTP server *before* generating the NZB, so no layout was ever registered and every segment fell back to a stub claiming `size=<one segment>`, part 1 of 1, offset 0. A 600 MB/150-segment file therefore reported a `Length` of one segment, `avgSegmentSize` collapsed to 27 KB, and the byte-denominated prefetch window sized itself off that and logged `holds~0MB`. Any window, buffer or memory measurement previously taken on this harness was reading the stub, not the file under test. Generation now happens first and the layout is handed to the server.
+*   **Tooling**: `--mock-benchmark` accepts `--segment-size=<KB>` and `--size=<MB>`. The hardcoded 700 KB segment made #23's case — a 4 MB segment rounding up to an 8 MB bucket — unreachable.
+
+Measured on the repaired harness (600 MB, 150 segments of 4 MB, 16 connections), isolating the pool with the harness and headroom fixes held constant:
+
+| hot size class | `ArrayPool<byte>.Shared` | `SegmentBufferPool` |
+| --- | --- | --- |
+| bytes per buffer | 8,388,608 (8 MB) | 4,456,448 (4.25 MB) |
+| count | 156 | 147 |
+| total rented | 1248 MB | 625 MB |
+
+47% less memory for identical segment data, with 0 fetch errors and 0 corruption on both sides.
+
 ## v0.11.8 (2026-07-17)
 Replaces the flickering per-provider socket panel on the dashboard with a persistent Active Streams panel.
 
