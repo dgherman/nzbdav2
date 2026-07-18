@@ -50,9 +50,15 @@ internal static class SegmentBufferPoolDiagnostics
         }
     }
 
-    public static void RecordResizeRent()
+    /// <summary>
+    /// A resize is a rent like any other and must be accounted as one. Recording only the resize
+    /// counter (as this did) left the outstanding tally one short for every segment that grew, so
+    /// "peak checked out" — the number the pool is sized from — read low.
+    /// </summary>
+    public static void RecordResizeRent(byte[] buffer)
     {
         if (!Enabled) return;
+        RecordRent(buffer);
         Interlocked.Increment(ref _resizeRents);
     }
 

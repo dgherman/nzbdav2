@@ -1,4 +1,3 @@
-using System.Buffers;
 using System.Diagnostics;
 using System.Threading.Channels;
 using NzbWebDAV.Clients.Usenet;
@@ -661,8 +660,8 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             var boundedBy = holdSegments == effectiveSegmentCount ? "segments" : "window";
             // Data in flight, in MB. Uses the actual average segment size — the earlier 1 MB/segment
             // assumption undercounted a 4.19 MB-segment file 4x and is exactly how 2.4 GB read as
-            // 300 MB. Resident is higher still because ArrayPool rounds each rent up to the next
-            // power-of-two bucket (a separate issue), so this is a data floor, not the resident ceiling.
+            // 300 MB. Resident is slightly higher because SegmentBufferPool rounds each rent up to the
+            // next 256 KB size class, so this is a data floor, not the resident ceiling.
             var holdMb = holdSegments * avgSegmentSize / (1024 * 1024);
             var avgSegKb = avgSegmentSize / 1024;
 
@@ -1354,11 +1353,19 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 }
 
                 // Rent a pooled buffer right-sized to the expected segment size when possible.
-                // Falls back to a 1MB initial size and doubles via re-rent if needed.
+                // Falls back to the largest segment seen so far (min 1MB) and doubles via re-rent if needed.
+                //
+                // Both branches carry 4 KB of headroom, and the fallback needs it just as much as the
+                // sized branch: without it, a segment whose size exactly equals _lastSuccessfulSegmentSize
+                // fills the buffer to the byte, trips the `totalRead == buffer.Length` grow check, and
+                // doubles — then reads 0 and returns, having allocated twice the memory it needed. On a
+                // file with uniform segments that is *every* segment after the first (measured on the
+                // mock harness: 146 rents of 4 MB against 145 needless doublings to 8 MB).
+                var fallbackRentSize = Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
                 var initialRentSize = (_segmentSizes != null && index < _segmentSizes.Length && _segmentSizes[index] > 0)
                     ? (int)Math.Min(_segmentSizes[index] + 4096, int.MaxValue)
-                    : Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
-                var buffer = ArrayPool<byte>.Shared.Rent(initialRentSize);
+                    : (fallbackRentSize > int.MaxValue - 4096 ? int.MaxValue : fallbackRentSize + 4096);
+                var buffer = SegmentBufferPool.Shared.Rent(initialRentSize);
                 SegmentBufferPoolDiagnostics.RecordRent(buffer);
                 var totalRead = 0;
 
@@ -1375,11 +1382,11 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                     {
                         if (totalRead == buffer.Length)
                         {
-                            // Resize via ArrayPool to avoid LOH churn
-                            var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
-                            SegmentBufferPoolDiagnostics.RecordResizeRent();
+                            // Resize via the segment pool to avoid LOH churn
+                            var newBuffer = SegmentBufferPool.Shared.Rent(buffer.Length * 2);
+                            SegmentBufferPoolDiagnostics.RecordResizeRent(newBuffer);
                             Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
-                            ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                            SegmentBufferPool.Shared.Return(buffer);
                             SegmentBufferPoolDiagnostics.RecordReturn();
                             buffer = newBuffer;
                         }
@@ -1454,7 +1461,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 catch
                 {
                     // Return the rented buffer on failure to avoid pool leaks
-                    ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                    SegmentBufferPool.Shared.Return(buffer);
                     SegmentBufferPoolDiagnostics.RecordReturn();
                     throw;
                 }
@@ -1683,7 +1690,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 : await client.GetSegmentStreamAsync(segmentId, false, ct).ConfigureAwait(false);
 
             var initialSize = Math.Max(_lastSuccessfulSegmentSize, 1024 * 1024);
-            var buffer = ArrayPool<byte>.Shared.Rent(initialSize);
+            var buffer = SegmentBufferPool.Shared.Rent(initialSize);
             SegmentBufferPoolDiagnostics.RecordRent(buffer);
             var totalRead = 0;
             try
@@ -1692,9 +1699,11 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 {
                     if (totalRead == buffer.Length)
                     {
-                        var newBuffer = ArrayPool<byte>.Shared.Rent(buffer.Length * 2);
+                        var newBuffer = SegmentBufferPool.Shared.Rent(buffer.Length * 2);
+                        SegmentBufferPoolDiagnostics.RecordResizeRent(newBuffer);
                         Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);
-                        ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                        SegmentBufferPool.Shared.Return(buffer);
+                        SegmentBufferPoolDiagnostics.RecordReturn();
                         buffer = newBuffer;
                     }
                     var read = await stream.ReadAsync(buffer.AsMemory(totalRead, buffer.Length - totalRead), ct).ConfigureAwait(false);
@@ -1705,7 +1714,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             }
             catch
             {
-                ArrayPool<byte>.Shared.Return(buffer, clearArray: false);
+                SegmentBufferPool.Shared.Return(buffer);
                 throw;
             }
         }
@@ -2028,7 +2037,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             _buffer = null;
             if (buf != null && _pooled)
             {
-                ArrayPool<byte>.Shared.Return(buf, clearArray: false);
+                SegmentBufferPool.Shared.Return(buf);
                 SegmentBufferPoolDiagnostics.RecordReturn();
             }
         }

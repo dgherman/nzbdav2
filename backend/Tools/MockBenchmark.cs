@@ -35,6 +35,12 @@ public class MockBenchmark
         var timeoutRate = 0.01; // 1% chance of stall
         var useRar = false;
         var rarVolumes = 3;
+        // Segment size is the variable the buffer-pool work turns on: real posts run 0.7-8 MB, and
+        // which pool size class a segment lands in is a function of this alone. The 700 KB default
+        // only ever exercises the small class, so #23's headline case (a 4.19 MB segment that
+        // ArrayPool rounded up to an 8 MB array) is unreachable without overriding it.
+        var segmentSizeKb = 700;
+        var totalSizeMb = 200;
 
         // Check args for options
         foreach (var arg in args)
@@ -44,34 +50,44 @@ public class MockBenchmark
             if (arg.StartsWith("--timeout-rate=")) double.TryParse(arg.Substring(15), out timeoutRate);
             if (arg == "--rar") useRar = true;
             if (arg.StartsWith("--rar-volumes=")) int.TryParse(arg.Substring(14), out rarVolumes);
+            if (arg.StartsWith("--segment-size=")) int.TryParse(arg.Substring(15), out segmentSizeKb);
+            if (arg.StartsWith("--size=")) int.TryParse(arg.Substring(7), out totalSizeMb);
         }
 
-        var segmentSize = 700 * 1024;
+        var segmentSize = segmentSizeKb * 1024;
 
-        // 1. Start Mock Server
-        using var server = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, timeoutRate);
-        server.Start();
-        Log.Information($"Mock NNTP Server started on port {port} with {latencyMs}ms latency (Jitter: {jitterMs}ms, TimeoutRate: {timeoutRate:P1}).");
-
-        // 2. Generate Mock NZB
+        // 1. Generate Mock NZB.
+        // This MUST happen before the server is constructed: the server needs the generated layout to
+        // answer with truthful =ybegin/=ypart headers. Built the other way round (as it was), no layout
+        // is registered and every segment falls back to a stub claiming size=<one segment>, part 1 of 1,
+        // offset 0 — so a 600 MB/150-segment file reported a Length of one segment, avgSegmentSize
+        // computed as fileSize/segmentCount collapsed to a few KB, and the byte-denominated prefetch
+        // window sized itself off that and logged "holds~0MB". Any measurement of window size, buffer
+        // size or memory taken on this harness was reading that stub, not the file under test.
         var nzbPath = "mock.nzb";
-        var totalSize = 200L * 1024 * 1024; // 200 MB
+        var totalSize = (long)totalSizeMb * 1024 * 1024;
 
+        MockNzbGenerator.GenerationResult layout;
         if (useRar)
         {
             // Use single RAR file to avoid multipart grouping complexity in the test
-            var result = await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize, useRar: true, rarVolumeCount: 1);
-            Log.Information($"Generated RAR NZB: {nzbPath} ({totalSize / 1024 / 1024} MB, 1 volume, {result.TotalSegments} segments).");
-            foreach (var file in result.Files)
+            layout = await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize, useRar: true, rarVolumeCount: 1);
+            Log.Information($"Generated RAR NZB: {nzbPath} ({totalSize / 1024 / 1024} MB, 1 volume, {layout.TotalSegments} segments).");
+            foreach (var file in layout.Files)
             {
                 Log.Information($"  - {file.FileName}: {file.SegmentCount} segments");
             }
         }
         else
         {
-            await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize);
-            Log.Information($"Generated flat file NZB: {nzbPath} ({totalSize / 1024 / 1024} MB).");
+            layout = await MockNzbGenerator.GenerateAsync(nzbPath, totalSize, segmentSize);
+            Log.Information($"Generated flat file NZB: {nzbPath} ({totalSize / 1024 / 1024} MB, {layout.TotalSegments} segments of {segmentSizeKb} KB).");
         }
+
+        // 2. Start Mock Server, taught the real geometry of what was just generated.
+        using var server = new MockNntpServer(port, latencyMs, segmentSize, jitterMs, timeoutRate, layout);
+        server.Start();
+        Log.Information($"Mock NNTP Server started on port {port} with {latencyMs}ms latency (Jitter: {jitterMs}ms, TimeoutRate: {timeoutRate:P1}).");
 
         // 3. Inject Config
         await using var db = new DavDatabaseContext();

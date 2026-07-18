@@ -175,6 +175,49 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.9 (2026-07-18)
+Cuts the streaming memory floor by replacing `ArrayPool<byte>.Shared` with a dedicated, byte-bounded segment buffer pool (#23).
+
+*   **Performance**: Segment buffers now come from a dedicated `SegmentBufferPool` with 256 KB size classes instead of `ArrayPool<byte>.Shared`'s `16 << i` power-of-two buckets. A 4.19 MB segment was being served an 8 MB array — 3.8 MB wasted per in-flight buffer, ~460 MB across a 90-segment window. Waste is now under one 256 KB granule.
+*   **Fix**: Idle buffer retention is capped in **bytes** (default 512 MB, override with `NZBDAV_SEGMENT_POOL_MAX_IDLE_MB`). `ArrayPool.Shared` trims only under memory pressure measured against the *container* limit (8 GiB) rather than `DOTNET_GCHeapHardLimit` (4 GiB), so at ~3 GB used it felt no pressure and held ~770 MB of idle 8 MB arrays that even a forced compacting gen2 could not reclaim.
+*   **Logic**: `ArrayPool<byte>.Create(maxArrayLength, maxArraysPerBucket)` — the fix originally proposed in #23 — was measured and rejected. It keeps the same power-of-two buckets (setting `maxArrayLength` to the exact segment size does not change the top bucket), and `maxArraysPerBucket` bounds an array *count*, which across ~20 doubling buckets permits ~2.5 GB — worse than the 770 MB residue it was meant to replace.
+*   **Logging**: `POST /api/gc-diagnostics` now always reports `segmentBufferPoolRetention` (idle bytes, cap, and a per-size-class breakdown). Unlike the rent/return counters it costs two interlocked reads, so it does not need `NZBDAV_POOL_DIAG=1`.
+*   **Performance**: The fallback rent size (`max(_lastSuccessfulSegmentSize, 1MB)`) carried no headroom, so on a file with uniform segments every segment after the first filled its buffer to the byte, tripped the grow check, doubled — then read 0 and returned, having taken twice the memory it needed. Measured on the harness: 146 rents of 4 MB against 145 needless doublings to 8 MB. Both rent branches now carry the same 4 KB of headroom; resize re-rents fell 162 → 30.
+*   **Fix**: `SegmentBufferPoolDiagnostics.RecordResizeRent` did not account a resize as a rent, so the outstanding tally ran one short for every segment that grew and "peak checked out" — the number the pool is sized from — read low. It reported a physically impossible `Still checked out: -47` on a run with 197 resizes. The fallback fetch path was missing its resize/return records entirely. **Note for #23:** the production figure of "peak checked out 123" was produced by this broken counter and is an undercount — any pool sizing derived from it was too small.
+*   **Fix (harness)**: `--mock-benchmark` constructed the mock NNTP server *before* generating the NZB, so no layout was ever registered and every segment fell back to a stub claiming `size=<one segment>`, part 1 of 1, offset 0. A 600 MB/150-segment file therefore reported a `Length` of one segment, `avgSegmentSize` collapsed to 27 KB, and the byte-denominated prefetch window sized itself off that and logged `holds~0MB`. Any window, buffer or memory measurement previously taken on this harness was reading the stub, not the file under test. Generation now happens first and the layout is handed to the server.
+*   **Tooling**: `--mock-benchmark` accepts `--segment-size=<KB>` and `--size=<MB>`. The hardcoded 700 KB segment made #23's case — a 4 MB segment rounding up to an 8 MB bucket — unreachable.
+
+Measured on the repaired harness (600 MB, 150 segments of 4 MB, 16 connections), isolating the pool with the harness and headroom fixes held constant:
+
+| hot size class | `ArrayPool<byte>.Shared` | `SegmentBufferPool` |
+| --- | --- | --- |
+| bytes per buffer | 8,388,608 (8 MB) | 4,456,448 (4.25 MB) |
+| count | 156 | 147 |
+| total rented | 1248 MB | 625 MB |
+
+47% less memory for identical segment data, with 0 fetch errors and 0 corruption on both sides.
+
+**Verified in production** (NAS, 2026-07-18, 4 GiB `DOTNET_GCHeapHardLimit` in an 8 GiB container). Two movies played *sequentially* — a 698 KB-segment file then a 4093 KB-segment one — 14 streams created across the run, peaking around 5 concurrent on a single file open. The pool counters are cumulative since process start, so the 768 KB class below is the first movie's history and the 4.25 MB class is the second's:
+
+| | before (#23 measurement) | after |
+| --- | --- | --- |
+| heap before forced gen2 | 3381 MB | 1699 MB |
+| heap after forced gen2 | 1780 MB | 1692 MB |
+| LOH after forced gen2 | 1757 MB | 1672 MB |
+| garbage reclaimed by the collection | ~1600 MB | ~7 MB |
+| idle pool retention | ~770 MB, unbounded (2854 MB in one run) | 506 MB, hard-capped at 512 MB |
+| pool reuse rate | 71.3% | 71.0% |
+| resize re-rents | 197 (harness) | 0 |
+
+Reuse is unchanged while retention is bounded — the trade the byte cap was meant to make. Counterfactual on the same production rents (1096 × 768 KB + 240 × 4.25 MB = 1846 MB): `ArrayPool` would have rounded those to 1096 × 1 MB + 240 × 8 MB = 3020 MB, 39% more. The near-total collapse in reclaimed garbage is the headroom fix — those needless doublings were pure LOH garbage. 0 corruption, 0 fetch errors, 0 OOM, 0 breaker trips, 0 restarts.
+
+Verified again with three concurrent streams, then stopping one: the stopped movie's 768 KB class went from 54 idle buffers to **zero** and `trimmedMb` rose by exactly the 155 MB it had been holding, where the previous build left the equivalent class sitting on 242 MB two minutes later. Retention no longer pins at the cap during playback (397/512 with three streams, against 511/512 before), and 0 corruption / fetch errors / OOM / breaker trips / restarts throughout — including three concurrent streams on the same 4 MB-segment file class that OOM'd on v0.11.4.
+
+The trade is explicit: returning memory and reusing it are opposed, and the observed reuse rate drops when trimming is active, since a trimmed buffer must be reallocated if its class comes back. Garbage stayed low across the forced collection (1272 → 1236 MB), so this is not causing churn, but `StaleAfter` (30s) is an untuned default — raise it to favour reuse, lower it to return memory sooner. Treat the reuse percentage itself with care: it is floored by `distinct arrays ≈ peak working set`, so it reads low early in a run for arithmetic reasons rather than pool reasons.
+
+*   **Fix**: stale size classes are released back to the GC. Bounding retention is not the same as using it well: after a 698 KB-segment movie stopped, its class still held 323 idle buffers — 242 MB of the 512 MB cap — two minutes later, because the live 4.25 MB class had ~11 MB of headroom and so never had to reclaim anything. Reclaim is now driven by staleness rather than only by demand: a class unrented for 30s is released, checked opportunistically on the rent path (at most once per 10s) and unconditionally when a return would otherwise be dropped. `POST /api/gc-diagnostics` reports `trimmedMb` and `pressureTrims` so it is visible whether either path ran — previously that could only be inferred from headroom arithmetic.
+*   **Fix**: idle buffers are now reclaimable across size classes. A second concurrent stream exposed the gap: with two streams running, a movie that had stopped ~15 minutes earlier still held 207 idle 768 KB buffers — 155 MB, 30% of the whole cap — while the 4.25 MB class serving the *live* streams was squeezed to 79 and the reuse rate fell to 57.2%, below the 71.3% `ArrayPool` baseline. The cap was doing its job; the space was in the wrong class. A returning buffer may now reclaim room from classes that have gone unrented for 30s. The threshold is deliberately absolute rather than relative to the incoming class: the incoming class was by definition *just* rented, so "staler than incoming" matches nearly everything and two live streams would take turns evicting each other, leaving neither with a cache hit.
+
 ## v0.11.8 (2026-07-17)
 Replaces the flickering per-provider socket panel on the dashboard with a persistent Active Streams panel.
 
