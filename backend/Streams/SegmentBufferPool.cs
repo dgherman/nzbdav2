@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 
 namespace NzbWebDAV.Streams;
 
@@ -38,10 +39,32 @@ public sealed class SegmentBufferPool
     private const int DefaultMaxBufferSize = 16 * 1024 * 1024;
     private const long DefaultMaxIdleBytes = 512L * 1024 * 1024;
 
+    /// <summary>
+    /// How long a size class must go unrented before its idle buffers may be reclaimed for another
+    /// class. Long enough that a paused or seeking stream keeps its buffers, short enough that a
+    /// finished stream stops occupying the cap.
+    /// </summary>
+    public static readonly TimeSpan StaleAfter = TimeSpan.FromSeconds(30);
+
     private readonly int _maxBufferSize;
     private readonly long _maxIdleBytes;
-    private readonly ConcurrentDictionary<int, ConcurrentStack<byte[]>> _sizeClasses = new();
+    private readonly Func<long> _nowTicks;
+    private readonly ConcurrentDictionary<int, SizeClass> _sizeClasses = new();
     private long _idleBytes;
+
+    /// <summary>
+    /// The idle buffers of one size class, plus when that class was last rented from. The timestamp
+    /// is what stops a finished stream's class from squatting on the cap: measured in production with
+    /// two concurrent streams, a movie that had stopped ~15 minutes earlier still held 207 idle 768 KB
+    /// buffers — 155 MB, 30% of the whole cap — while the 4.25 MB class serving the *live* streams was
+    /// squeezed to 79 and the reuse rate fell below what ArrayPool had managed. The cap was doing its
+    /// job; the space was simply in the wrong class.
+    /// </summary>
+    private sealed class SizeClass
+    {
+        public readonly ConcurrentStack<byte[]> Idle = new();
+        public long LastRentTicks;
+    }
 
     /// <summary>
     /// The process-wide pool used by <see cref="BufferedSegmentStream"/>. The idle cap is overridable
@@ -50,12 +73,15 @@ public sealed class SegmentBufferPool
     /// </summary>
     public static readonly SegmentBufferPool Shared = new(DefaultMaxBufferSize, ReadMaxIdleBytesFromEnvironment());
 
-    public SegmentBufferPool(int maxBufferSize, long maxIdleBytes)
+    /// <param name="nowTicks">Clock seam, in <see cref="Stopwatch"/> ticks. Tests inject a controllable
+    /// clock so staleness can be exercised without sleeping.</param>
+    public SegmentBufferPool(int maxBufferSize, long maxIdleBytes, Func<long>? nowTicks = null)
     {
         ArgumentOutOfRangeException.ThrowIfLessThan(maxBufferSize, Granularity);
         ArgumentOutOfRangeException.ThrowIfNegative(maxIdleBytes);
         _maxBufferSize = maxBufferSize;
         _maxIdleBytes = maxIdleBytes;
+        _nowTicks = nowTicks ?? Stopwatch.GetTimestamp;
     }
 
     /// <summary>Bytes currently held in the pool but not checked out. Bounded by the idle cap.</summary>
@@ -78,7 +104,12 @@ public sealed class SegmentBufferPool
         if (minimumLength > _maxBufferSize) return new byte[minimumLength];
 
         var sizeClass = RoundUpToSizeClass(minimumLength);
-        if (_sizeClasses.TryGetValue(sizeClass, out var stack) && stack.TryPop(out var pooled))
+        var state = _sizeClasses.GetOrAdd(sizeClass, _ => new SizeClass { LastRentTicks = _nowTicks() });
+        // Marks this class as live, which is what protects its idle buffers from eviction and marks
+        // every staler class as a candidate.
+        Volatile.Write(ref state.LastRentTicks, _nowTicks());
+
+        if (state.Idle.TryPop(out var pooled))
         {
             Interlocked.Add(ref _idleBytes, -sizeClass);
             return pooled;
@@ -102,23 +133,66 @@ public sealed class SegmentBufferPool
         if (length == 0 || length > _maxBufferSize || length % Granularity != 0) return;
 
         // Reserve capacity before publishing the buffer, so concurrent returns can never
-        // collectively overshoot the cap.
+        // collectively overshoot the cap. At capacity, try to make room by discarding buffers from
+        // classes staler than this one before giving up — the cap stays absolute either way, but the
+        // space it bounds follows demand instead of whichever stream happened to fill it first.
+        if (!TryReserve(length))
+        {
+            EvictStalerClasses(length, length);
+            if (!TryReserve(length)) return; // Still no room — drop it for the GC.
+        }
+
+        _sizeClasses.GetOrAdd(length, _ => new SizeClass { LastRentTicks = _nowTicks() }).Idle.Push(buffer);
+    }
+
+    private bool TryReserve(int length)
+    {
         while (true)
         {
             var current = Interlocked.Read(ref _idleBytes);
-            if (current + length > _maxIdleBytes) return; // At capacity — drop it.
-            if (Interlocked.CompareExchange(ref _idleBytes, current + length, current) == current) break;
+            if (current + length > _maxIdleBytes) return false;
+            if (Interlocked.CompareExchange(ref _idleBytes, current + length, current) == current) return true;
         }
+    }
 
-        _sizeClasses.GetOrAdd(length, static _ => new ConcurrentStack<byte[]>()).Push(buffer);
+    /// <summary>
+    /// Discards idle buffers from classes that have not been rented from for <see cref="StaleAfter"/>,
+    /// stalest first, until <paramref name="needed"/> bytes are free.
+    ///
+    /// <para>The threshold is absolute rather than relative to the incoming class, and that distinction
+    /// is load-bearing. The incoming buffer's class was by definition just rented, so "staler than the
+    /// incoming class" matches almost every other class — two concurrently live streams would take
+    /// turns evicting each other's buffers and neither would ever get a cache hit. Requiring a class to
+    /// be genuinely idle means live classes are never evicted and simply share whatever the cap holds,
+    /// while a class belonging to a stream that has stopped becomes reclaimable.</para>
+    /// </summary>
+    private void EvictStalerClasses(long needed, int incomingClass)
+    {
+        var staleBefore = _nowTicks() - (long)(StaleAfter.TotalSeconds * Stopwatch.Frequency);
+
+        var candidates = _sizeClasses
+            .Where(kvp => kvp.Key != incomingClass && Volatile.Read(ref kvp.Value.LastRentTicks) < staleBefore)
+            .OrderBy(kvp => Volatile.Read(ref kvp.Value.LastRentTicks))
+            .ToArray();
+
+        long freed = 0;
+        foreach (var (_, state) in candidates)
+        {
+            while (freed < needed && state.Idle.TryPop(out var victim))
+            {
+                Interlocked.Add(ref _idleBytes, -victim.Length);
+                freed += victim.Length;
+            }
+            if (freed >= needed) return;
+        }
     }
 
     /// <summary>Drops every idle buffer. Used by the GC diagnostics endpoint to prove retention is ours.</summary>
     public void Clear()
     {
-        foreach (var stack in _sizeClasses.Values)
+        foreach (var state in _sizeClasses.Values)
         {
-            while (stack.TryPop(out var buffer))
+            while (state.Idle.TryPop(out var buffer))
             {
                 Interlocked.Add(ref _idleBytes, -buffer.Length);
             }
@@ -128,9 +202,9 @@ public sealed class SegmentBufferPool
     /// <summary>Per-size-class idle counts, for the diagnostics report.</summary>
     public IEnumerable<(int SizeClass, int IdleCount)> DescribeIdleBuffers()
     {
-        foreach (var (sizeClass, stack) in _sizeClasses)
+        foreach (var (sizeClass, state) in _sizeClasses)
         {
-            var count = stack.Count;
+            var count = state.Idle.Count;
             if (count > 0) yield return (sizeClass, count);
         }
     }

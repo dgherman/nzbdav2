@@ -211,7 +211,9 @@ Measured on the repaired harness (600 MB, 150 segments of 4 MB, 16 connections),
 
 Reuse is unchanged while retention is bounded — the trade the byte cap was meant to make. Counterfactual on the same production rents (1096 × 768 KB + 240 × 4.25 MB = 1846 MB): `ArrayPool` would have rounded those to 1096 × 1 MB + 240 × 8 MB = 3020 MB, 39% more. The near-total collapse in reclaimed garbage is the headroom fix — those needless doublings were pure LOH garbage. 0 corruption, 0 fetch errors, 0 OOM, 0 breaker trips, 0 restarts.
 
-Note that the 512 MB cap **saturates** under this load (506/512) without costing reuse. Raise `NZBDAV_SEGMENT_POOL_MAX_IDLE_MB` only if the reuse rate drops materially below ~70%; a higher cap buys reuse at the cost of a higher floor.
+Note that the 512 MB cap **saturates** under this load (506/512). At one stream that costs nothing; at two it did — see below.
+
+*   **Fix**: idle buffers are now reclaimable across size classes. A second concurrent stream exposed the gap: with two streams running, a movie that had stopped ~15 minutes earlier still held 207 idle 768 KB buffers — 155 MB, 30% of the whole cap — while the 4.25 MB class serving the *live* streams was squeezed to 79 and the reuse rate fell to 57.2%, below the 71.3% `ArrayPool` baseline. The cap was doing its job; the space was in the wrong class. A returning buffer may now reclaim room from classes that have gone unrented for 30s. The threshold is deliberately absolute rather than relative to the incoming class: the incoming class was by definition *just* rented, so "staler than incoming" matches nearly everything and two live streams would take turns evicting each other, leaving neither with a cache hit.
 
 ## v0.11.8 (2026-07-17)
 Replaces the flickering per-provider socket panel on the dashboard with a persistent Active Streams panel.

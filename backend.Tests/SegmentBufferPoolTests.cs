@@ -162,6 +162,91 @@ public class SegmentBufferPoolTests
         Assert.True(pool.IdleBytes <= 32 * Mb, $"idle retention {pool.IdleBytes} exceeded the cap under concurrency");
     }
 
+    /// <summary>A controllable Stopwatch-tick clock, so staleness is exercised without sleeping.</summary>
+    private sealed class FakeClock
+    {
+        private long _ticks = System.Diagnostics.Stopwatch.GetTimestamp();
+        public long Now() => Volatile.Read(ref _ticks);
+        public void Advance(TimeSpan by) =>
+            Volatile.Write(ref _ticks, _ticks + (long)(by.TotalSeconds * System.Diagnostics.Stopwatch.Frequency));
+    }
+
+    [Fact]
+    public void Return_EvictsAStaleClassToMakeRoomForALiveOne()
+    {
+        var clock = new FakeClock();
+        // Cap admits exactly two 4 MB buffers.
+        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 8 * Mb, nowTicks: clock.Now);
+
+        // A stream finishes and leaves the cap full of its 4 MB class. Both buffers are rented
+        // before either is returned; returning one at a time would just pop it straight back.
+        var dead1 = pool.Rent(4 * Mb);
+        var dead2 = pool.Rent(4 * Mb);
+        pool.Return(dead1);
+        pool.Return(dead2);
+        Assert.Equal(8 * Mb, pool.IdleBytes);
+
+        // That stream has now been gone long enough for its class to count as stale.
+        clock.Advance(SegmentBufferPool.StaleAfter + TimeSpan.FromSeconds(1));
+
+        // A different, live class wants space. Without eviction its return is dropped and the dead
+        // class keeps the whole cap — the production failure this exists to prevent.
+        var live = pool.Rent(2 * Mb);
+        pool.Return(live);
+
+        var idleByClass = pool.DescribeIdleBuffers().ToDictionary(x => x.SizeClass, x => x.IdleCount);
+        Assert.Equal(1, idleByClass.GetValueOrDefault(2 * Mb));
+        Assert.True(pool.IdleBytes <= 8 * Mb, "eviction must not breach the cap");
+
+        // The whole point of admitting it: the next rent of that class is a hit.
+        Assert.Same(live, pool.Rent(2 * Mb));
+    }
+
+    [Fact]
+    public void Return_DoesNotEvictAClassThatIsStillLive()
+    {
+        var clock = new FakeClock();
+        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 8 * Mb, nowTicks: clock.Now);
+
+        // Class A fills the cap and stays in use — well within the staleness window.
+        var a1 = pool.Rent(4 * Mb);
+        var a2 = pool.Rent(4 * Mb);
+        pool.Return(a1);
+        pool.Return(a2);
+        clock.Advance(TimeSpan.FromSeconds(1));
+
+        // A second live class returns a buffer. A's buffers are NOT stale, so they must survive and
+        // the incoming buffer is dropped instead. Two live streams share the cap; they must never
+        // take turns evicting each other, which would leave neither with a cache hit.
+        pool.Return(pool.Rent(2 * Mb));
+
+        var idleByClass = pool.DescribeIdleBuffers().ToDictionary(x => x.SizeClass, x => x.IdleCount);
+        Assert.Equal(2, idleByClass.GetValueOrDefault(4 * Mb));
+        Assert.Equal(0, idleByClass.GetValueOrDefault(2 * Mb));
+        Assert.True(pool.IdleBytes <= 8 * Mb);
+    }
+
+    [Fact]
+    public void Return_EvictionNeverExceedsWhatIsNeeded()
+    {
+        var clock = new FakeClock();
+        // Cap admits four 2 MB buffers.
+        var pool = new SegmentBufferPool(maxBufferSize: 16 * Mb, maxIdleBytes: 8 * Mb, nowTicks: clock.Now);
+
+        var rented = Enumerable.Range(0, 4).Select(_ => pool.Rent(2 * Mb)).ToList();
+        foreach (var buffer in rented) pool.Return(buffer);
+        Assert.Equal(8 * Mb, pool.IdleBytes);
+
+        clock.Advance(SegmentBufferPool.StaleAfter + TimeSpan.FromSeconds(1));
+
+        // Admitting one 2 MB buffer should cost exactly one stale buffer, not the whole class.
+        pool.Return(pool.Rent(1 * Mb));
+
+        var idleByClass = pool.DescribeIdleBuffers().ToDictionary(x => x.SizeClass, x => x.IdleCount);
+        Assert.Equal(3, idleByClass.GetValueOrDefault(2 * Mb));
+        Assert.Equal(1, idleByClass.GetValueOrDefault(1 * Mb));
+    }
+
     [Fact]
     public void RetainedBytes_AreBoundedFarBelowArrayPoolEquivalent()
     {
