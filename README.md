@@ -175,6 +175,14 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.11 (2026-07-19)
+Lets a file hold several shared-stream entries covering different regions, so playback can share a pump instead of always building a private stream. Directed by the v0.11.10 measurement, which ruled out the cheaper alternative.
+
+*   **Performance**: `SharedStreamManager` now holds up to 3 entries per file, each pumping a different region, instead of exactly one. Keyed by `DavItemId` alone, the single entry was anchored wherever its first reader landed — always byte 0, the header read — so playback, which lives GB downstream, could never attach and always fell back to a private full-window `BufferedSegmentStream`. Two concurrent movies produced 11 private streams. Tunable with `NZBDAV_MAX_SHARED_ENTRIES_PER_FILE`; set it to `1` to restore the previous behaviour.
+*   **Logic**: Removed the guard that refused to create an entry whenever one already existed. It was written to avoid a wasted fetch pipeline on the click-to-play path, but the fallback it protected is not cheap — this path is only reached for open-ended requests, so the alternative is a private `BufferedSegmentStream` carrying its own multi-hundred-MB prefetch window. An entry costs that same inner stream plus one 32 MB ring, and unlike the private stream it can be shared. A per-file cap now bounds entry creation instead.
+*   **Logic**: Enlarging the 32 MB ring buffer was considered and rejected on measurement, not intuition. v0.11.10 recorded every attach refusal as `ahead_of_frontier` at a mean of **3.85 GB**, with none closer than 1 GB — no ring size closes that gap.
+*   **Logging**: New `at_entry_cap` outcome on `nzbdav_shared_stream_creates_total` records reads that fell back to a private stream because their file already held the maximum number of entries.
+
 ## v0.11.10 (2026-07-19)
 Corrects a double-count that made the shared-stream attach metrics unreadable, and adds the measurement that decides how #18 gets fixed.
 

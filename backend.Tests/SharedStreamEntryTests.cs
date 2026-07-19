@@ -26,7 +26,7 @@ public class SharedStreamEntryTests
             streamLength: streamLength,
             ringBufferSize: ringBufferSize,
             gracePeriodSeconds: gracePeriodSeconds,
-            evictCallback: _ => { },
+            evictCallback: (_, _) => { },
             entryCts: new CancellationTokenSource());
     }
 

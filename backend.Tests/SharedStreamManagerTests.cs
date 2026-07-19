@@ -11,14 +11,29 @@ public class SharedStreamManagerTests
     private const int RingBufferSize = 64 * 1024;
     private const long StreamLength = 100_000_000;
 
-    [Fact]
-    public void GetOrCreate_WhenEntryExistsButPositionCannotAttach_DoesNotRunTheFactoryAgain()
+    static SharedStreamManagerTests()
     {
-        // Regression (click-to-play): a player opens an .mkv, then immediately seeks to the tail to read
-        // the Matroska Cues. That position is far ahead of the front pump, so attaching is correctly
-        // refused — but the manager then built a whole entry anyway (starting a real fetch pipeline:
-        // permits, connections, segment reads) only to lose the TryAdd against the entry it had already
-        // found, and tear it down synchronously. Every single file open paid for a wasted pipeline.
+        // The process default is 2 concurrent stream slots (production config raises it to 8).
+        // Entries hold a slot until their grace timer fires and cleanup runs, which is asynchronous,
+        // so with only 2 slots these tests starve each other and whichever runs second sees
+        // GetOrCreate return null for reasons unrelated to what it is testing. Give the assembly a
+        // budget large enough that slot supply is never the variable under test.
+        BufferedSegmentStream.SetMaxConcurrentStreams(32);
+    }
+
+    [Fact]
+    public void GetOrCreate_WhenNoEntryCoversThePosition_CreatesASecondRegionEntry()
+    {
+        // This replaces GetOrCreate_WhenEntryExistsButPositionCannotAttach_DoesNotRunTheFactoryAgain,
+        // whose expectation was the opposite: it asserted the tail read got NO entry and fell back to
+        // a private stream. That guard existed to stop a wasted fetch pipeline on click-to-play, but
+        // production measurement (issue #18, v0.11.10) showed what it actually cost: the only entry a
+        // file ever had was anchored at byte 0, every subsequent reader was a mean 3.85 GB downstream,
+        // and all of them took full private BufferedSegmentStreams instead. Two movies, 11 streams.
+        //
+        // The fallback was never the cheap option — this path is only reached for open-ended requests,
+        // so the private stream carries its own multi-hundred-MB prefetch window. A second entry costs
+        // the same inner stream plus one ring, and can be shared.
         var davItemId = Guid.NewGuid();
         var factoryCalls = 0;
 
@@ -26,7 +41,7 @@ public class SharedStreamManagerTests
         {
             Interlocked.Increment(ref factoryCalls);
             // Gate the first read so the pump never advances: WritePosition stays at 0, which makes the
-            // tail attach below deterministically out of range.
+            // tail attach below deterministically out of range of the front entry.
             return new SharedStreamManager.SharedStreamFactoryResult(
                 new FakeInnerStream(payloadBytes: 1024, gateFirstRead: true));
         }
@@ -37,15 +52,72 @@ public class SharedStreamManagerTests
         Assert.NotNull(front);
         Assert.Equal(1, factoryCalls);
 
-        // The tail/Cues probe, hundreds of MB ahead of the write frontier.
+        // The tail/Cues read, far ahead of the front pump: its own region, its own entry.
         var tail = SharedStreamManager.GetOrCreate(
             davItemId, startPosition: 90_000_000, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory);
 
-        Assert.Null(tail); // caller falls back to a private stream at the seek target
-        Assert.Equal(1, factoryCalls); // pre-fix: 2
+        Assert.NotNull(tail);
+        Assert.Equal(2, factoryCalls);
+        Assert.Equal(2, SharedStreamManager.CountEntries(davItemId));
 
-        front!.Dispose(); // last reader leaves -> 0s grace -> entry evicts and releases its slot
+        // And the point of doing so: a second reader at the tail now SHARES that entry rather than
+        // building yet another private stream. Under the old guard this was a miss.
+        var tailFollower = SharedStreamManager.TryAttach(davItemId, 90_000_000);
+        Assert.NotNull(tailFollower);
+        Assert.Equal(2, factoryCalls);
+
+        tailFollower!.Dispose();
+        tail!.Dispose();
+        front!.Dispose();
         SharedStreamManager.Evict(davItemId);
+    }
+
+    [Fact]
+    public void GetOrCreate_StopsCreatingEntriesAtTheCap()
+    {
+        // Each entry costs a ring buffer plus one of the scarce global stream slots, so one file must
+        // not be able to take all of them. Past the cap the caller falls back to a private stream,
+        // which is the pre-v0.11.11 behaviour for every read past the first.
+        var original = SharedStreamManager.MaxEntriesPerFile;
+        SharedStreamManager.MaxEntriesPerFile = 2;
+        var davItemId = Guid.NewGuid();
+        var factoryCalls = 0;
+
+        try
+        {
+            SharedStreamManager.SharedStreamFactoryResult Factory(CancellationToken ct)
+            {
+                Interlocked.Increment(ref factoryCalls);
+                return new SharedStreamManager.SharedStreamFactoryResult(
+                    new FakeInnerStream(payloadBytes: 1024, gateFirstRead: true));
+            }
+
+            var first = SharedStreamManager.GetOrCreate(
+                davItemId, startPosition: 0, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory);
+            var second = SharedStreamManager.GetOrCreate(
+                davItemId, startPosition: 50_000_000, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory);
+
+            Assert.NotNull(first);
+            Assert.NotNull(second);
+            Assert.Equal(2, factoryCalls);
+
+            // Third distinct region: refused, and the factory must NOT run — no pipeline is built
+            // only to be thrown away.
+            var third = SharedStreamManager.GetOrCreate(
+                davItemId, startPosition: 90_000_000, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory);
+
+            Assert.Null(third);
+            Assert.Equal(2, factoryCalls);
+            Assert.Equal(2, SharedStreamManager.CountEntries(davItemId));
+
+            second!.Dispose();
+            first!.Dispose();
+        }
+        finally
+        {
+            SharedStreamManager.MaxEntriesPerFile = original;
+            SharedStreamManager.Evict(davItemId);
+        }
     }
 
     [Fact]
@@ -98,9 +170,13 @@ public class SharedStreamManagerTests
         Assert.NotNull(front);
 
         // One request for the tail, taking the real call path: TryAttach first, then GetOrCreate.
+        // TryAttach misses; GetOrCreate now serves it by opening a second region entry — and books
+        // that on the create counter, NOT as a hit, because this request's attach outcome is already
+        // recorded.
         Assert.Null(SharedStreamManager.TryAttach(davItemId, 90_000_000));
-        Assert.Null(SharedStreamManager.GetOrCreate(
-            davItemId, startPosition: 90_000_000, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory));
+        var tail = SharedStreamManager.GetOrCreate(
+            davItemId, startPosition: 90_000_000, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory);
+        Assert.NotNull(tail);
 
         // One attach attempt -> exactly one miss, zero hits. Pre-fix the miss count was 2.
         Assert.Equal(1, TotalMisses() - missesBefore);
@@ -115,6 +191,7 @@ public class SharedStreamManagerTests
         Assert.Equal(1, ReadCounter(AppMetrics.SharedStreamHits) - hitsBefore);
 
         second!.Dispose();
+        tail!.Dispose();
         front!.Dispose();
         SharedStreamManager.Evict(davItemId);
     }
@@ -136,7 +213,7 @@ public class SharedStreamManagerTests
             streamLength: StreamLength,
             ringBufferSize: RingBufferSize,
             gracePeriodSeconds: 0,
-            evictCallback: _ => { },
+            evictCallback: (_, _) => { },
             entryCts: new CancellationTokenSource());
 
         var handle = entry.TryAttachReader(90_000_000, out var rejection, out var distance);

@@ -42,7 +42,9 @@ public class SharedStreamEntry : IDisposable
     private readonly SemaphoreSlim _slot; // Acquired semaphore from TryAcquireSlot
     private readonly Guid _davItemId;
     private readonly int _gracePeriodSeconds;
-    private readonly Action<Guid> _evictCallback; // Calls SharedStreamManager.Evict
+    // Calls SharedStreamManager.Evict. Carries the entry itself, not just the id: a file can now
+    // hold several entries covering different regions, so the id alone no longer identifies one.
+    private readonly Action<Guid, SharedStreamEntry> _evictCallback;
     private readonly CancellationTokenSource _entryCts; // Entry-scoped cancellation, independent of any request
     // Captured once: reading _entryCts.Token after the CTS is disposed throws, and the pump can
     // reach its next wait after cleanup has already run. A captured token stays usable — once
@@ -106,7 +108,7 @@ public class SharedStreamEntry : IDisposable
         long streamLength,
         int ringBufferSize,
         int gracePeriodSeconds,
-        Action<Guid> evictCallback,
+        Action<Guid, SharedStreamEntry> evictCallback,
         CancellationTokenSource entryCts,
         IDisposable? contextScope = null)
     {
@@ -330,7 +332,7 @@ public class SharedStreamEntry : IDisposable
 
         if (shouldCleanup)
         {
-            _evictCallback(_davItemId);
+            _evictCallback(_davItemId, this);
             CleanupResources();
         }
     }
@@ -472,7 +474,7 @@ public class SharedStreamEntry : IDisposable
         }
 
         // Evict from manager (outside lock to avoid deadlocks)
-        _evictCallback(_davItemId);
+        _evictCallback(_davItemId, this);
         CleanupResources();
     }
 
@@ -592,7 +594,7 @@ public class SharedStreamEntry : IDisposable
 
         if (shouldCleanup)
         {
-            _evictCallback(_davItemId);
+            _evictCallback(_davItemId, this);
             CleanupResources();
         }
     }
