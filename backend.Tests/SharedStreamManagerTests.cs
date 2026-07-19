@@ -1,5 +1,6 @@
 using System;
 using System.Threading;
+using NzbWebDAV.Metrics;
 using NzbWebDAV.Streams;
 using Xunit;
 
@@ -75,4 +76,93 @@ public class SharedStreamManagerTests
         first!.Dispose();
         SharedStreamManager.Evict(davItemId);
     }
+
+    [Fact]
+    public void AttachOutcomes_AreCountedExactlyOncePerAttempt()
+    {
+        // Regression (issue #18): NzbFileStream calls TryAttach and, on null, falls through to
+        // GetOrCreate. Both used to increment a miss counter for the SAME request — once as
+        // "position_out_of_range" and once as "existing_entry_unattachable" — so a single failure
+        // mode was reported as two independent ones and the miss total was double the real number
+        // of attach attempts. The paired counts in the issue's production data are the fingerprint.
+        var davItemId = Guid.NewGuid();
+
+        SharedStreamManager.SharedStreamFactoryResult Factory(CancellationToken ct) =>
+            new(new FakeInnerStream(payloadBytes: 1024, gateFirstRead: true));
+
+        var hitsBefore = ReadCounter(AppMetrics.SharedStreamHits);
+        var missesBefore = TotalMisses();
+
+        var front = SharedStreamManager.GetOrCreate(
+            davItemId, startPosition: 0, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory);
+        Assert.NotNull(front);
+
+        // One request for the tail, taking the real call path: TryAttach first, then GetOrCreate.
+        Assert.Null(SharedStreamManager.TryAttach(davItemId, 90_000_000));
+        Assert.Null(SharedStreamManager.GetOrCreate(
+            davItemId, startPosition: 90_000_000, StreamLength, RingBufferSize, gracePeriodSeconds: 0, Factory));
+
+        // One attach attempt -> exactly one miss, zero hits. Pre-fix the miss count was 2.
+        Assert.Equal(1, TotalMisses() - missesBefore);
+        Assert.Equal(0, ReadCounter(AppMetrics.SharedStreamHits) - hitsBefore);
+
+        // And the mirror case: a reader at the pump's own position attaches on the TryAttach call,
+        // never reaches GetOrCreate, and books exactly one hit and no miss.
+        var second = SharedStreamManager.TryAttach(davItemId, 0);
+        Assert.NotNull(second);
+
+        Assert.Equal(1, TotalMisses() - missesBefore);
+        Assert.Equal(1, ReadCounter(AppMetrics.SharedStreamHits) - hitsBefore);
+
+        second!.Dispose();
+        front!.Dispose();
+        SharedStreamManager.Evict(davItemId);
+    }
+
+    [Fact]
+    public void TailSeek_IsReportedAsAheadOfFrontier_WithTheDistanceThatDecidesTheFix()
+    {
+        // The distance is the whole point of the instrumentation: a rejection 8 MB past the frontier
+        // would be recovered by a larger ring, one 90 MB past it (here, against a 64 KB ring) would
+        // not. Without the reason and the distance, both look identical in the metrics.
+        var slot = new SemaphoreSlim(1, 1);
+        Assert.True(slot.Wait(0)); // the entry owns the slot and releases it during cleanup
+
+        var entry = new SharedStreamEntry(
+            new FakeInnerStream(payloadBytes: 1024, gateFirstRead: true),
+            slot,
+            Guid.NewGuid(),
+            basePosition: 0,
+            streamLength: StreamLength,
+            ringBufferSize: RingBufferSize,
+            gracePeriodSeconds: 0,
+            evictCallback: _ => { },
+            entryCts: new CancellationTokenSource());
+
+        var handle = entry.TryAttachReader(90_000_000, out var rejection, out var distance);
+
+        Assert.Null(handle);
+        Assert.Equal(SharedStreamEntry.AttachRejection.AheadOfFrontier, rejection);
+        Assert.Equal(90_000_000, distance); // frontier is still 0; positive means "past the pump"
+
+        entry.Dispose();
+    }
+
+    private static double ReadCounter(Prometheus.Counter counter) => counter.Value;
+
+    private static double TotalMisses()
+    {
+        // Sum across every reason label so the assertion holds no matter which reason a miss is
+        // filed under — the invariant under test is the count, not the labelling.
+        double total = 0;
+        foreach (var labels in MissReasons)
+            total += AppMetrics.SharedStreamMisses.WithLabels(labels).Value;
+        return total;
+    }
+
+    private static readonly string[] MissReasons =
+    {
+        "no_entry", "entry_unusable", "before_base", "behind_window", "ahead_of_frontier",
+        "past_end", "unknown",
+    };
 }

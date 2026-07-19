@@ -175,6 +175,15 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.10 (2026-07-19)
+Corrects a double-count that made the shared-stream attach metrics unreadable, and adds the measurement that decides how #18 gets fixed.
+
+*   **Fix**: Shared-stream attach outcomes were counted twice per request. `NzbFileStream` calls `SharedStreamManager.TryAttach` and, when that returns null, falls through to `GetOrCreate` — and both incremented a miss counter for the *same* attach attempt, once as `position_out_of_range` and once as `existing_entry_unattachable`. A single failure mode therefore appeared as two independent ones at twice its true rate. Hits and misses are now booked at exactly one site, so `hits + misses == attach attempts`. The real two-movie production tally was 2 creates / 6 failed attaches / 2 hits — not 2 hits against 18 misses.
+*   **Logging**: Attach misses now carry a specific reason (`ahead_of_frontier`, `behind_window`, `before_base`, `past_end`, `entry_unusable`) instead of the two ambiguous labels.
+*   **Logging**: New `nzbdav_shared_stream_attach_miss_distance_bytes` histogram records how far a rejected reader was from the pump's write frontier, split by direction. This is the number that discriminates the candidate fixes for #18: misses clustered inside a ring's width would be recovered by enlarging the 32 MB ring, whereas misses in the GB range (a player reading the Matroska tail/Cues) can only be served by giving a file more than one pumped entry.
+*   **Logging**: New `nzbdav_shared_stream_creates_total{outcome}` separates entry-creation outcomes (`created`, `no_slot`, `skipped_entry_unattachable`, race paths) from attach accounting, so the create path can never contaminate the hit/miss ratio again.
+*   **Logging**: Entries now record lifetime, readers served and bytes pumped on teardown, labelled by cause (`grace_expired`, `failed`, `disposed`, `race_lost`), and log one `Information`-level summary line each. #18 inferred that entries were dying early from `active_entries == 0`, but that compared an instantaneous gauge against cumulative counters; lifetime is now measured directly.
+
 ## v0.11.9 (2026-07-18)
 Cuts the streaming memory floor by replacing `ArrayPool<byte>.Shared` with a dedicated, byte-bounded segment buffer pool (#23).
 

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
+using NzbWebDAV.Metrics;
 using Serilog;
 
 namespace NzbWebDAV.Streams;
@@ -13,6 +14,24 @@ namespace NzbWebDAV.Streams;
 public class SharedStreamEntry : IDisposable
 {
     public enum EntryState { Active, GracePeriod, Failed, Disposed }
+
+    /// <summary>
+    /// Why <see cref="TryAttachReader(long, out AttachRejection, out long)"/> refused a reader.
+    /// Reported so the manager can record how far out of range the reader was — the measurement
+    /// that separates "a bigger ring would have caught this" from "this file needs a second entry".
+    /// </summary>
+    public enum AttachRejection
+    {
+        None,
+        EntryUnusable,      // Disposed or Failed
+        BeforeBase,         // Earlier than where this entry's pump started
+        BehindWindow,       // Fell out of the trailing edge of the ring
+        AheadOfFrontier,    // Seeked past the pump by more than a ring's worth
+        PastEnd,            // Beyond the end of the stream
+    }
+
+    /// <summary>Why an entry was torn down. Label for the lifetime histogram.</summary>
+    public enum TeardownCause { GraceExpired, Failed, Disposed, RaceLost }
 
     private readonly byte[] _ringBuffer;
     private readonly int _ringBufferSize;
@@ -49,6 +68,15 @@ public class SharedStreamEntry : IDisposable
     // Per-reader position tracking for backpressure
     private readonly ConcurrentDictionary<int, long> _readerPositions = new();
     private int _nextHandleId;
+
+    // Lifetime accounting (issue #18). _readersServed counts every reader the entry ever had,
+    // including the creating one, so an entry that never shared with anyone reports 1.
+    private readonly long _createdTimestamp = Stopwatch.GetTimestamp();
+    private int _readersServed = 1;
+    private long _bytesPumped;
+    // Set by the teardown path before CleanupResources so the lifetime is filed under the right
+    // cause. CleanupResources itself runs from several paths and cannot tell them apart.
+    private TeardownCause _teardownCause = TeardownCause.Disposed;
 
     // Signaling: pump notifies ALL waiting readers when new data is available (broadcast)
     private TaskCompletionSource _dataAvailableTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -191,19 +219,40 @@ public class SharedStreamEntry : IDisposable
     /// Attach a new reader. Returns a SharedStreamHandle if the position is within range, null otherwise.
     /// </summary>
     public SharedStreamHandle? TryAttachReader(long startPosition)
+        => TryAttachReader(startPosition, out _, out _);
+
+    /// <summary>
+    /// Attach a new reader, reporting why on refusal.
+    /// </summary>
+    /// <param name="rejection">Why the attach was refused, or <see cref="AttachRejection.None"/> on success.</param>
+    /// <param name="distanceFromFrontier">Signed distance from the write frontier at the moment of
+    /// refusal: positive means the reader seeked past the pump, negative means it fell behind.
+    /// Meaningless when the attach succeeded.</param>
+    public SharedStreamHandle? TryAttachReader(long startPosition, out AttachRejection rejection, out long distanceFromFrontier)
     {
         lock (_stateLock)
         {
+            distanceFromFrontier = startPosition - WritePosition;
+
             if (_state == EntryState.Disposed || _state == EntryState.Failed)
+            {
+                rejection = AttachRejection.EntryUnusable;
                 return null;
+            }
 
             // Position must be >= basePosition and within the ring buffer window
             if (startPosition < _basePosition)
+            {
+                rejection = AttachRejection.BeforeBase;
                 return null;
+            }
 
             var validStart = ValidRangeStart;
             if (startPosition < validStart)
+            {
+                rejection = AttachRejection.BehindWindow;
                 return null;
+            }
 
             // Position can be at or slightly ahead of the write frontier (the reader waits
             // briefly for the in-order pump to reach it). But reject positions far ahead of
@@ -214,13 +263,21 @@ public class SharedStreamEntry : IDisposable
             // endless "buffering" loop). Returning null makes the caller spin up its own
             // stream at the seek target, which serves the tail immediately.
             if (startPosition > WritePosition + _ringBufferSize)
+            {
+                rejection = AttachRejection.AheadOfFrontier;
                 return null;
+            }
 
             // Don't allow beyond stream length.
             if (startPosition > _basePosition + StreamLength)
+            {
+                rejection = AttachRejection.PastEnd;
                 return null;
+            }
 
+            rejection = AttachRejection.None;
             Interlocked.Increment(ref _readerCount);
+            Interlocked.Increment(ref _readersServed);
             var handleId = RegisterReader(startPosition);
 
             // Cancel grace timer if we're in grace period
@@ -267,6 +324,7 @@ public class SharedStreamEntry : IDisposable
         {
             if (_state != EntryState.GracePeriod) return;
             Log.Debug("[SharedStreamEntry] Grace period expired, disposing. DavItemId={DavItemId}", _davItemId);
+            _teardownCause = TeardownCause.GraceExpired;
             shouldCleanup = SetDisposedState();
         }
 
@@ -361,6 +419,7 @@ public class SharedStreamEntry : IDisposable
                 }
 
                 Volatile.Write(ref _writePosition, writePos + bytesRead);
+                Interlocked.Add(ref _bytesPumped, bytesRead);
 
                 // Signal ALL waiting readers (broadcast)
                 Interlocked.Exchange(ref _dataAvailableTcs, new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously)).TrySetResult();
@@ -402,6 +461,7 @@ public class SharedStreamEntry : IDisposable
 
             _failure = ex;
             _state = EntryState.Failed;
+            _teardownCause = TeardownCause.Failed;
             _graceTimer?.Dispose();
             _graceTimer = null;
 
@@ -436,6 +496,8 @@ public class SharedStreamEntry : IDisposable
         // (SemaphoreFullException), on top of touching an already-disposed gate.
         if (Interlocked.Exchange(ref _cleanedUp, 1) == 1) return;
 
+        RecordLifetime();
+
         // Wake the pump before tearing anything down. It may be parked on the gate (grace period)
         // or blocked in the inner stream's read: Set() covers the former, Cancel() the latter.
         // Both are needed — the gate wait is what silently leaked pump threads before.
@@ -458,6 +520,34 @@ public class SharedStreamEntry : IDisposable
         DisposePumpScopedResources();
 
         Log.Debug("[SharedStreamEntry] Resources cleaned up, semaphore slot released. DavItemId={DavItemId}", _davItemId);
+    }
+
+    /// <summary>
+    /// Files this entry's lifetime, readers served and bytes pumped. Called once, from
+    /// CleanupResources, which is already guarded to run exactly once.
+    /// </summary>
+    private void RecordLifetime()
+    {
+        var lifetime = Stopwatch.GetElapsedTime(_createdTimestamp).TotalSeconds;
+        var readers = Volatile.Read(ref _readersServed);
+        var bytes = Interlocked.Read(ref _bytesPumped);
+        var cause = _teardownCause switch
+        {
+            TeardownCause.GraceExpired => "grace_expired",
+            TeardownCause.Failed => "failed",
+            TeardownCause.RaceLost => "race_lost",
+            _ => "disposed",
+        };
+
+        AppMetrics.SharedStreamEntryLifetimeSeconds.WithLabels(cause).Observe(lifetime);
+        AppMetrics.SharedStreamEntryReadersServed.Observe(readers);
+        AppMetrics.SharedStreamEntryBytesPumped.Observe(bytes);
+
+        // Information, not Debug: this is the per-entry record issue #18 needs read back out of a
+        // production container, and Debug is off there.
+        Log.Information("[SharedStreamEntry] Entry torn down. DavItemId={DavItemId}, Cause={Cause}, " +
+                        "Lifetime={Lifetime:F1}s, ReadersServed={Readers}, Pumped={Pumped}MB, Base={Base}, Frontier={Frontier}",
+            _davItemId, cause, lifetime, readers, bytes / (1024 * 1024), _basePosition, WritePosition);
     }
 
     /// <summary>
@@ -517,6 +607,7 @@ public class SharedStreamEntry : IDisposable
         {
             if (_state == EntryState.Disposed) return;
             _state = EntryState.Disposed;
+            _teardownCause = TeardownCause.RaceLost;
         }
 
         CleanupResources();

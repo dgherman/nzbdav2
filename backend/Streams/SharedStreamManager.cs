@@ -21,6 +21,13 @@ public static class SharedStreamManager
     /// Try to attach to an existing shared stream for this file.
     /// Returns a handle if the entry exists and the position is within range, null otherwise.
     /// </summary>
+    /// <remarks>
+    /// This is the ONLY site that records hits and misses, so hits + misses == attach attempts.
+    /// <see cref="GetOrCreate"/> deliberately records nothing under those counters even though it
+    /// re-attempts the same attach: doing so previously filed one failed attach twice, once as
+    /// "position_out_of_range" here and once as "existing_entry_unattachable" there, which made a
+    /// single failure mode read as two independent ones. See issue #18.
+    /// </remarks>
     public static SharedStreamHandle? TryAttach(Guid davItemId, long startPosition)
     {
         if (!s_entries.TryGetValue(davItemId, out var entry))
@@ -29,17 +36,47 @@ public static class SharedStreamManager
             return null;
         }
 
-        var handle = entry.TryAttachReader(startPosition);
+        var handle = entry.TryAttachReader(startPosition, out var rejection, out var distance);
         if (handle != null)
         {
             AppMetrics.SharedStreamHits.Inc();
             Log.Debug("[SharedStreamManager] Attached to existing shared stream. DavItemId={DavItemId}, Position={Position}", davItemId, startPosition);
+            return handle;
         }
-        else
+
+        RecordAttachMiss(davItemId, startPosition, rejection, distance);
+        return null;
+    }
+
+    /// <summary>
+    /// Files a failed attach under its specific reason and records how far from the write frontier
+    /// the reader was. The distance is the number issue #18 turns on: rejections clustered within a
+    /// ring's width mean a larger ring recovers them, while rejections in the GB range mean the file
+    /// needs more than one pumped entry and no ring size will help.
+    /// </summary>
+    private static void RecordAttachMiss(Guid davItemId, long startPosition, SharedStreamEntry.AttachRejection rejection, long distance)
+    {
+        var reason = rejection switch
         {
-            AppMetrics.SharedStreamMisses.WithLabels("position_out_of_range").Inc();
+            SharedStreamEntry.AttachRejection.EntryUnusable => "entry_unusable",
+            SharedStreamEntry.AttachRejection.BeforeBase => "before_base",
+            SharedStreamEntry.AttachRejection.BehindWindow => "behind_window",
+            SharedStreamEntry.AttachRejection.AheadOfFrontier => "ahead_of_frontier",
+            SharedStreamEntry.AttachRejection.PastEnd => "past_end",
+            _ => "unknown",
+        };
+        AppMetrics.SharedStreamMisses.WithLabels(reason).Inc();
+
+        // EntryUnusable is a lifecycle race, not a positioning problem — its distance would be noise.
+        if (rejection != SharedStreamEntry.AttachRejection.EntryUnusable)
+        {
+            AppMetrics.SharedStreamAttachMissDistanceBytes
+                .WithLabels(distance >= 0 ? "ahead" : "behind")
+                .Observe(Math.Abs(distance));
         }
-        return handle;
+
+        Log.Debug("[SharedStreamManager] Attach refused. DavItemId={DavItemId}, Position={Position}, Reason={Reason}, DistanceFromFrontier={Distance}",
+            davItemId, startPosition, reason, distance);
     }
 
     /// <summary>
@@ -70,7 +107,10 @@ public static class SharedStreamManager
             var handle = existing.TryAttachReader(startPosition);
             if (handle != null)
             {
-                AppMetrics.SharedStreamHits.Inc();
+                // Not counted as a hit: TryAttach already filed this request's outcome, and the
+                // only way to reach here with a live entry is an entry appearing in the gap between
+                // the two calls. Recorded on the create counter instead.
+                AppMetrics.SharedStreamCreates.WithLabels("raced_attached").Inc();
                 Log.Debug("[SharedStreamManager] Attached to existing entry (race). DavItemId={DavItemId}", davItemId);
                 return handle;
             }
@@ -81,18 +121,17 @@ public static class SharedStreamManager
             // Building an entry here instead would start a full fetch pipeline (permits, connections,
             // real segment reads) only to lose the TryAdd against the entry we just found and be torn
             // down synchronously — a wasted pipeline on the click-to-play path, on every file open.
-            AppMetrics.SharedStreamMisses.WithLabels("existing_entry_unattachable").Inc();
+            AppMetrics.SharedStreamCreates.WithLabels("skipped_entry_unattachable").Inc();
             Log.Debug("[SharedStreamManager] Entry exists but position {Position} cannot attach; caller will use a private stream. DavItemId={DavItemId}",
                 startPosition, davItemId);
             return null;
         }
 
-        AppMetrics.SharedStreamMisses.WithLabels("no_entry").Inc();
-
         // Acquire a semaphore slot
         var slot = BufferedSegmentStream.TryAcquireSlot();
         if (slot == null)
         {
+            AppMetrics.SharedStreamCreates.WithLabels("no_slot").Inc();
             Log.Debug("[SharedStreamManager] No semaphore slot available. DavItemId={DavItemId}", davItemId);
             return null;
         }
@@ -128,8 +167,12 @@ public static class SharedStreamManager
                 // Try the winner's entry
                 if (s_entries.TryGetValue(davItemId, out var winner))
                 {
-                    return winner.TryAttachReader(startPosition);
+                    var winnerHandle = winner.TryAttachReader(startPosition);
+                    AppMetrics.SharedStreamCreates
+                        .WithLabels(winnerHandle != null ? "lost_race_attached" : "lost_race_unattachable").Inc();
+                    return winnerHandle;
                 }
+                AppMetrics.SharedStreamCreates.WithLabels("lost_race_winner_gone").Inc();
                 return null;
             }
 
@@ -137,6 +180,7 @@ public static class SharedStreamManager
             var handleId = entry.RegisterReader(startPosition);
             entry.StartPump();
             AppMetrics.SharedStreamActiveEntries.Set(s_entries.Count);
+            AppMetrics.SharedStreamCreates.WithLabels("created").Inc();
             Log.Information("[SharedStreamManager] Created shared stream entry. DavItemId={DavItemId}, Position={Position}, BufferSize={BufferSize}MB",
                 davItemId, startPosition, ringBufferSize / (1024 * 1024));
 
