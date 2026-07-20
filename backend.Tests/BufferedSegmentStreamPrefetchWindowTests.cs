@@ -12,6 +12,7 @@ using Xunit;
 
 namespace NzbWebDAV.Tests;
 
+[Collection(BufferedStreamCollection.Name)]
 public class BufferedSegmentStreamPrefetchWindowTests
 {
     private const int SegmentSize = 1024;

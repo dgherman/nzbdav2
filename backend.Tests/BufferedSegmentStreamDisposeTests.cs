@@ -11,6 +11,7 @@ using Xunit;
 
 namespace NzbWebDAV.Tests;
 
+[Collection(BufferedStreamCollection.Name)]
 public class BufferedSegmentStreamDisposeTests
 {
     private const int SegmentSize = 1024;

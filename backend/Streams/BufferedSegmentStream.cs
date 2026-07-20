@@ -81,6 +81,11 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             : (computedWindow, "computed");
     }
 
+    // How long a worker waits for a global streaming permit before giving the job back to the
+    // urgent queue. Internal rather than const so a test can drive the re-queue path without
+    // sitting through the real 60s wait.
+    internal static TimeSpan PermitAcquireTimeout { get; set; } = TimeSpan.FromSeconds(60);
+
     // Concurrent stream cap — limits how many BufferedSegmentStreams can exist simultaneously
     private static volatile SemaphoreSlim s_concurrentStreamSlots = new(2, 2);
     private SemaphoreSlim? _acquiredSemaphore; // Tracks which semaphore instance we acquired from
@@ -1052,7 +1057,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                                 if (limiter != null)
                                 {
                                     permitLease = await limiter.AcquireLeaseAsync(
-                                        TimeSpan.FromSeconds(60),
+                                        PermitAcquireTimeout,
                                         jobCts.Token,
                                         $"segment={job.index}").ConfigureAwait(false);
                                     if (permitLease == null)
