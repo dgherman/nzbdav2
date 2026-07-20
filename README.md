@@ -175,6 +175,11 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.12 (2026-07-20)
+Closes the last untested acceptance criterion from the 2026-07-16 streaming-stability spec. No behaviour change.
+*   **Tooling**: Added a regression test for the streaming-permit re-queue (spec Finding 3, shipped in v0.11.2). A worker that timed out waiting for a global permit used to `continue` without re-queueing the job it had already popped, wedging the ordering task at that index until the 60s idle watchdog tore the stream down — the failure mode that turned permit exhaustion into 60s+ click-to-play stalls. The test holds the only permit in the pool, verifies the workers time out repeatedly, then releases it and asserts every segment arrives byte-exact. Verified to fail (30s wedge) against the pre-fix `continue`.
+*   **Tooling**: Two internal test seams: `BufferedSegmentStream.PermitAcquireTimeout` (so the test drives the path without a real 60s wait) and `StreamingConnectionLimiter.SetInstanceForTests` (the constructor claims a process-wide static, which would otherwise leak into every later test). The `BufferedSegmentStream` test classes now share an xUnit collection so they cannot race over that static.
+
 ## v0.11.11 (2026-07-19)
 Lets a file hold several shared-stream entries covering different regions, so playback can share a pump instead of always building a private stream. Directed by the v0.11.10 measurement, which ruled out the cheaper alternative.
 

@@ -21,6 +21,12 @@ public class StreamingConnectionLimiter : IDisposable
     private static StreamingConnectionLimiter? _instance;
     public static StreamingConnectionLimiter? Instance => _instance;
 
+    /// <summary>
+    /// Restores the static instance. The constructor claims it unconditionally, so a test that
+    /// builds a limiter would otherwise leave it installed for every later test in the assembly.
+    /// </summary>
+    internal static void SetInstanceForTests(StreamingConnectionLimiter? limiter) => _instance = limiter;
+
     // Stats for monitoring
     private long _totalAcquires;
     private long _totalReleases;
