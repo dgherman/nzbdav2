@@ -175,6 +175,39 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.11.11 (2026-07-19)
+Lets a file hold several shared-stream entries covering different regions, so playback can share a pump instead of always building a private stream. Directed by the v0.11.10 measurement, which ruled out the cheaper alternative.
+
+*   **Performance**: `SharedStreamManager` now holds up to 3 entries per file, each pumping a different region, instead of exactly one. Keyed by `DavItemId` alone, the single entry was anchored wherever its first reader landed — always byte 0, the header read — so playback, which lives GB downstream, could never attach and always fell back to a private full-window `BufferedSegmentStream`. Two concurrent movies produced 11 private streams. Tunable with `NZBDAV_MAX_SHARED_ENTRIES_PER_FILE`; set it to `1` to restore the previous behaviour.
+*   **Logic**: Removed the guard that refused to create an entry whenever one already existed. It was written to avoid a wasted fetch pipeline on the click-to-play path, but the fallback it protected is not cheap — this path is only reached for open-ended requests, so the alternative is a private `BufferedSegmentStream` carrying its own multi-hundred-MB prefetch window. An entry costs that same inner stream plus one 32 MB ring, and unlike the private stream it can be shared. A per-file cap now bounds entry creation instead.
+*   **Logic**: Enlarging the 32 MB ring buffer was considered and rejected on measurement, not intuition. v0.11.10 recorded every attach refusal as `ahead_of_frontier` at a mean of **3.85 GB**, with none closer than 1 GB — no ring size closes that gap.
+*   **Logging**: New `at_entry_cap` outcome on `nzbdav_shared_stream_creates_total` records reads that fell back to a private stream because their file already held the maximum number of entries.
+
+**Production verification** (22 hours, three files, two concurrent movies with repeated back-and-forth seeking, 0 errors, memory stable at 3.72 GiB / 8 GiB):
+
+| | before (v0.11.10) | after (v0.11.11) |
+| --- | --- | --- |
+| mean entry lifetime | 13.6s | **388s** |
+| mean bytes pumped per entry | 36 MB | **398 MB** |
+| entry `Base` offset | always 0 | spread across the file |
+| private streams | 9 in ~5 min | **10 in 22 h** |
+
+21 entries torn down having pumped 8.36 GB between them; the longest lived 2306s and pumped 1622 MB from a base of 1.7 GB. `at_entry_cap` never fired, so the per-file cap of 3 was never reached.
+
+Two things this does **not** show, recorded so the numbers are not over-read:
+
+*   **The attach hit rate did not improve** — 12 hits against 23 misses (34%), versus 30% before, and entries served a mean of 1.57 readers with most long-lived entries serving exactly one. The gain is stream *longevity*, not sharing: reads now attach to a persistent pump positioned at the right region instead of constructing a fresh full-window stream per request. An entry serving a single reader for 2306s is functionally a private stream with a ring buffer on top — it is still far cheaper than rebuilding, but it is not the sharing win the original issue framing predicted.
+*   **Short probe entries still occur** — 3–4 of 21 entries pumped 1 MB and expired after ~10.8s, the click-to-play tail reads the removed guard was written for. They cost a 1 MB window each and self-reap, so promoting a reader to an entry only once it proves it is not a probe remains a possible refinement rather than a necessary one.
+
+## v0.11.10 (2026-07-19)
+Corrects a double-count that made the shared-stream attach metrics unreadable, and adds the measurement that decides how #18 gets fixed.
+
+*   **Fix**: Shared-stream attach outcomes were counted twice per request. `NzbFileStream` calls `SharedStreamManager.TryAttach` and, when that returns null, falls through to `GetOrCreate` — and both incremented a miss counter for the *same* attach attempt, once as `position_out_of_range` and once as `existing_entry_unattachable`. A single failure mode therefore appeared as two independent ones at twice its true rate. Hits and misses are now booked at exactly one site, so `hits + misses == attach attempts`. The real two-movie production tally was 2 creates / 6 failed attaches / 2 hits — not 2 hits against 18 misses.
+*   **Logging**: Attach misses now carry a specific reason (`ahead_of_frontier`, `behind_window`, `before_base`, `past_end`, `entry_unusable`) instead of the two ambiguous labels.
+*   **Logging**: New `nzbdav_shared_stream_attach_miss_distance_bytes` histogram records how far a rejected reader was from the pump's write frontier, split by direction. This is the number that discriminates the candidate fixes for #18: misses clustered inside a ring's width would be recovered by enlarging the 32 MB ring, whereas misses in the GB range (a player reading the Matroska tail/Cues) can only be served by giving a file more than one pumped entry.
+*   **Logging**: New `nzbdav_shared_stream_creates_total{outcome}` separates entry-creation outcomes (`created`, `no_slot`, `skipped_entry_unattachable`, race paths) from attach accounting, so the create path can never contaminate the hit/miss ratio again.
+*   **Logging**: Entries now record lifetime, readers served and bytes pumped on teardown, labelled by cause (`grace_expired`, `failed`, `disposed`, `race_lost`), and log one `Information`-level summary line each. #18 inferred that entries were dying early from `active_entries == 0`, but that compared an instantaneous gauge against cumulative counters; lifetime is now measured directly.
+
 ## v0.11.9 (2026-07-18)
 Cuts the streaming memory floor by replacing `ArrayPool<byte>.Shared` with a dedicated, byte-bounded segment buffer pool (#23).
 
