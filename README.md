@@ -183,6 +183,22 @@ Lets a file hold several shared-stream entries covering different regions, so pl
 *   **Logic**: Enlarging the 32 MB ring buffer was considered and rejected on measurement, not intuition. v0.11.10 recorded every attach refusal as `ahead_of_frontier` at a mean of **3.85 GB**, with none closer than 1 GB — no ring size closes that gap.
 *   **Logging**: New `at_entry_cap` outcome on `nzbdav_shared_stream_creates_total` records reads that fell back to a private stream because their file already held the maximum number of entries.
 
+**Production verification** (22 hours, three files, two concurrent movies with repeated back-and-forth seeking, 0 errors, memory stable at 3.72 GiB / 8 GiB):
+
+| | before (v0.11.10) | after (v0.11.11) |
+| --- | --- | --- |
+| mean entry lifetime | 13.6s | **388s** |
+| mean bytes pumped per entry | 36 MB | **398 MB** |
+| entry `Base` offset | always 0 | spread across the file |
+| private streams | 9 in ~5 min | **10 in 22 h** |
+
+21 entries torn down having pumped 8.36 GB between them; the longest lived 2306s and pumped 1622 MB from a base of 1.7 GB. `at_entry_cap` never fired, so the per-file cap of 3 was never reached.
+
+Two things this does **not** show, recorded so the numbers are not over-read:
+
+*   **The attach hit rate did not improve** — 12 hits against 23 misses (34%), versus 30% before, and entries served a mean of 1.57 readers with most long-lived entries serving exactly one. The gain is stream *longevity*, not sharing: reads now attach to a persistent pump positioned at the right region instead of constructing a fresh full-window stream per request. An entry serving a single reader for 2306s is functionally a private stream with a ring buffer on top — it is still far cheaper than rebuilding, but it is not the sharing win the original issue framing predicted.
+*   **Short probe entries still occur** — 3–4 of 21 entries pumped 1 MB and expired after ~10.8s, the click-to-play tail reads the removed guard was written for. They cost a 1 MB window each and self-reap, so promoting a reader to an entry only once it proves it is not a probe remains a possible refinement rather than a necessary one.
+
 ## v0.11.10 (2026-07-19)
 Corrects a double-count that made the shared-stream attach metrics unreadable, and adds the measurement that decides how #18 gets fixed.
 
