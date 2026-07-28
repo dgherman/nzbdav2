@@ -30,6 +30,7 @@ internal sealed class FakeInnerStream : Stream
 
     public int ReadCount => Volatile.Read(ref _reads);
     public Task FirstReadEntered => _firstReadEntered.Task;
+    public bool IsDisposed => _disposed.Task.IsCompleted;
 
     /// <summary>Lets a gated first read return its payload.</summary>
     public void ReleaseFirstRead() => _release.TrySetResult();

@@ -1,6 +1,8 @@
 using System.Collections.Concurrent;
 using System.Diagnostics;
 
+using NzbWebDAV.Utils;
+
 namespace NzbWebDAV.Streams;
 
 /// <summary>
@@ -37,6 +39,9 @@ public sealed class SegmentBufferPool
     public const int Granularity = 256 * 1024;
 
     private const int DefaultMaxBufferSize = 16 * 1024 * 1024;
+    /// <summary>Upper bound on retention; the effective default is derived from the heap ceiling
+    /// by <see cref="MemoryBudget.PoolIdleCapBytes"/>, because 512 MB of retention is the entire
+    /// managed heap on the shipped image.</summary>
     private const long DefaultMaxIdleBytes = 512L * 1024 * 1024;
 
     /// <summary>
@@ -253,6 +258,9 @@ public sealed class SegmentBufferPool
         var raw = Environment.GetEnvironmentVariable("NZBDAV_SEGMENT_POOL_MAX_IDLE_MB");
         if (long.TryParse(raw, out var megabytes) && megabytes >= 0)
             return megabytes * 1024 * 1024;
-        return DefaultMaxIdleBytes;
+
+        // Unset: size retention from the heap ceiling rather than the fixed 512 MB, which on the
+        // shipped image is the whole managed heap and leaves nothing for the streams it serves.
+        return Math.Min(DefaultMaxIdleBytes, MemoryBudget.PoolIdleCapBytes(MemoryBudget.HeapLimitBytes));
     }
 }

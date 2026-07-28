@@ -137,8 +137,11 @@ public class BufferedSegmentStreamPrefetchWindowTests
     public void ByteFloor_ConvertsTheBudgetUsingAverageSegmentSize(long avgSegmentSize, int expectedWindow)
     {
         // computedWindow small so the floor is what binds; no explicit override.
+        // Budget passed explicitly: the production budget is derived from the heap ceiling of the
+        // box, so leaving it implicit would make this assertion depend on the test host's RAM.
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 12, configuredWindow: 0, avgSegmentSize: avgSegmentSize);
+            computedWindow: 12, configuredWindow: 0, avgSegmentSize: avgSegmentSize,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
         Assert.Equal("byte-floor", source);
         Assert.Equal(expectedWindow, window);
@@ -156,7 +159,8 @@ public class BufferedSegmentStreamPrefetchWindowTests
         // flight to feed every worker: the floor never drops the window below the computed value.
         // 32 MB segments => 256 MB / 32 MB = 8, but the computed window is 40.
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 40, configuredWindow: 0, avgSegmentSize: 32L * 1024 * 1024);
+            computedWindow: 40, configuredWindow: 0, avgSegmentSize: 32L * 1024 * 1024,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
         Assert.Equal("computed", source);
         Assert.Equal(40, window);
@@ -166,7 +170,8 @@ public class BufferedSegmentStreamPrefetchWindowTests
     public void ExplicitOverride_WinsVerbatim_OverTheByteFloor()
     {
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 12, configuredWindow: 150, avgSegmentSize: 4_194_304);
+            computedWindow: 12, configuredWindow: 150, avgSegmentSize: 4_194_304,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
         Assert.Equal("configured", source);
         Assert.Equal(150, window);
@@ -178,7 +183,8 @@ public class BufferedSegmentStreamPrefetchWindowTests
         // No size table or an empty stream: the byte budget can't be converted, so the segment-count
         // fallback applies rather than a division by zero.
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 12, configuredWindow: 0, avgSegmentSize: 0);
+            computedWindow: 12, configuredWindow: 0, avgSegmentSize: 0,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
         Assert.Equal("byte-floor", source);
         Assert.Equal(BufferedSegmentStream.MinPrefetchWindowSegments, window);

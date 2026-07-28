@@ -5,6 +5,7 @@ using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Exceptions;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Services;
+using NzbWebDAV.Utils;
 using Serilog;
 using System.IO;
 using System.Collections.Concurrent;
@@ -38,12 +39,33 @@ public class BufferedSegmentStream : Stream, ITouchableStream
     /// </summary>
     public const long MinPrefetchWindowBytes = 256L * 1024 * 1024;
 
+    // The per-stream prefetch budget actually in force, in bytes. Derived from the process's heap
+    // ceiling by MemoryBudget rather than fixed at MinPrefetchWindowBytes: that constant was tuned
+    // against a NAS with a 4 GiB heap, and the shipped image caps the heap at 512 MB, where one
+    // stream holding 256 MB of data (490 MB resident) aborts the process.
+    private static long s_prefetchBudgetBytes =
+        MemoryBudget.PerStreamPrefetchBytes(MemoryBudget.HeapLimitBytes,
+            MemoryBudget.MaxConcurrentStreams(MemoryBudget.HeapLimitBytes));
+
+    public static void SetPrefetchBudgetBytes(long budgetBytes)
+    {
+        if (budgetBytes > 0) Interlocked.Exchange(ref s_prefetchBudgetBytes, budgetBytes);
+    }
+
+    public static long PrefetchBudgetBytes => Interlocked.Read(ref s_prefetchBudgetBytes);
+
     /// <summary>
     /// Fallback floor in segments, used only when the average segment size is unknown (no size table,
     /// or a zero-length stream) so the byte floor cannot be computed. Kept at the value the byte floor
     /// was validated against on the 717 KB-segment file.
     /// </summary>
     public const int MinPrefetchWindowSegments = 300;
+
+    /// <summary>
+    /// A single article is never this large. Past this the segment read loop is not terminating, and
+    /// each further doubling is a step towards an allocation no heap limit can satisfy.
+    /// </summary>
+    private const int RunawaySegmentWarnBytes = 32 * 1024 * 1024;
 
     // 0 = auto. Set from config at startup (see Program.cs), overridable at runtime.
     private static volatile int s_prefetchWindow;
@@ -66,15 +88,28 @@ public class BufferedSegmentStream : Stream, ITouchableStream
     /// </summary>
     public static (int window, string source) ComputePrefetchWindow(
         int computedWindow, int configuredWindow, long avgSegmentSize)
+        => ComputePrefetchWindow(computedWindow, configuredWindow, avgSegmentSize, PrefetchBudgetBytes);
+
+    /// <inheritdoc cref="ComputePrefetchWindow(int,int,long)"/>
+    /// <param name="prefetchBudgetBytes">Bytes of data this stream may hold in flight. Supplied
+    /// explicitly so the arithmetic can be tested against any box size.</param>
+    public static (int window, string source) ComputePrefetchWindow(
+        int computedWindow, int configuredWindow, long avgSegmentSize, long prefetchBudgetBytes)
     {
         if (configuredWindow > 0)
             return (configuredWindow, "configured");
 
+        // The segment-count fallback was validated against a 717 KB-segment file at the full 256 MB
+        // budget. On a smaller budget it would hand out the same count for a fraction of the memory,
+        // so scale it down in the same proportion.
+        var fallbackSegments = (int)Math.Max(1,
+            (long)MinPrefetchWindowSegments * prefetchBudgetBytes / MinPrefetchWindowBytes);
+
         // Convert the byte budget to a segment count for this file. A zero/unknown average (no size
         // table, empty stream) can't be converted — fall back to the segment-count floor.
         var byteFloorSegments = avgSegmentSize > 0
-            ? (int)Math.Min(int.MaxValue, MinPrefetchWindowBytes / avgSegmentSize)
-            : MinPrefetchWindowSegments;
+            ? (int)Math.Min(int.MaxValue, prefetchBudgetBytes / avgSegmentSize)
+            : fallbackSegments;
 
         return byteFloorSegments > computedWindow
             ? (byteFloorSegments, "byte-floor")
@@ -104,8 +139,31 @@ public class BufferedSegmentStream : Stream, ITouchableStream
     private static long s_lastOomTicks; // DateTime.UtcNow.Ticks of last OOM event
     private const int OomCooldownMs = 750;
 
+    // Reports the GC's own view of its ceiling at the moment an OOM was observed. An OOM whose
+    // heap is nowhere near the limit is a different bug from an OOM that has genuinely filled it,
+    // and without this the two are indistinguishable in a log.
+    private static void LogOomHeapState()
+    {
+        try
+        {
+            var info = GC.GetGCMemoryInfo();
+            Log.Warning("[BufferedStream] OOM HEAP STATE: heap={HeapMB}MB, committed={CommittedMB}MB, limit={LimitMB}MB, " +
+                        "load={LoadMB}MB of {AvailableMB}MB, highLoadThreshold={ThresholdMB}MB, fragmentation={FragMB}MB, poolIdle={PoolIdleMB}MB",
+                info.HeapSizeBytes / (1024 * 1024),
+                info.TotalCommittedBytes / (1024 * 1024),
+                info.HighMemoryLoadThresholdBytes > 0 ? info.TotalAvailableMemoryBytes / (1024 * 1024) : 0,
+                info.MemoryLoadBytes / (1024 * 1024),
+                info.TotalAvailableMemoryBytes / (1024 * 1024),
+                info.HighMemoryLoadThresholdBytes / (1024 * 1024),
+                info.FragmentedBytes / (1024 * 1024),
+                SegmentBufferPool.Shared.IdleBytes / (1024 * 1024));
+        }
+        catch { /* diagnostics must never be the reason a worker dies */ }
+    }
+
     private static void HandleOomPressure()
     {
+        LogOomHeapState();
         Interlocked.Exchange(ref s_lastOomTicks, DateTime.UtcNow.Ticks);
         try
         {
@@ -1387,6 +1445,13 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                     {
                         if (totalRead == buffer.Length)
                         {
+                            // A segment that keeps growing past any plausible article size means the
+                            // read is not terminating. Say so before doubling again: the doubling
+                            // itself is what turns that into an unrecoverable allocation.
+                            if (buffer.Length >= RunawaySegmentWarnBytes)
+                                Log.Warning("[BufferedStream] RUNAWAY SEGMENT READ: Job={Job}, Segment={Index} (ID: {SegmentId}), buffer={BufferMB}MB already read, doubling again",
+                                    jobName, index, segmentId, buffer.Length / (1024 * 1024));
+
                             // Resize via the segment pool to avoid LOH churn
                             var newBuffer = SegmentBufferPool.Shared.Rent(buffer.Length * 2);
                             SegmentBufferPoolDiagnostics.RecordResizeRent(newBuffer);
@@ -1538,7 +1603,7 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 // Force GC, throttle, and retry without excluding the provider.
                 lastException = ex;
                 HandleOomPressure();
-                Log.Warning("[BufferedStream] OOM during fetch: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Attempt={Attempt}/{MaxRetries}. Forced GC and backing off before retry.",
+                Log.Warning(ex, "[BufferedStream] OOM during fetch: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Attempt={Attempt}/{MaxRetries}. Forced GC and backing off before retry.",
                     jobName, index, segmentIds.Length, segmentId, attempt + 1, maxRetries);
                 try
                 {
@@ -1704,6 +1769,10 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 {
                     if (totalRead == buffer.Length)
                     {
+                        if (buffer.Length >= RunawaySegmentWarnBytes)
+                            Log.Warning("[BufferedStream] RUNAWAY SEGMENT READ (single): Segment={Index} (ID: {SegmentId}), buffer={BufferMB}MB already read, doubling again",
+                                index, segmentId, buffer.Length / (1024 * 1024));
+
                         var newBuffer = SegmentBufferPool.Shared.Rent(buffer.Length * 2);
                         SegmentBufferPoolDiagnostics.RecordResizeRent(newBuffer);
                         Buffer.BlockCopy(buffer, 0, newBuffer, 0, totalRead);

@@ -289,7 +289,10 @@ public sealed class ConnectionPool<T> : IDisposable, IAsyncDisposable, AppMetric
                 }
                 else
                 {
-                    Serilog.Log.Warning("[ConnectionPool][{PoolName}] Failed to create connection for {UsageType}: {Error}", PoolName, usageContext.UsageType, ex.Message);
+                    if (ex is OutOfMemoryException)
+                        Serilog.Log.Warning(ex, "[ConnectionPool][{PoolName}] Failed to create connection for {UsageType}: OOM (stack included)", PoolName, usageContext.UsageType);
+                    else
+                        Serilog.Log.Warning("[ConnectionPool][{PoolName}] Failed to create connection for {UsageType}: {Error}", PoolName, usageContext.UsageType, ex.Message);
                 }
 
                 _gate.Release(); // free the permit on failure

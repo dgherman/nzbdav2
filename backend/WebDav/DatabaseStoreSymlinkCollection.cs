@@ -5,6 +5,7 @@ using NWebDav.Server.Stores;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.WebDav.Requests;
 
@@ -26,7 +27,7 @@ public class DatabaseStoreSymlinkCollection(
     protected override async Task<IStoreItem?> GetItemAsync(GetItemRequest request)
     {
         if (DeletedFiles.IsDeleted(request.Name)) return null;
-        if (configManager.HideSamples() && request.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+        if (configManager.HideSamples() && FileFilterUtil.LooksLikeSampleName(request.Name))
             return null;
 
         var name = Regex.Replace(request.Name, @"\.rclonelink$", "");
@@ -47,7 +48,7 @@ public class DatabaseStoreSymlinkCollection(
         if (configManager.HideSamples())
         {
             children = children
-                .Where(x => !x.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+                .Where(x => !FileFilterUtil.LooksLikeSampleName(x.Name))
                 .ToList();
         }
 

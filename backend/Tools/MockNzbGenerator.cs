@@ -63,7 +63,8 @@ public static class MockNzbGenerator
         long totalSize,
         int segmentSize,
         bool useRar,
-        int rarVolumeCount = 3)
+        int rarVolumeCount = 3,
+        bool includeSample = false)
     {
         var result = new GenerationResult();
         var sb = new StringBuilder();
@@ -155,7 +156,9 @@ public static class MockNzbGenerator
         {
             // Original flat file behavior
             var segments = (int)Math.Ceiling((double)totalSize / segmentSize);
-            var subject = "Mock_File_1GB.bin";
+            // Video-named when a sample is wanted, so the release looks like the real thing the
+            // sample filter has to judge: two video files, one of them much smaller.
+            var subject = includeSample ? "Mock.Movie.2024.1080p.WEB.mkv" : "Mock_File_1GB.bin";
 
             var fileInfo = new FileInfo
             {
@@ -183,6 +186,42 @@ public static class MockNzbGenerator
             sb.AppendLine(" </file>");
             result.Files.Add(fileInfo);
             globalSegmentIndex = segments;
+
+            if (includeSample)
+            {
+                // ~2% of the feature: comfortably under the 20% ratio the sample filter uses, so the
+                // release exercises the real decision rather than a degenerate one.
+                var sampleSize = Math.Max(segmentSize, totalSize / 50);
+                var sampleSegments = (int)Math.Ceiling((double)sampleSize / segmentSize);
+                var sampleSubject = "Mock.Movie.2024.1080p.WEB.sample.mkv";
+
+                var sampleInfo = new FileInfo
+                {
+                    FileName = sampleSubject,
+                    SegmentCount = sampleSegments,
+                    FirstSegmentIndex = globalSegmentIndex,
+                    SegmentIds = new List<string>(),
+                    FileSize = sampleSize,
+                    IsRar = false
+                };
+
+                sb.Append($" <file poster='Mock' date='{date}' subject='{sampleSubject}'>\n");
+                sb.AppendLine("  <groups><group>mock.group</group></groups>");
+                sb.AppendLine("  <segments>");
+
+                for (int i = 0; i < sampleSegments; i++)
+                {
+                    var msgId = $"mock-sample-{i:D6}-{Guid.NewGuid():N}@mock.server";
+                    sampleInfo.SegmentIds.Add(msgId);
+                    var partBytes = SegmentSizeAt(i, sampleSegments, sampleSize, segmentSize);
+                    sb.Append($"   <segment bytes='{partBytes}' number='{i + 1}'>{msgId}</segment>\n");
+                }
+
+                sb.AppendLine("  </segments>");
+                sb.AppendLine(" </file>");
+                result.Files.Add(sampleInfo);
+                globalSegmentIndex += sampleSegments;
+            }
         }
 
         sb.AppendLine("</nzb>");

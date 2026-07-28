@@ -1,5 +1,11 @@
 # Performance Analysis: FullNzbTester with Mock Server
 
+> **Historical snapshot — not a settings guide.** This records one benchmark run from 2026-01-13 and
+> the reasoning at that time. Memory sizing has since become automatic: as of v0.12.0 the
+> concurrent-stream count, prefetch window and buffer retention are derived from the process's heap
+> ceiling by `MemoryBudget`, so the fixed figures below no longer describe the defaults. For current
+> guidance see "Memory and Streaming Settings" in `README.md`.
+
 **Date:** 2026-01-13
 **Test Configuration:**
 - Mock NNTP Server: localhost:1190

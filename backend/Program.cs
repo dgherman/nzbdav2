@@ -59,10 +59,13 @@ class Program
 
         // Log build version to verify correct build is running
         Log.Warning("═══════════════════════════════════════════════════════════════");
-        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-20-PERMIT-REQUEUE-REGRESSION-TEST");
+        Log.Warning("  NzbDav Backend Starting - BUILD v2026-07-28-MEMORY-BUDGET-AND-SAMPLE-FILTER");
+        Log.Warning("  FIX (OOM): streaming memory is now derived from the process heap ceiling, not from constants. The image ships DOTNET_GCHeapHardLimit=0x20000000 (512 MB, sized for a 1 GB VPS, applied regardless of host RAM) while the streaming path defaulted to a 256 MB prefetch floor PER STREAM, 8 concurrent streams each holding a 32 MB ring, and 512 MB of pool retention -- all tuned against a NAS running a 4 GiB limit. Each in-flight segment is resident TWICE (pooled buffer + the copy System.IO.Pipelines holds in BufferToEndStream), so a window logged as 'holds~255MB data' drove a 490 MB heap and ONE stream exhausted the limit; the runtime then aborted the process outright, killing the backend and the container with it. Sizing now comes from the detected limit -- the startup budget line below reports what this box affords. Reproduced and verified in docker/repro (2 of 10 reads before, 36 of 36 with seeks after, same 512 MB heap). Explicit settings still win.");
+        Log.Warning("  FEATURE (samples): sample videos are now discarded during queue post-processing, before any webdav item, symlink or *.strm file is created for them ('api.sample-filter-enabled', default ON). The extension blacklist could never express this -- a sample carries the same extension as the feature, and in strm mode every strm is ~175 bytes, so Sonarr's own size-based sample detection cannot tell them apart either and imports the sample. The rule is name AND size: the name must contain 'sample' as a whole word, and the file must be under 20% of the LARGEST video in the same nzb. The ratio is what makes default-ON safe -- a real release such as 'Free Samples (2012)' is its own largest video, so it compares against itself and is kept, as is a release whose only video is named sample. Extra glob patterns can be added with 'api.download-filename-blacklist' (default empty). The separate opt-in 'usenet.hide-samples' (webdav listing only) now uses the same whole-word matcher instead of the literal '.sample.', so 'Sample.mkv' and 'sample-Show.mkv' are covered.");
+        Log.Warning("  FIX (upload): dropping several *.nzb files into the queue page uploaded only the FIRST. The dropzone packed every file into the input, but the action read formData.get('nzbFile') -- singular -- and the rest were dropped silently with no error shown, because the fetcher's result never reaches the route's actionData. Now getAll + per-file upload, one file's failure no longer discards the others, and errors render next to the dropzone. The drop target is also rendered whenever the queue is non-empty; previously it existed ONLY in the empty-queue placeholder, so after the first item there was nowhere to drop and the API was the only way in.");
         Log.Warning("  FIX (#19): segment prefetch is bounded by the reader's position, with a floor denominated in BYTES of data in flight (256 MB), not segments. Segment size is a property of how the file was posted and varies ~8x between releases, so a fixed 300-segment floor held 215 MB on a 717 KB-segment file but 2.4 GB on a 4.19 MB-segment one for the identical guarantee. 256 MB is the production-validated 215 MB (clean at both 300 segments of 717 KB and 51 of 4.19 MB) plus margin; PR #21's 64 MB starved and tripped breakers. Tune with the 'usenet.prefetch-window' setting (0 = auto, in segments).");
         Log.Warning("  INSTRUMENT (#18): each stream now logs its effective segment count and memory ceiling alongside the window, so a stream's cost can be read from the log instead of inferred. Measured: one video opens 5 streams but only 2 are expensive -- the other 3 are range-bounded and cost 7MB between them, so counting streams overstates memory badly. NOTE: this banner deliberately does not quote the per-stream log's literal text; when it did, every grep for that text also matched the banner and inflated a production stream count from 15 to 17.");
-        Log.Warning("  FIX (#23): segment buffers now come from a dedicated SegmentBufferPool, not ArrayPool<byte>.Shared. Two measured reasons. (1) ArrayPool buckets are 16<<i, so a 4.19 MB segment was served an 8 MB array -- 3.8 MB wasted per in-flight buffer; size classes are now 256 KB multiples, so waste is under one granule. (2) Shared trims only under pressure measured against the cgroup limit (8 GiB), never DOTNET_GCHeapHardLimit (4 GiB), so at 3 GB it felt none and held ~770 MB of idle 8 MB arrays that a forced compacting gen2 could not reclaim; idle retention is now capped in BYTES (default 512 MB, env NZBDAV_SEGMENT_POOL_MAX_IDLE_MB). ArrayPool.Create was NOT the fix -- it keeps the power-of-two buckets AND bounds arrays-per-bucket by count, which across ~20 doubling buckets permits ~2.5 GB. Read retention back from POST /api/gc-diagnostics ('segmentBufferPoolRetention'), which reports it without needing NZBDAV_POOL_DIAG.");
+        Log.Warning("  FIX (#23): segment buffers now come from a dedicated SegmentBufferPool, not ArrayPool<byte>.Shared. Two measured reasons. (1) ArrayPool buckets are 16<<i, so a 4.19 MB segment was served an 8 MB array -- 3.8 MB wasted per in-flight buffer; size classes are now 256 KB multiples, so waste is under one granule. (2) Shared trims only under pressure measured against the cgroup limit (8 GiB), never DOTNET_GCHeapHardLimit (4 GiB), so at 3 GB it felt none and held ~770 MB of idle 8 MB arrays that a forced compacting gen2 could not reclaim; idle retention is now capped in BYTES (default 512 MB, env NZBDAV_SEGMENT_POOL_MAX_IDLE_MB). ArrayPool.Create was NOT the fix -- it keeps the power-of-two buckets AND bounds arrays-per-bucket by count, which across ~20 doubling buckets permits ~2.5 GB. Read retention back from POST /api/gc-diagnostics ('segmentBufferPoolRetention'), which reports it without needing the pool-diag env var.");
         Log.Warning("  FIX+INSTRUMENT (#18): shared-stream attach outcomes were DOUBLE-COUNTED. NzbFileStream calls TryAttach and, on null, falls through to GetOrCreate, and both incremented a miss for the SAME request -- once as 'position_out_of_range', once as 'existing_entry_unattachable'. One failure mode therefore read as two independent ones at twice the true rate; the paired counts in #18's production data (6/5/5, then 4/6/6) are the fingerprint. Hits and misses are now booked at exactly one site, so hits+misses == attach attempts. The real two-movie tally was 2 creates / 6 failed attaches / 2 hits, not 2-vs-18. Misses now carry a specific reason (ahead_of_frontier, behind_window, before_base, past_end, entry_unusable) and a new histogram records the DISTANCE from the pump frontier -- that number decides the fix: misses inside a ring's width are recoverable by enlarging the 32 MB ring, misses in the GB range (a player reading the Matroska tail) need more than one entry per file and no ring size will help. Entry lifetime, readers-served and bytes-pumped are also recorded, because #18 read 'active_entries == 0' as entries dying early while comparing an instantaneous gauge against cumulative counters.");
         Log.Warning("  FIX (#18): a file now holds up to 3 shared-stream entries (env NZBDAV_MAX_SHARED_ENTRIES_PER_FILE, 1 restores old behaviour), each pumping a different region, instead of exactly one. Keyed by DavItemId alone, the single entry was anchored wherever its first reader landed -- always byte 0, the header read -- and v0.11.10 measured every attach refusal as ahead_of_frontier at a MEAN OF 3.85 GB, none closer than 1 GB, while that entry pumped only 28-64 MB before starving and grace-expiring at ~14s. Playback lives GB downstream of the header, so no ring size closes that gap; enlarging the 32 MB ring was measured and rejected, not assumed. Two movies previously produced 11 private full-window streams. The guard this replaces (skip creating when an entry exists) was written to avoid a wasted pipeline on click-to-play, but the fallback it protected is a full private BufferedSegmentStream with its own multi-hundred-MB window -- creating an entry was never the more expensive option.");
         Log.Warning("  INSTRUMENT (heap): POST /api/gc-diagnostics forces a full compacting collection and reports generation sizes either side of it, separating rooted memory from garbage. Needs NZBDAV_GC_DIAG=1; it stalls every thread while it runs. Exists because last_collection_heap_size freezes when the process goes idle -- the heap becomes unreadable exactly when you want its floor.");
@@ -100,6 +103,13 @@ class Program
         if (args.Contains("--extract-test-nzbs"))
         {
             await ExtractTestNzbs.RunAsync(args).ConfigureAwait(false);
+            return;
+        }
+
+        // Run the mock usenet provider as a standalone server (docker compose repro harness)
+        if (args.Contains("--mock-usenet-server"))
+        {
+            await MockUsenetServer.RunAsync(args).ConfigureAwait(false);
             return;
         }
 
@@ -215,8 +225,13 @@ class Program
             }
         };
 
-        // Set initial concurrent buffered stream cap
-        BufferedSegmentStream.SetMaxConcurrentStreams(configManager.GetMaxConcurrentBufferedStreams());
+        // Set initial concurrent buffered stream cap. The prefetch budget divides the heap across
+        // those slots, so it is recomputed whenever the slot count changes.
+        MemoryBudget.LogBudget();
+        var maxConcurrentStreams = configManager.GetMaxConcurrentBufferedStreams();
+        BufferedSegmentStream.SetMaxConcurrentStreams(maxConcurrentStreams);
+        BufferedSegmentStream.SetPrefetchBudgetBytes(
+            MemoryBudget.PerStreamPrefetchBytes(MemoryBudget.HeapLimitBytes, maxConcurrentStreams));
         BufferedSegmentStream.SetPrefetchWindow(configManager.GetPrefetchWindow());
 
         // Update on config change
@@ -224,7 +239,10 @@ class Program
         {
             if (eventArgs.NewConfig.ContainsKey("usenet.max-concurrent-buffered-streams"))
             {
-                BufferedSegmentStream.SetMaxConcurrentStreams(configManager.GetMaxConcurrentBufferedStreams());
+                var streams = configManager.GetMaxConcurrentBufferedStreams();
+                BufferedSegmentStream.SetMaxConcurrentStreams(streams);
+                BufferedSegmentStream.SetPrefetchBudgetBytes(
+                    MemoryBudget.PerStreamPrefetchBytes(MemoryBudget.HeapLimitBytes, streams));
             }
 
             if (eventArgs.NewConfig.ContainsKey("usenet.prefetch-window"))

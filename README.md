@@ -130,50 +130,130 @@ For all environment variables and configuration options, see [`CLAUDE.md`](./CLA
 
 For a complete deployment guide including RClone mount configuration, Sonarr/Radarr integration, and Docker Compose setup, see the [upstream README](https://github.com/nzbdav-dev/nzbdav#readme). nzbdav2-specific architectural differences (e.g., in-DB Zstd compression instead of blobstore) are documented in [`CLAUDE.md`](./CLAUDE.md) and [`docs/upstream-sync-2026-03-10.md`](./docs/upstream-sync-2026-03-10.md).
 
-## Tuning Streaming Memory
+## Memory and Streaming Settings
 
-Streaming holds segment buffers in memory while it reads ahead of the player. Two settings decide how much, and the defaults are tuned for ~30 streaming connections against a 4 GiB heap limit. **If playback is fine, leave them alone.**
+**Short version: you should not have to configure anything.** As of v0.12.0 NzbDav works out how much
+memory it may use from the container's own memory limit, and sizes everything else from that. If
+playback is fine, skip this section.
 
-| Setting | Default | What it does |
+### The one thing worth doing
+
+NzbDav ships with a deliberately small memory ceiling — **512 MB** — because it has to run on a 1 GB
+VPS. That ceiling applies no matter how much RAM your machine has, so a 16 GB NAS gets the same
+512 MB unless you say otherwise.
+
+If your server has RAM to spare, give it more. Everything else scales up automatically:
+
+```yaml
+# docker-compose.yml
+services:
+  nzbdav:
+    environment:
+      DOTNET_GCHeapHardLimit: "0x100000000"   # 4 GB
+```
+
+| Value | Ceiling |
+| --- | --- |
+| `0x20000000` | 512 MB (default) |
+| `0x40000000` | 1 GB |
+| `0x80000000` | 2 GB |
+| `0x100000000` | 4 GB |
+| `0x200000000` | 8 GB |
+
+A good rule: give NzbDav about a quarter of the machine's RAM, and no more than half.
+
+### What it works out for you
+
+| Memory ceiling | Videos streamed at once | Read-ahead per video | Buffer reuse pool |
+| --- | --- | --- | --- |
+| 512 MB | 2 | 48 MB | 76 MB |
+| 1 GB | 2 | 96 MB | 153 MB |
+| 2 GB | 4 | 96 MB | 307 MB |
+| 4 GB | 8 | 96 MB | 512 MB |
+| 8 GB | 8 | 200 MB | 512 MB |
+| 16 GB | 8 | 256 MB | 512 MB |
+
+"Videos streamed at once" is not the number of people watching — one video can need several slots,
+because a multi-part release uses one per active part and players open extra connections to read the
+start and end of a file.
+
+Read-ahead is how far NzbDav fetches in front of what the player is showing. More read-ahead means
+more tolerance for a slow provider; it costs memory, and roughly **twice** the figure shown, because
+each chunk is briefly held twice while being decoded.
+
+### Checking what your server decided
+
+One line at startup tells you:
+
+```
+[MemoryBudget] Heap limit 512MB -> 2 concurrent streams, 48MB prefetch data each (~96MB resident), 76MB pool retention.
+```
+
+```bash
+docker logs nzbdav 2>&1 | grep "Heap limit"
+```
+
+### Overriding it by hand
+
+Only if you have a reason. Anything you set explicitly wins over the automatic sizing.
+
+| Setting | Where | What it does |
 | --- | --- | --- |
-| `usenet.prefetch-window` | `0` (auto) | How many segments the fetchers may run ahead of the reader. Auto floors the window at **256 MB of data in flight**, converted to a segment count per file using that file's average segment size. Setting a non-zero value overrides in **segments**. |
-| `usenet.max-concurrent-buffered-streams` | `8` | How many buffered streams can exist at once. Note this is **not** "number of videos" — a multipart/RAR playback needs a slot per active part, plus the player's head/tail probes. |
+| `usenet.prefetch-window` | Settings → Usenet | Read-ahead, counted in **segments** rather than MB. `0` = automatic. |
+| `usenet.max-concurrent-buffered-streams` | Settings → Usenet | How many streams may run at once. |
+| `NZBDAV_SEGMENT_POOL_MAX_IDLE_MB` | environment variable | How much memory the buffer-reuse pool may hold on to. |
+| `usenet.connections-per-stream` | Settings → Usenet | Connections one stream may use. Default `20`. |
+| `usenet.stream-buffer-size` | Settings → Usenet | Segments buffered between fetching and reading. Default `20`. |
 
-### The arithmetic
+**Careful with `usenet.prefetch-window`.** It is counted in segments, and segment size varies between
+releases by as much as 8x — so the same number can mean 64 MB on one release and 360 MB on another.
+Too *large* wastes memory you can reclaim. Too *small* breaks playback outright: the reader runs dry,
+streams fail with `Invalid NNTP Response`, and the retries trip your provider's circuit breaker. If
+you lower it and playback starts failing, raise it back before blaming your provider.
 
-```
-data in flight per stream ≈ min(prefetch-window, remaining segments) × average segment size
-```
+### If something goes wrong
 
-On auto, the floor targets **~256 MB per active stream** regardless of segment size — a 4 MB-segment file gets ~64 segments, a 700 KB-segment file ~366, both holding ~256 MB. Worst case is `256 MB × concurrent streams`; two concurrent videos is about `512 MB`. (Resident RAM runs somewhat higher: `ArrayPool` rounds each buffer up to the next power-of-two, so a 4.19 MB segment occupies an 8 MB slot.)
+Running out of memory looks like this: the log shows `Out of memory.`, the web page shows
+"application error", and the container needs restarting. It means the ceiling is too low for what is
+being asked of it. Either raise `DOTNET_GCHeapHardLimit`, or lower `usenet.prefetch-window` and
+`usenet.max-concurrent-buffered-streams`.
 
-The floor used to be a fixed **300 segments**, which held 215 MB on one file and 2.4 GB on another for the identical guarantee — segment size varies ~8x between releases. Denominating in bytes fixes that.
+Two log lines tell you it is memory rather than your provider:
 
-### If you are memory-constrained
-
-Lower `usenet.prefetch-window` to a fixed segment count (it overrides the byte floor), or lower `usenet.max-concurrent-buffered-streams`, or raise the container's heap limit (`DOTNET_GCHeapHardLimit`) if the host has room. Prefer raising the heap limit if you can: the streaming working set is now **bounded by these settings rather than by file size**, so headroom actually covers it.
-
-### Do not set the window too low
-
-This is the one that bites. Too *large* a window costs memory you can tune away. Too *small* a window **breaks playback outright** — the reader starves, playback dies on NNTP body-read timeouts, and the retries trip your providers' circuit breakers. During development, 64 MB in flight starved a second concurrent video; 215–256 MB ran multiple concurrent streams clean. Because a manual `usenet.prefetch-window` is a fixed segment count, its memory cost depends on the file's segment size — 90 segments is 64 MB on a 700 KB-segment file but 360 MB on a 4 MB-segment one. If you lower it and streams start failing with `Invalid NNTP Response` and breaker trips, raise it back before suspecting your provider.
-
-The floor has to be this generous mainly because connection-acquire contention dominates fetch latency ([#18](https://github.com/dgherman/nzbdav2/issues/18)); if that improves, it can come down.
-
-### Checking what you are actually running
-
-Each stream logs its effective window:
-
-```
-[BufferedStream] PREFETCH WINDOW: 64 segments (2.1x of 30 connections, source=byte-floor, avgSeg=4192KB, bufferSegmentCount=60), holds~256MB data (bound=window, effective=1338 of 1338 segments), Job=...
+```bash
+docker logs nzbdav 2>&1 | grep -E "OOM HEAP STATE|RUNAWAY SEGMENT"
 ```
 
-`source` is `configured` (a non-zero `usenet.prefetch-window`), `byte-floor` (the 256 MB data floor, converted via `avgSeg`), or `computed` (`stream buffer + connections`, when that already exceeds the floor).
+`OOM HEAP STATE` reports how full the heap was when it failed. `RUNAWAY SEGMENT READ` means a single
+download would not stop growing, which is a different problem — please report it.
+
+For reproducing streaming problems locally without touching your real setup, see
+[docs/repro-harness.md](docs/repro-harness.md).
 
 ## Upstream Sync
 
 nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and periodically cherry-picks relevant upstream changes manually. Each sync documents which changes were adopted, which were skipped, and the rationale for each decision. Sync history is in [`docs/upstream-sync-*.md`](./docs/). The most recent file contains the last reviewed upstream commit and a table of all items evaluated.
 
 ## Changelog
+
+## v0.12.0 (2026-07-28)
+Two fixes from user feedback on v0.11.x: sample files reaching Sonarr, and multi-file NZB upload doing nothing. Plus a churn test harness for the reported seek instability.
+
+*   **Feature**: Sample videos are now discarded during queue post-processing, so no webdav item, symlink or `*.strm` file is ever created for them. Setting: `api.sample-filter-enabled` (Settings → SABnzbd), **default on**. The extension blacklist could not express this — a sample carries the same extension as the feature — and in strm mode it matters more than it looks: every strm is ~175 bytes, so Sonarr's own size-based sample detection cannot tell the sample apart from the episode and imports it.
+*   **Logic**: The sample rule is name **and** size: the name must contain `sample` as a whole word, and the file must be smaller than 20% of the largest video in the same nzb. The ratio is what makes defaulting to on safe — a real release such as *Free Samples (2012)* is its own largest video, so it compares against itself and is kept, as is a release whose only video happens to be named `sample`.
+*   **Feature**: New `api.download-filename-blacklist` setting (default empty) takes comma-separated filename globs (`*` and `?`), e.g. `*trailer*`, for anything the sample rule above does not cover.
+*   **Logic**: The pre-existing opt-in `usenet.hide-samples` (which hides at the webdav listing only, and does not stop strm creation) now uses the same whole-word matcher instead of the literal `.sample.`, so `Sample.mkv` and `sample-Show.mkv` are covered by it too.
+*   **Fix**: Dropping several `*.nzb` files onto the queue page uploaded only the first. The dropzone packed every file into the form input, but the action read `formData.get("nzbFile")` — singular — and the rest were discarded silently, with no error shown because a fetcher's result never reaches the route's `actionData`. All dropped files are now uploaded, one file's failure no longer discards the others, and errors render next to the dropzone.
+*   **UI**: The NZB drop target is now shown whenever the queue is non-empty. Previously it existed only inside the empty-queue placeholder, so after the first item there was nowhere left to drop and the API was the only way to add anything.
+*   **Fix**: Streaming memory is now sized from the process's own heap ceiling instead of fixed constants. The image ships `DOTNET_GCHeapHardLimit=0x20000000` — 512 MB of managed heap, sized for a 1 GB VPS and applied regardless of host RAM — while the streaming path defaulted to a 256 MB prefetch floor per stream, 8 concurrent streams each holding a 32 MB ring, and 512 MB of pool retention, all tuned against a NAS running a 4 GiB limit. One stream was enough to fill the heap, and the runtime aborted the process with a bare `Out of memory.`, killing the backend and taking the container down with it. Reproduced in `docker/repro`: 2 of 10 reads before death; after the fix, 36 of 36 with seeks on the same 512 MB heap.
+*   **Feature**: New `MemoryBudget` derives the concurrent-stream count, the per-stream prefetch budget and the segment-pool retention cap from the detected heap limit, so a 512 MB container and a 16 GB NAS both get defaults that fit with no configuration. Explicit settings (`usenet.prefetch-window`, `usenet.max-concurrent-buffered-streams`, `NZBDAV_SEGMENT_POOL_MAX_IDLE_MB`) still win verbatim. The budget is logged once at startup, so what the box affords is readable from the log rather than inferred from constants.
+*   **Logic**: The per-stream prefetch budget counts each in-flight segment twice, because it is resident twice — once in the pooled destination buffer and once in the copy `System.IO.Pipelines` holds inside `BufferToEndStream`. A window logged as "holds~255MB data" drove a 490 MB heap; the old accounting understated the true cost by about half.
+*   **Logging**: An OOM caught in the fetch path now logs the exception (so the failing allocation site is visible) and a `OOM HEAP STATE` line reporting heap, committed, fragmentation and segment-pool idle retention at that moment. An OOM whose heap is nowhere near its ceiling is a different bug from one that has genuinely filled it, and without this the two are indistinguishable in a log. Used to diagnose the crash below.
+*   **Logging**: A segment read whose buffer passes 32 MB now logs `RUNAWAY SEGMENT READ` before doubling again. No article is that large, so past that point the read is not terminating and each doubling is a step towards an allocation no heap limit can satisfy.
+*   **Tooling**: Added `docker/repro/` — a docker compose harness that stands up a full deployment locally: a synthetic Usenet provider (the image run as `--mock-usenet-server`, serving generated yEnc articles with configurable latency, jitter and stall rate), NzbDav constrained to the reported hardware, API-driven provisioning into strm mode, an optional pinned Jellyfin, and a range-request load generator with `seek` / `rapid-open` / `sequential` modes. No credentials or real nzb needed. See [docs/repro-harness.md](docs/repro-harness.md). It exists because the strm deployment serves media straight off the backend port — no rclone, no WebDAV, no frontend — which is not the path the v0.10–v0.11 streaming work was validated on.
+*   **Tooling**: The mock provider takes `--with-sample`, generating a release with a feature plus a `*.sample.mkv` at ~2% of its size, so sample filtering can be checked end to end instead of only in unit tests. `docs/repro-harness.md` has a by-hand test guide for all of it — the crash before and after, playback and seeking in VLC, sample filtering, and multi-file upload — none of which needs Jellyfin.
+*   **Tooling**: New `--mock-usenet-server` mode runs the existing `MockNntpServer` as a standalone process so it can be a container of its own. The in-process harnesses host it inside the client, which cannot model a deployment: no real socket, no container boundary, and no way for a separately-configured NzbDav to treat it as a provider.
+*   **Tooling**: Added `StreamChurnTests`, a repro harness for the reported "seek a few times and it dies" workload. `BufferedSegmentStream` is not seekable, so every seek abandons a stream mid-flight and builds a new one; the tests assert that repeated abandonment returns every concurrent-stream slot and streaming permit, that shared-stream entries and their inner streams are reclaimed, and that a burst of seeks faster than teardown still recovers fully. All three pass — no leak on this path, so the reported instability is not slot or permit exhaustion.
 
 ## v0.11.12 (2026-07-20)
 Closes the last untested acceptance criterion from the 2026-07-16 streaming-stability spec. No behaviour change.

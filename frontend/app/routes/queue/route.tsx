@@ -291,6 +291,7 @@ export default function Queue(props: Route.ComponentProps) {
             {/* queue */}
             {(queueSlots.length > 0 || queueSearchQuery || queueCurrentPage > 1) ?
                 <div className={styles.section}>
+                    <EmptyQueue compact />
                     <QueueTable
                         queueSlots={queueSlots}
                         totalCount={totalQueueCount}
@@ -341,11 +342,25 @@ export async function action({ request }: Route.ActionArgs) {
 
     try {
         const formData = await request.formData();
-        const nzbFile = formData.get("nzbFile");
-        if (nzbFile instanceof File) {
-            await backendClient.addNzb(nzbFile);
-        } else {
+        const nzbFiles = formData.getAll("nzbFile")
+            .filter((x): x is File => x instanceof File && x.size > 0);
+        if (nzbFiles.length === 0) {
             return { error: "Error uploading nzb." }
+        }
+
+        // upload each dropped file; a failure on one must not
+        // discard the rest, so collect errors and report at the end.
+        const errors: string[] = [];
+        for (const nzbFile of nzbFiles) {
+            try {
+                await backendClient.addNzb(nzbFile);
+            } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                errors.push(`${nzbFile.name}: ${message}`);
+            }
+        }
+        if (errors.length > 0) {
+            return { error: `Failed to upload ${errors.length} of ${nzbFiles.length} nzb file(s). ${errors.join(" | ")}` };
         }
     } catch (error) {
         if (error instanceof Error) {

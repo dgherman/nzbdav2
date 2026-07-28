@@ -8,6 +8,28 @@
     justify-content: center;
 }
 
+.upload-error {
+    margin-top: 8px;
+    margin-bottom: 10px;
+    color: #dc3545;
+    font-size: 0.9em;
+    word-break: break-word;
+}
+
+.compact {
+    min-height: unset;
+    flex-direction: row;
+    gap: 10px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+
+.compact .upload-icon,
+.compact .drop-icon {
+    width: 24px;
+    height: 24px;
+}
+
 @media not (pointer: coarse), (min-width: 900px)  {
     .container:hover {
         background-color: #ffffff08;

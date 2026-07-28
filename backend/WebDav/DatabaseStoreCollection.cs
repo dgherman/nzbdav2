@@ -8,6 +8,7 @@ using NzbWebDAV.Database.Models;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Queue;
 using NzbWebDAV.Services;
+using NzbWebDAV.Utils;
 using NzbWebDAV.WebDav.Base;
 using NzbWebDAV.WebDav.Requests;
 using NzbWebDAV.Websocket;
@@ -31,7 +32,7 @@ public class DatabaseStoreCollection(
 
     protected override async Task<IStoreItem?> GetItemAsync(GetItemRequest request)
     {
-        if (configManager.HideSamples() && request.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+        if (configManager.HideSamples() && FileFilterUtil.LooksLikeSampleName(request.Name))
             return null;
 
         var child = await dbClient.GetDirectoryChildAsync(davDirectory.Id, request.Name, request.CancellationToken).ConfigureAwait(false);
@@ -46,7 +47,7 @@ public class DatabaseStoreCollection(
         if (configManager.HideSamples())
         {
             items = items
-                .Where(x => !x.Name.Contains(".sample.", StringComparison.OrdinalIgnoreCase))
+                .Where(x => !FileFilterUtil.LooksLikeSampleName(x.Name))
                 .ToList();
         }
 
