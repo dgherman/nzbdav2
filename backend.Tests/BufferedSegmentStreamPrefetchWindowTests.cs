@@ -137,8 +137,12 @@ public class BufferedSegmentStreamPrefetchWindowTests
     public void ByteFloor_ConvertsTheBudgetUsingAverageSegmentSize(long avgSegmentSize, int expectedWindow)
     {
         // computedWindow small so the floor is what binds; no explicit override.
+        // Budget passed explicitly: the production budget is derived from the heap ceiling of the
+        // box, so leaving it implicit would make this assertion depend on the test host's RAM.
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 12, configuredWindow: 0, avgSegmentSize: avgSegmentSize);
+            computedWindow: 12, configuredWindow: 0, avgSegmentSize: avgSegmentSize,
+            concurrentConnections: 8,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
         Assert.Equal("byte-floor", source);
         Assert.Equal(expectedWindow, window);
@@ -150,23 +154,44 @@ public class BufferedSegmentStreamPrefetchWindowTests
     }
 
     [Fact]
-    public void ByteFloor_NeverStarvesParallelism_WhenComputedWindowExceedsIt()
+    public void ParallelismFloor_KeepsEveryWorkerFed_WhenTheBudgetBuysFewerSegments()
     {
-        // A large-segment file whose byte budget buys only a few segments must still keep enough in
-        // flight to feed every worker: the floor never drops the window below the computed value.
-        // 32 MB segments => 256 MB / 32 MB = 8, but the computed window is 40.
+        // A large-segment file whose byte budget buys fewer segments than there are workers must
+        // still keep one in flight per worker, or workers idle and the reader starves (PR #21).
+        // 32 MB segments => 256 MB / 32 MB = 8 segments, against 40 connections.
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 40, configuredWindow: 0, avgSegmentSize: 32L * 1024 * 1024);
+            computedWindow: 100, configuredWindow: 0, avgSegmentSize: 32L * 1024 * 1024,
+            concurrentConnections: 40,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
-        Assert.Equal("computed", source);
+        Assert.Equal("parallelism-floor", source);
         Assert.Equal(40, window);
+    }
+
+    [Fact]
+    public void Budget_CapsTheWindow_WhenTheComputedWindowWouldExceedIt()
+    {
+        // Regression for the production measurement of 2026-07-28. `bufferSegmentCount + connections`
+        // is a segment count that ignores segment size: on a 4 MB-segment release it produced 90
+        // segments = 360 MB in flight against a 96 MB budget, and four such streams put the process
+        // at 3.2-3.9 GB of a 4 GB heap. The budget must bound this, down to the parallelism floor.
+        var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
+            computedWindow: 90, configuredWindow: 0, avgSegmentSize: 4L * 1024 * 1024,
+            concurrentConnections: 30, prefetchBudgetBytes: 96L * 1024 * 1024);
+
+        Assert.Equal("parallelism-floor", source);
+        Assert.Equal(30, window);                       // not 90
+        Assert.True(window * 4L * 1024 * 1024 <= 128L * 1024 * 1024,
+            "a 4 MB-segment stream must not hold 360 MB against a 96 MB budget");
     }
 
     [Fact]
     public void ExplicitOverride_WinsVerbatim_OverTheByteFloor()
     {
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 12, configuredWindow: 150, avgSegmentSize: 4_194_304);
+            computedWindow: 12, configuredWindow: 150, avgSegmentSize: 4_194_304,
+            concurrentConnections: 8,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
         Assert.Equal("configured", source);
         Assert.Equal(150, window);
@@ -178,7 +203,9 @@ public class BufferedSegmentStreamPrefetchWindowTests
         // No size table or an empty stream: the byte budget can't be converted, so the segment-count
         // fallback applies rather than a division by zero.
         var (window, source) = BufferedSegmentStream.ComputePrefetchWindow(
-            computedWindow: 12, configuredWindow: 0, avgSegmentSize: 0);
+            computedWindow: 12, configuredWindow: 0, avgSegmentSize: 0,
+            concurrentConnections: 8,
+            prefetchBudgetBytes: BufferedSegmentStream.MinPrefetchWindowBytes);
 
         Assert.Equal("byte-floor", source);
         Assert.Equal(BufferedSegmentStream.MinPrefetchWindowSegments, window);

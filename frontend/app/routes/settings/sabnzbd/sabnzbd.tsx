@@ -175,6 +175,35 @@ export function SabnzbdSettings({ config, setNewConfig }: SabnzbdSettingsProps) 
             </Form.Group>
             <hr />
             <Form.Group>
+                <Form.Label htmlFor="ignored-filenames-input">Ignored Filenames</Form.Label>
+                <Form.Control
+                    className={styles.input}
+                    type="text"
+                    id="ignored-filenames-input"
+                    aria-describedby="ignored-filenames-help"
+                    placeholder="*trailer*, *.proof.*"
+                    value={config["api.download-filename-blacklist"]}
+                    onChange={e => setNewConfig({ ...config, "api.download-filename-blacklist": e.target.value })} />
+                <Form.Text id="ignored-filenames-help" muted>
+                    Comma-separated filename patterns (`*` and `?` wildcards). Matching files will be ignored and not mounted onto the webdav when processing an nzb.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
+                <Form.Check
+                    className={styles.input}
+                    type="checkbox"
+                    id="sample-filter-checkbox"
+                    aria-describedby="sample-filter-help"
+                    label={`Filter out sample files`}
+                    checked={config["api.sample-filter-enabled"] !== "false"}
+                    onChange={e => setNewConfig({ ...config, "api.sample-filter-enabled": "" + e.target.checked })} />
+                <Form.Text id="sample-filter-help" muted>
+                    Discards video files named `sample` that are smaller than 20% of the largest video in the same nzb, so no webdav entry, symlink or *.strm file is created for them. The size check keeps a real release whose title contains the word from being filtered.
+                </Form.Text>
+            </Form.Group>
+            <hr />
+            <Form.Group>
                 <Form.Label htmlFor="duplicate-nzb-input">Behavior for Duplicate NZBs</Form.Label>
                 <Form.Select
                     className={styles.input}
@@ -261,6 +290,8 @@ export function isSabnzbdSettingsUpdated(config: Record<string, string>, newConf
         || config["api.ignore-history-limit"] !== newConfig["api.ignore-history-limit"]
         || config["api.duplicate-nzb-behavior"] !== newConfig["api.duplicate-nzb-behavior"]
         || config["api.download-extension-blacklist"] !== newConfig["api.download-extension-blacklist"]
+        || config["api.download-filename-blacklist"] !== newConfig["api.download-filename-blacklist"]
+        || config["api.sample-filter-enabled"] !== newConfig["api.sample-filter-enabled"]
         || config["api.import-strategy"] !== newConfig["api.import-strategy"]
         || config["api.completed-downloads-dir"] !== newConfig["api.completed-downloads-dir"]
         || config["general.base-url"] !== newConfig["general.base-url"]

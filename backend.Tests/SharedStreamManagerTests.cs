@@ -6,6 +6,7 @@ using Xunit;
 
 namespace NzbWebDAV.Tests;
 
+[Collection(BufferedStreamCollection.Name)]
 public class SharedStreamManagerTests
 {
     private const int RingBufferSize = 64 * 1024;

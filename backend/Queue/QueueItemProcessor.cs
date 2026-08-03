@@ -331,7 +331,7 @@ public class QueueItemProcessor(
                 Log.Debug("[QueueItemProcessor] Step 4c: Running post-processors for {JobName}...", queueItem.JobName);
                 // post-processing
                 new RenameDuplicatesPostProcessor(dbClient).RenameDuplicates();
-                new BlacklistedExtensionPostProcessor(configManager, dbClient).RemoveBlacklistedExtensions();
+                new BlacklistedExtensionPostProcessor(configManager, dbClient).RemoveFilteredFiles();
 
                 // validate media files found (video or audio)
                 if (configManager.IsEnsureImportableMediaEnabled())

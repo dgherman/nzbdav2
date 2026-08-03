@@ -393,14 +393,26 @@ If experiencing slow download speeds (< 10 MB/s), check for these common issues:
 - **Problem provider**: < 70% success rate, < 0.5 MB/s, or high timeout frequency
 
 **4. Configuration Tuning**
-- **Connections per stream** (Settings > WebDAV):
-  - Default: 25 concurrent connections
+
+Memory sizing is derived, not fixed — see `backend/Utils/MemoryBudget.cs` and the "Memory and
+Streaming Settings" section of `README.md`. The concurrent-stream count, the per-stream prefetch
+window and the segment-pool retention cap are all computed from the process's heap ceiling
+(`DOTNET_GCHeapHardLimit`, which the image ships at 512 MB). Do not quote fixed defaults for those
+three without checking what `MemoryBudget` produces for the heap in question; the startup log line
+`[MemoryBudget] Heap limit ...` reports the values actually in force.
+
+- **Connections per stream** (`usenet.connections-per-stream`, Settings > Usenet):
+  - Default: 20 (env `CONNECTIONS_PER_STREAM`)
   - Higher = faster but more memory usage
   - Recommended range: 20-40 connections
-- **Stream buffer size** (Settings > WebDAV):
-  - Default: 50 segments (actual: Math.max(50, connections * 5))
-  - Each segment ~300-500 KB
+- **Stream buffer size** (`usenet.stream-buffer-size`, Settings > Usenet):
+  - Default: 20 segments (env `STREAM_BUFFER_SIZE`)
+  - Each segment ~300-700 KB
   - Increase for smoother playback on high-latency connections
+- **Prefetch window** (`usenet.prefetch-window`): 0 = auto (budget-derived). A non-zero value is a
+  segment count and wins verbatim over the budget.
+- **Max concurrent buffered streams** (`usenet.max-concurrent-buffered-streams`): unset = derived
+  from the heap ceiling (2 slots at 512 MB, 8 at 4 GB).
 - **Provider max connections**:
   - Total across all providers should be 150-250 for optimal performance
   - Distribute based on provider reliability (more to faster providers)

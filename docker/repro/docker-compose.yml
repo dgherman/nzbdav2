@@ -1,0 +1,182 @@
+name: nzbdav-repro
+
+# Reproduction harness. See docs/repro-harness.md.
+#
+#   docker compose --profile mock --profile churn up          # self-contained, no credentials
+#   docker compose --profile mock --profile jellyfin up       # + a real Jellyfin to click around in
+#   docker compose --profile real --profile jellyfin up       # against your own provider (.env)
+#
+# The default deployment modelled here is the one reported against v0.11.x: strm files served
+# straight off the backend port, no rclone and no reverse proxy, so media traffic never touches the
+# frontend at all. That is a different code path from the WebDAV/rclone setup most of the streaming
+# work was validated on — which is the reason this harness exists.
+
+x-nzbdav-common: &nzbdav-common
+  image: ${NZBDAV_IMAGE:-local/nzbdav:3}
+  environment:
+    CONFIG_PATH: /config
+    # Fixed, so the provisioner and any curl you run by hand can authenticate. Do not copy this
+    # value into a real deployment: there the key is generated per install.
+    FRONTEND_BACKEND_API_KEY: ${API_KEY:-repro-api-key}
+    LOG_LEVEL: ${LOG_LEVEL:-Information}
+    DISABLE_FRONTEND_AUTH: "true"
+    DISABLE_WEBDAV_AUTH: "true"
+    PUID: ${PUID:-1000}
+    PGID: ${PGID:-1000}
+    # The image ships DOTNET_GCHeapHardLimit=0x20000000 (512 MB) and GCServer=0, sized for a 1 GB
+    # VPS. A single stream's prefetch floor is 256 MB, so two overlapping streams reach that limit
+    # and the runtime aborts with a bare "Out of memory." — which takes the backend, and therefore
+    # the container, down. Override here to A/B it: 0x20000000=512MB, 0x80000000=2GB, 0x100000000=4GB.
+    DOTNET_GCHeapHardLimit: ${GC_HEAP_LIMIT:-0x20000000}
+    DOTNET_GCServer: ${GC_SERVER:-0}
+    # POST /api/gc-diagnostics reports generation sizes either side of a forced compacting gen2,
+    # plus the GC's own view of its ceiling (TotalAvailableMemoryBytes / HighMemoryLoadThreshold).
+    NZBDAV_GC_DIAG: ${NZBDAV_GC_DIAG:-0}
+    NZBDAV_POOL_DIAG: ${NZBDAV_POOL_DIAG:-0}
+    NZBDAV_SEGMENT_POOL_MAX_IDLE_MB: ${POOL_MAX_IDLE_MB:-}
+
+services:
+  # ── Volume permissions ───────────────────────────────────────────────────────
+  # The backend drops to PUID:PGID, and the entrypoint only chowns /config. A named volume starts
+  # out root-owned, so without this the strm post-processor fails the whole queue item with
+  # "Access to the path '/strm/<category>' is denied". A real install mounts a host directory the
+  # user already owns; this is the harness standing in for that.
+  init-permissions:
+    image: busybox:1.37
+    command: ["sh", "-c", "chown -R ${PUID:-1000}:${PGID:-1000} /strm && echo 'strm volume ready'"]
+    volumes:
+      - strm:/strm
+    user: root
+
+  # ── Synthetic Usenet provider ────────────────────────────────────────────────
+  # Serves generated yEnc articles with configurable latency, jitter and stall rate, and writes the
+  # matching mock.nzb where the provisioner picks it up. No credentials, no real traffic, and the
+  # segment geometry is known — so a bad read is unambiguous rather than "maybe the provider".
+  mock-usenet:
+    <<: *nzbdav-common
+    profiles: [mock]
+    entrypoint: ["/app/backend/NzbWebDAV"]
+    working_dir: /app/backend
+    command:
+      - --mock-usenet-server
+      - --port=1119
+      - --size=${MOCK_SIZE_MB:-4096}
+      - --segment-size=${MOCK_SEGMENT_KB:-700}
+      - --latency=${MOCK_LATENCY_MS:-40}
+      - --jitter=${MOCK_JITTER_MS:-10}
+      - --stall=${MOCK_STALL_RATE:-0.0}
+      - --nzb-out=/mock/mock.nzb
+      # MOCK_WITH_SAMPLE=--with-sample adds a *.sample.mkv at ~2% of the feature, so the sample
+      # filter can be checked end to end rather than only in unit tests.
+      - ${MOCK_WITH_SAMPLE:---no-sample}
+    volumes:
+      - mock:/mock
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /mock/ready"]
+      interval: 2s
+      timeout: 2s
+      retries: 60
+
+  # ── The system under test ────────────────────────────────────────────────────
+  nzbdav:
+    <<: *nzbdav-common
+    depends_on:
+      init-permissions:
+        condition: service_completed_successfully
+    ports:
+      - "${WEB_PORT:-3000}:3000"   # UI
+      - "${API_PORT:-8080}:8080"   # backend: strm playback and the API both live here
+    volumes:
+      - config:/config
+      - strm:/strm                 # completed-downloads dir; Jellyfin mounts this read-only
+      - mock:/mock:ro
+    # Reported hardware: Intel N100 (4 cores), 16 GB total shared with everything else on the box.
+    # Constrain it — an unconstrained container on a dev machine hides exactly the pressure that
+    # makes prefetch windows and buffer retention matter.
+    deploy:
+      resources:
+        limits:
+          cpus: "${NZBDAV_CPUS:-4}"
+          memory: ${NZBDAV_MEMORY:-6g}
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 30s
+
+  # ── One-shot configuration + content load ────────────────────────────────────
+  # Everything goes through the HTTP API. The database is never written directly, so this stays
+  # honest about what a real install can actually be put into.
+  provision:
+    image: curlimages/curl:8.11.1
+    profiles: [mock, real]
+    depends_on:
+      nzbdav:
+        condition: service_healthy
+    environment:
+      API_KEY: ${API_KEY:-repro-api-key}
+      # Baked into every generated *.strm file, so it must be reachable by whatever plays them.
+      # Default works for Jellyfin/churn inside this network; for VLC on your desktop set it to
+      # http://<your-lan-ip>:8080 BEFORE provisioning — existing strm files are not rewritten.
+      BASE_URL: ${BASE_URL:-http://nzbdav:8080}
+      PROVIDER_MODE: ${PROVIDER_MODE:-mock}
+      USENET_HOST: ${USENET_HOST:-mock-usenet}
+      USENET_PORT: ${USENET_PORT:-1119}
+      USENET_SSL: ${USENET_SSL:-false}
+      USENET_USER: ${USENET_USER:-mock}
+      USENET_PASS: ${USENET_PASS:-mock}
+      USENET_CONNECTIONS: ${USENET_CONNECTIONS:-25}
+      CONNECTIONS_PER_STREAM: ${CONNECTIONS_PER_STREAM:-25}
+      # 0 = auto, which applies the 256 MB byte floor per stream. Set a segment count to override it.
+      PREFETCH_WINDOW: ${PREFETCH_WINDOW:-0}
+    volumes:
+      - mock:/mock:ro
+      - ./provision.sh:/provision.sh:ro
+    entrypoint: ["sh", "/provision.sh"]
+
+  # ── Load generators ──────────────────────────────────────────────────────────
+  # Range-request churn against the strm URL: the shape a player produces, without a player.
+  churn:
+    image: curlimages/curl:8.11.1
+    profiles: [churn]
+    # Only nzbdav is required: the script waits for a *.strm to appear by itself, so this profile
+    # can also be pointed at a stack whose content was loaded by hand rather than by `provision`.
+    depends_on:
+      nzbdav:
+        condition: service_healthy
+    environment:
+      API_KEY: ${API_KEY:-repro-api-key}
+      MODE: ${CHURN_MODE:-seek}          # seek | rapid-open | sequential
+      ITERATIONS: ${CHURN_ITERATIONS:-25}
+      READ_BYTES: ${CHURN_READ_BYTES:-2097152}
+      GAP_SECONDS: ${CHURN_GAP_SECONDS:-1}
+    volumes:
+      - strm:/strm:ro
+      - ./seek-churn.sh:/seek-churn.sh:ro
+    entrypoint: ["sh", "/seek-churn.sh"]
+
+  # ── A real player ────────────────────────────────────────────────────────────
+  # Pinned to the reported version. Add a library pointing at /media after first start; the strm
+  # files appear there as the queue completes.
+  jellyfin:
+    image: jellyfin/jellyfin:${JELLYFIN_VERSION:-10.11.11}
+    profiles: [jellyfin]
+    ports:
+      - "${JELLYFIN_PORT:-8096}:8096"
+    volumes:
+      - jellyfin-config:/config
+      - jellyfin-cache:/cache
+      - strm:/media:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "${JELLYFIN_CPUS:-4}"
+          memory: ${JELLYFIN_MEMORY:-4g}
+
+volumes:
+  config:
+  strm:
+  mock:
+  jellyfin-config:
+  jellyfin-cache:

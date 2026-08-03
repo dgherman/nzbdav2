@@ -217,10 +217,13 @@ public class ConfigManager
         // Default 8 (was 2): a single multipart/RAR playback needs a buffered-stream slot per active
         // part, plus the player's parallel head/tail probes — 2 caused "No semaphore slot available"
         // and stalls. Each slot holds a ~32 MB ring buffer (see shared-stream buffer size).
-        return int.Parse(
-            StringUtil.EmptyToNull(GetConfigValue("usenet.max-concurrent-buffered-streams"))
-            ?? "8"
-        );
+        // Unset: derive from the heap ceiling. Each slot costs a 32 MB ring plus a full prefetch
+        // window, so 8 slots need a heap the shipped image does not provide (512 MB); taking 8 there
+        // exhausts the heap on rings alone. An explicit value still wins.
+        var configured = StringUtil.EmptyToNull(GetConfigValue("usenet.max-concurrent-buffered-streams"));
+        return configured != null
+            ? int.Parse(configured)
+            : MemoryBudget.MaxConcurrentStreams(MemoryBudget.HeapLimitBytes);
     }
 
     public int GetSharedStreamGracePeriod()
@@ -486,6 +489,23 @@ public class ConfigManager
             .Where(x => !string.IsNullOrWhiteSpace(x))
             .Select(x => x.ToLower())
             .ToHashSet();
+    }
+
+    public HashSet<string> GetBlacklistedFilenamePatterns()
+    {
+        var defaultValue = "";
+        return (GetConfigValue("api.download-filename-blacklist") ?? defaultValue)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries)
+            .Select(x => x.Trim())
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .ToHashSet();
+    }
+
+    public bool IsSampleFilterEnabled()
+    {
+        var defaultValue = true;
+        var configValue = StringUtil.EmptyToNull(GetConfigValue("api.sample-filter-enabled"));
+        return (configValue != null ? bool.Parse(configValue) : defaultValue);
     }
 
     public string GetImportStrategy()

@@ -74,6 +74,9 @@ ENV LOG_LEVEL=warning
 #   1GB VPS:  DOTNET_GCServer=0  DOTNET_GCHeapHardLimit=0x20000000  (512MB)
 #   2GB VPS:  DOTNET_GCServer=0  DOTNET_GCHeapHardLimit=0x40000000  (1GB)
 #   4GB+ NAS: DOTNET_GCServer=1  DOTNET_GCHeapHardLimit=0x80000000  (2GB)
+# NOTE: NzbDav sizes its streaming memory from whatever limit is set here (see MemoryBudget) —
+# concurrent streams, prefetch window and buffer retention all scale with it, and the budget is
+# logged at startup. Raising this on a larger host raises all three together.
 ENV DOTNET_GCServer=0
 ENV DOTNET_GCHeapHardLimit=0x20000000
 

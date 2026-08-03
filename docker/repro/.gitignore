@@ -1,0 +1,3 @@
+# Local overrides for the repro harness. Holds real provider credentials when
+# PROVIDER_MODE=real, so it must never be committed. Copy .env.example instead.
+.env
