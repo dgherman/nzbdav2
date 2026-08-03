@@ -236,7 +236,7 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
-## v0.12.0 (2026-07-28)
+## v0.12.0 (2026-08-03)
 Two fixes from user feedback on v0.11.x: sample files reaching Sonarr, and multi-file NZB upload doing nothing. Plus a churn test harness for the reported seek instability.
 
 *   **Feature**: Sample videos are now discarded during queue post-processing, so no webdav item, symlink or `*.strm` file is ever created for them. Setting: `api.sample-filter-enabled` (Settings → SABnzbd), **default on**. The extension blacklist could not express this — a sample carries the same extension as the feature — and in strm mode it matters more than it looks: every strm is ~175 bytes, so Sonarr's own size-based sample detection cannot tell the sample apart from the episode and imports it.
