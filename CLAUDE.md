@@ -6,6 +6,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 NzbDav is a WebDAV server that mounts and streams NZB documents as a virtual file system without downloading. It integrates with Sonarr/Radarr via a SABnzbd-compatible API and enables streaming media directly from Usenet providers through Plex/Jellyfin.
 
+## Related Local Checkouts — check the role before citing "upstream"
+
+This repo is one of four nzbdav checkouts. Directory basenames encode the role: bare name
+= ours, `-UPSTREAM` = canonical project, `-FORK-<maintainer>` = someone else's fork.
+
+| Path (`~/Documents/projects/`) | Role | GitHub | Deployed as |
+|---|---|---|---|
+| `nzbdav2` | **this repo, ours** | `dgherman/nzbdav2` | `ghcr.io/dgherman/nzbdav2` (NAS `nzbdav2`) |
+| `nzbdav-UPSTREAM` | canonical upstream | `nzbdav-dev/nzbdav` | `ghcr.io/nzbdav-dev/nzbdav` (NAS `nzbdav`) |
+| `nzbdav-FORK-hoivikaj` | third-party fork, not deployed | `nzbdav/nzbdav` | — |
+| `nzbdav2-FORK-fizzwhirl` | downstream fork of ours, not deployed | `FizzWhirl/nzbdav2` | — |
+
+Our remotes: `origin` (ours), `upstream` (nzbdav-dev), `fork-hoivikaj`, `fork-fizzwhirl`.
+Push is disabled on everything except `origin`.
+
+**`nzbdav-FORK-hoivikaj` is not a newer upstream**, however much it looks like one: 728
+commits ahead of upstream / 0 behind, versioned 0.8.1 against upstream's 0.6.4, README
+advertising a drop-in replacement, while upstream itself has been frozen since 2026-05-27.
+`LazyRarProcessor`, `LazyRarResolver`, a blob store in place of EF rows,
+`DavItem.FileBlobId` and the `NzbDav.SharpCompress` package exist **only** there. Adopting
+from it is a legitimate choice, but it is a third-party fork sync — never "upstream parity".
+
 ## Architecture
 
 ### Dual-Service Architecture
@@ -195,7 +217,7 @@ Which part to bump:
 - **MINOR** — a notable feature batch, whether fork-original (e.g. `0.7.0` hybrid connection pool, `0.8.0` multipart streaming) or an upstream/downstream sync (e.g. `0.9.0`, `0.11.0`). Reset PATCH to 0.
 - **MAJOR** — not currently used; stays `0`.
 
-Sync history lives in `docs/upstream-sync-YYYY-MM-DD.md`. Write one whenever you pull changes from [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) or a downstream fork, recording what was adopted, what was skipped, and why. (Note: MINOR does **not** track the upstream version number — `0.6.22` was an upstream sync with no MINOR bump, and `0.7.0`/`0.8.0` were MINOR bumps with no sync at all.)
+Sync history lives in `docs/upstream-sync-YYYY-MM-DD-<source>.md`, where `<source>` is **always** present and names the source repo: `nzbdav-dev` (canonical upstream), `fizzwhirl` (downstream fork of ours), `hoivikaj` (the third-party `nzbdav/nzbdav` fork). Write one whenever you pull changes from any of them, recording what was adopted, what was skipped, and why. Every log's header must state the source repo URL **and its role**. Logs written before 2026-08-05 omit the suffix; a bare `upstream-sync-YYYY-MM-DD.md` always means nzbdav-dev. (Note: MINOR does **not** track the upstream version number — `0.6.22` was an upstream sync with no MINOR bump, and `0.7.0`/`0.8.0` were MINOR bumps with no sync at all.)
 
 ### When to Add a Changelog Entry
 
@@ -235,7 +257,8 @@ When making changes in a session:
 - Do **not** hardcode a version in the workflow — it reads the `VERSION` file.
 - Do **not** ship a code change without bumping `VERSION`; nothing else will.
 - Do **not** let `VERSION`, the changelog heading, and the `Program.cs` BUILD string disagree.
-- Do **not** pull in upstream/downstream changes without a `docs/upstream-sync-YYYY-MM-DD.md` write-up.
+- Do **not** pull in upstream/downstream changes without a `docs/upstream-sync-YYYY-MM-DD-<source>.md` write-up.
+- Do **not** describe any behaviour, file, or commit as "upstream" without running `git remote -v` in the tree you read it from and confirming it says `nzbdav-dev/nzbdav`. `git log --all` in this repo shows commits from `fork-hoivikaj/main` and `fork-fizzwhirl/main` — they carry conventional prefixes and PR numbers past upstream's ceiling of #441, so they read exactly like upstream commits.
 
 ## Configuration
 
