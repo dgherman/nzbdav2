@@ -236,6 +236,13 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.1 (2026-08-04)
+A truncated video could be mounted and reported as a completed download. Traced from a Stremio playback failure: an episode was mounted at 156 MB instead of 3.7 GB, with nothing in the logs marking it as incomplete.
+
+*   **Fix**: RAR volumes are now grouped by archive magic rather than by deobfuscated filename. Posters routinely give every volume of one archive its own random NZB subject (`_08hH_xl1BZJZOoFgsw3zC0WNJUV8.part23.rar`, `-G5FSfxzoPmuWdRg3.part51.rar`, …); the previous base-name grouping read those as 71 separate one-volume archives, so 68 of them failed to parse and only the fragment that survived was mounted. Grouping by name is kept for `7z` and multipart-`mkv`, whose processors splice their whole list into one file and therefore need a group to be exactly one archive.
+*   **Fix**: The RAR aggregator now verifies that the volumes it has account for the whole file before mounting it. Every volume's header declares the full extracted size, so a set whose parts do not add up to it is incomplete; such an import now fails with the volume count and byte totals instead of silently publishing a short file. Sets whose headers declare no size at all cannot be checked and are logged at warning level.
+*   **Logging**: `[GetFileProcessors] Classified files:` now reports files *and* group count per type (`rar=71 files in 1 group(s)`). The old line reported only the group count, which is what made the regression hard to spot.
+
 ## v0.12.0 (2026-08-03)
 Two fixes from user feedback on v0.11.x: sample files reaching Sonarr, and multi-file NZB upload doing nothing. Plus a churn test harness for the reported seek instability.
 

@@ -171,12 +171,16 @@ public class RarProcessor(
                 }
             }
 
+            var uncompressedSize = x.GetUncompressedSize();
+
             results.Add(new StoredFileSegment()
             {
                 NzbFile = fileInfo.NzbFile,
                 PartSize = stream.Length,
                 ArchiveName = archiveName,
                 PartNumber = partNumber,
+                FileUncompressedSize = uncompressedSize,
+                IsUncompressedSizeUnknown = uncompressedSize is <= 0 or long.MaxValue,
                 PathWithinArchive = x.GetFileName(),
                 ByteRangeWithinPart = LongRange.FromStartAndSize(
                     x.GetDataStartPosition() + offset,
@@ -356,6 +360,20 @@ public class RarProcessor(
         public required LongRange ByteRangeWithinPart { get; init; }
         public required AesParams? AesParams { get; init; }
         public byte[]? ObfuscationKey { get; init; }
+
+        /// <summary>
+        /// Size of the whole extracted file as declared by this volume's file header — not the
+        /// slice this volume carries. Every volume of a set declares the same value, which is
+        /// what lets the aggregator tell a complete volume set from a partial one.
+        /// </summary>
+        public required long FileUncompressedSize { get; init; }
+
+        /// <summary>
+        /// True when the header set RAR5's "unpacked size unknown" flag, which SharpCompress
+        /// surfaces as <see cref="long.MaxValue"/>. <see cref="FileUncompressedSize"/> carries
+        /// no information in that case.
+        /// </summary>
+        public required bool IsUncompressedSizeUnknown { get; init; }
 
         /// <summary>Decoded per-segment sizes of the volume's segments (sum to PartSize), or null if unknown.</summary>
         public long[]? SegmentSizes { get; init; }

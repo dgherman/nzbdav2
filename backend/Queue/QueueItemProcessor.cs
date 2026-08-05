@@ -366,50 +366,34 @@ public class QueueItemProcessor(
         Log.Debug("[GetFileProcessors] Processing {FileInfoCount} file infos", fileInfos.Count);
         var maxConnections = configManager.GetMaxQueueConnections();
         
-        // Smart Grouping: Group by base name first to keep multi-part files together
-        var baseGroups = fileInfos
-            .GroupBy(x => FilenameUtil.GetMultipartBaseName(x.FileName))
+        // Group by type, and within a type by base name only where the name can be trusted.
+        // RAR is the exception: posters routinely give every volume of one archive its own
+        // random NZB subject, so base-name grouping splits an N-volume archive into N groups of
+        // one volume — the "Smart Grouping" regression that mounted a 156 MB stub of a 3.7 GB
+        // episode. RarProcessor parses each volume independently, so one group per job is safe.
+        // SevenZipProcessor and MultipartMkvProcessor instead splice their whole list into a
+        // single file, so for those a group must be exactly one archive and the name is the
+        // only identity available.
+        var finalGroups = fileInfos
+            .GroupBy(x => (Type: GetGroupType(x), Key: GetGroupKey(x)))
+            .Select(x => (x.Key.Type, Files: x.ToList()))
             .ToList();
 
-        Log.Information("[GetFileProcessors] Identified {GroupCount} base file groups", baseGroups.Count);
+        // Group count per type is the signal that caught the "Smart Grouping" regression: 71
+        // rar groups for one 71-volume archive. Keep it in the line.
+        Log.Information("[GetFileProcessors] Classified files: {GroupSummary}",
+            string.Join(", ", finalGroups
+                .GroupBy(g => g.Type)
+                .Select(g => $"{g.Key}={g.Sum(x => x.Files.Count)} files in {g.Count()} group(s)")));
 
-        // Determine group type for each base group
-        var finalGroups = new List<(string Type, List<GetFileInfosStep.FileInfo> Files)>();
-        foreach (var baseGroup in baseGroups)
-        {
-            var files = baseGroup.ToList();
-            var groupType = "other";
-
-            // If ANY file in the group has RAR magic or extension, the whole group is RAR
-            if (files.Any(x => x.IsRar || FilenameUtil.IsRarFile(x.FileName)))
-            {
-                groupType = "rar";
-            }
-            else if (files.Any(x => x.IsSevenZip || FilenameUtil.Is7zFile(x.FileName)))
-            {
-                groupType = "7z";
-            }
-            else if (files.Any(x => FilenameUtil.IsMultipartMkv(x.FileName)))
-            {
-                groupType = "multipart-mkv";
-            }
-
-            finalGroups.Add((groupType, files));
-        }
-
-        Log.Information("[GetFileProcessors] Classified groups: {GroupSummary}",
-            string.Join(", ", finalGroups.GroupBy(g => g.Type).Select(g => $"{g.Key}={g.Count()}")));
-
-        // Calculate adaptive concurrency per RAR to avoid connection pool exhaustion
-        var rarGroupCount = finalGroups.Count(g => g.Type == "rar");
-        var connectionsPerRar = rarGroupCount > 0
-            ? Math.Max(1, Math.Min(5, maxConnections / Math.Max(1, rarGroupCount / 3)))
-            : 1;
+        // One RarProcessor now covers the whole job, so nothing multiplies the per-part
+        // connection use and the cap can stay at its ceiling.
+        var connectionsPerRar = Math.Max(1, Math.Min(5, maxConnections));
 
         foreach (var group in finalGroups)
         {
-            Log.Debug("[GetFileProcessors] Processing group type '{GroupType}' with {FileCount} files. Base name: {BaseName}",
-                group.Type, group.Files.Count, FilenameUtil.GetMultipartBaseName(group.Files.First().FileName));
+            Log.Debug("[GetFileProcessors] Processing group type '{GroupType}' with {FileCount} files",
+                group.Type, group.Files.Count);
 
             if (group.Type == "7z")
             {
@@ -420,8 +404,7 @@ public class QueueItemProcessor(
             else if (group.Type == "rar")
             {
                 var rarFiles = group.Files;
-                Log.Debug("[GetFileProcessors] Creating RarProcessor for group: {BaseName} ({Count} parts)", 
-                    FilenameUtil.GetMultipartBaseName(rarFiles.First().FileName), rarFiles.Count);
+                Log.Debug("[GetFileProcessors] Creating RarProcessor for {Count} volumes", rarFiles.Count);
                 yield return new RarProcessor(rarFiles, usenetClient, archivePassword, ct, connectionsPerRar);
             }
 
@@ -441,6 +424,31 @@ public class QueueItemProcessor(
             }
         }
     }
+
+    private static string GetGroupType(GetFileInfosStep.FileInfo x) =>
+        GetGroupType(x.FileName, x.IsRar, x.IsSevenZip);
+
+    private static string GetGroupKey(GetFileInfosStep.FileInfo x) =>
+        GetGroupKey(x.FileName, x.IsRar, x.IsSevenZip);
+
+    /// <summary>
+    /// Classifies a file by its content, falling back to its extension.
+    /// </summary>
+    internal static string GetGroupType(string fileName, bool isRar, bool isSevenZip) =>
+        isSevenZip || FilenameUtil.Is7zFile(fileName) ? "7z"
+        : isRar || FilenameUtil.IsRarFile(fileName) ? "rar"
+        : FilenameUtil.IsMultipartMkv(fileName) ? "multipart-mkv"
+        : "other";
+
+    /// <summary>
+    /// Sub-divides a type into individual archives. Empty for "rar", where volume names are
+    /// unreliable and the processor does not need them, and for "other", where every file
+    /// becomes its own processor anyway.
+    /// </summary>
+    internal static string GetGroupKey(string fileName, bool isRar, bool isSevenZip) =>
+        GetGroupType(fileName, isRar, isSevenZip) is "7z" or "multipart-mkv"
+            ? FilenameUtil.GetMultipartBaseName(fileName)
+            : "";
 
     private async Task<DavItem?> GetMountFolder(DavDatabaseClient dbClient)
     {
