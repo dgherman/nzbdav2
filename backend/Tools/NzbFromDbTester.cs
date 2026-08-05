@@ -17,6 +17,7 @@ using NzbWebDAV.Websocket;
 using NzbWebDAV.Streams;
 using NzbWebDAV.Extensions;
 using NzbWebDAV.Exceptions;
+using NzbWebDAV.Queue;
 using NzbWebDAV.Queue.DeobfuscationSteps._1.FetchFirstSegment;
 using NzbWebDAV.Queue.DeobfuscationSteps._2.GetPar2FileDescriptors;
 using NzbWebDAV.Queue.DeobfuscationSteps._3.GetFileInfos;
@@ -939,12 +940,16 @@ public class NzbFromDbTester
             Console.WriteLine("Step 2: Processing files (RAR headers, etc.)...");
             var step2Watch = Stopwatch.StartNew();
 
-            var maxConnections = configManager.GetMaxQueueConnections();
+            var rarHeaderConnectionBudget = configManager.GetMaxDownloadConnections() + 5;
             var processors = new List<BaseProcessor>();
 
-            // Group files by type
+            // Mirrors QueueItemProcessor.GetFileProcessors: RAR groups on archive magic alone,
+            // everything else keeps its base name. Diverging here would make this harness measure
+            // something production does not do.
             var baseGroups = fileInfos
-                .GroupBy(x => NzbWebDAV.Utils.FilenameUtil.GetMultipartBaseName(x.FileName))
+                .GroupBy(x => (
+                    Type: QueueItemProcessor.GetGroupType(x.FileName, x.IsRar, x.IsSevenZip),
+                    Key: QueueItemProcessor.GetGroupKey(x.FileName, x.IsRar, x.IsSevenZip)))
                 .ToList();
 
             var rarGroupCount = 0;
@@ -956,8 +961,7 @@ public class NzbFromDbTester
                 if (files.Any(x => x.IsRar || NzbWebDAV.Utils.FilenameUtil.IsRarFile(x.FileName)))
                 {
                     rarGroupCount++;
-                    var connectionsPerRar = Math.Max(1, Math.Min(5, maxConnections / Math.Max(1, rarGroupCount / 3)));
-                    processors.Add(new RarProcessor(files, client, null, ct, connectionsPerRar));
+                    processors.Add(new RarProcessor(files, client, null, ct, rarHeaderConnectionBudget));
                 }
                 else if (files.Any(x => x.IsSevenZip || NzbWebDAV.Utils.FilenameUtil.Is7zFile(x.FileName)))
                 {

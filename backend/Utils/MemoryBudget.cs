@@ -97,6 +97,39 @@ public static class MemoryBudget
         return Math.Clamp(affordable, MinConcurrentStreams, MaxConcurrentStreamSlots);
     }
 
+    /// <summary>
+    /// Share of the heap RAR header extraction may hold while a queue item imports. Smaller than
+    /// <see cref="StreamingDataShare"/> on purpose: an import runs alongside playback and must not
+    /// compete with the prefetch window for the same heap.
+    /// </summary>
+    private const double ImportHeaderDataShare = 0.10;
+
+    /// <summary>
+    /// Never derive fewer than the three volumes the old fixed budget allowed, so this can only
+    /// ever raise import parallelism, never lower it.
+    /// </summary>
+    private const int MinConcurrentRarHeaderParts = 3;
+
+    /// <summary>
+    /// How many RAR volumes may have their headers parsed at once before the heap, rather than the
+    /// connection budget, becomes the limit.
+    ///
+    /// Header parsing reads unbuffered, so a volume holds roughly one in-flight article — two
+    /// across the seek from the front of the volume to its end-archive header — each resident
+    /// <see cref="ResidentBytesPerDataByte"/> times over. That makes the cost scale with segment
+    /// size, which is why this takes bytes rather than a volume count: a release posted with 4 MB
+    /// segments costs five times a 750 KB one for the same parallelism.
+    /// </summary>
+    public static int MaxConcurrentRarHeaderParts(long heapLimitBytes, long residentBytesPerPart)
+    {
+        if (heapLimitBytes <= 0) heapLimitBytes = FallbackHeapLimitBytes;
+        if (residentBytesPerPart <= 0) return MinConcurrentRarHeaderParts;
+
+        var budget = (long)(heapLimitBytes * ImportHeaderDataShare);
+        var affordable = (int)(budget / residentBytesPerPart);
+        return Math.Max(MinConcurrentRarHeaderParts, affordable);
+    }
+
     /// <summary>Bytes the segment buffer pool may retain idle, rounded down to whole MB.</summary>
     public static long PoolIdleCapBytes(long heapLimitBytes)
     {

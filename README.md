@@ -236,6 +236,13 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.2 (2026-08-05)
+Importing a large RAR release took minutes, long enough that a Stremio addon gave up waiting before the file was playable. The cause was our own throttle, not the work itself.
+
+*   **Performance**: RAR volume headers are now read unbuffered. Header parsing touches the front of a volume and then seeks to its end-archive header, and `NzbFileStream.Seek` only moves a cursor — so the prefetch window we were opening per volume fetched segments nothing ever read and held them against the heap. Removing it cuts a volume's cost to roughly one article.
+*   **Performance**: Header-extraction parallelism is now derived rather than fixed at three volumes process-wide. It takes the same connection budget as the rest of queue step 2 (`usenet.max-download-connections` + 5), bounded by a heap-derived ceiling in `MemoryBudget` that accounts for segment size — a release posted with 4 MB segments costs several times a 750 KB one for the same parallelism. The old fixed budget of 6 connections at 2 per volume was worth about 240 s on a 71-volume archive; the derived value cannot go below the three volumes it allowed, so this can only raise import parallelism.
+*   **Logging**: `[RarProcessor]` now reports volumes, chosen parallelism, and which of the two limits bound it, at Information level.
+
 ## v0.12.1 (2026-08-04)
 A truncated video could be mounted and reported as a completed download. Traced from a Stremio playback failure: an episode was mounted at 156 MB instead of 3.7 GB, with nothing in the logs marking it as incomplete.
 

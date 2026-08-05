@@ -101,4 +101,82 @@ public class MemoryBudgetTests
         // value would collapse to its floor and the sizing would silently stop tracking the box.
         Assert.True(MemoryBudget.HeapLimitBytes > 0);
     }
+
+    /// <summary>
+    /// Per-volume cost of parsing RAR headers unbuffered: two articles in flight, each resident
+    /// twice. Mirrors what RarProcessor computes.
+    /// </summary>
+    private static long RarHeaderBytesPerPart(long segmentBytes) =>
+        segmentBytes * 2 * MemoryBudget.ResidentBytesPerDataByte;
+
+    [Theory]
+    [InlineData(512, 750 * 1024)]
+    [InlineData(1024, 750 * 1024)]
+    [InlineData(4096, 750 * 1024)]
+    public void MaxConcurrentRarHeaderParts_BeatsTheOldFixedBudgetOnTypicalSegments(
+        long heapMb, long segmentBytes)
+    {
+        // The fixed budget this replaced allowed three volumes at a time regardless of the box,
+        // which cost ~240s on a 71-volume archive. On any supported heap with ordinary segment
+        // sizes the derived value must be a real improvement, not a rename of the same number.
+        var parts = MemoryBudget.MaxConcurrentRarHeaderParts(
+            heapMb * Mb, RarHeaderBytesPerPart(segmentBytes));
+
+        Assert.True(parts > 3, $"heap={heapMb}MB gave only {parts} concurrent volumes");
+    }
+
+    [Fact]
+    public void MaxConcurrentRarHeaderParts_ScalesWithHeap()
+    {
+        var small = MemoryBudget.MaxConcurrentRarHeaderParts(512 * Mb, RarHeaderBytesPerPart(750 * 1024));
+        var large = MemoryBudget.MaxConcurrentRarHeaderParts(4096 * Mb, RarHeaderBytesPerPart(750 * 1024));
+
+        Assert.True(large > small, $"4GB heap allowed {large}, 512MB allowed {small}");
+    }
+
+    [Fact]
+    public void MaxConcurrentRarHeaderParts_ShrinksAsSegmentsGrow()
+    {
+        // A release posted with 4 MB segments costs several times a 750 KB one for the same
+        // parallelism, which is the whole reason this takes bytes rather than a volume count.
+        var typical = MemoryBudget.MaxConcurrentRarHeaderParts(
+            512 * Mb, RarHeaderBytesPerPart(750 * 1024));
+        var large = MemoryBudget.MaxConcurrentRarHeaderParts(
+            512 * Mb, RarHeaderBytesPerPart(4 * Mb));
+
+        Assert.True(large < typical, $"4MB segments allowed {large}, 750KB allowed {typical}");
+    }
+
+    [Theory]
+    [InlineData(64)]
+    [InlineData(128)]
+    [InlineData(512)]
+    public void MaxConcurrentRarHeaderParts_NeverDropsBelowTheOldFloor(long heapMb)
+    {
+        // Even a tiny heap with huge segments must not import more slowly than before the change.
+        Assert.True(
+            MemoryBudget.MaxConcurrentRarHeaderParts(heapMb * Mb, RarHeaderBytesPerPart(16 * Mb)) >= 3);
+    }
+
+    [Fact]
+    public void MaxConcurrentRarHeaderParts_SurvivesUnusableInputs()
+    {
+        Assert.True(MemoryBudget.MaxConcurrentRarHeaderParts(0, RarHeaderBytesPerPart(750 * 1024)) >= 3);
+        Assert.True(MemoryBudget.MaxConcurrentRarHeaderParts(512 * Mb, 0) >= 3);
+        Assert.True(MemoryBudget.MaxConcurrentRarHeaderParts(-1, -1) >= 3);
+    }
+
+    [Theory]
+    [InlineData(512)]
+    [InlineData(4096)]
+    public void RarHeaderParts_StayWithinTheirShareOfTheHeap(long heapMb)
+    {
+        // The floor can exceed the share on a small heap; above it the derived count must respect
+        // the budget it was derived from.
+        var bytesPerPart = RarHeaderBytesPerPart(750 * 1024);
+        var parts = MemoryBudget.MaxConcurrentRarHeaderParts(heapMb * Mb, bytesPerPart);
+
+        Assert.True(parts * bytesPerPart <= heapMb * Mb * 0.15,
+            $"heap={heapMb}MB: {parts} volumes x {bytesPerPart / 1024}KB exceeds its share");
+    }
 }

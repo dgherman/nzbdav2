@@ -386,9 +386,10 @@ public class QueueItemProcessor(
                 .GroupBy(g => g.Type)
                 .Select(g => $"{g.Key}={g.Sum(x => x.Files.Count)} files in {g.Count()} group(s)")));
 
-        // One RarProcessor now covers the whole job, so nothing multiplies the per-part
-        // connection use and the cap can stay at its ceiling.
-        var connectionsPerRar = Math.Max(1, Math.Min(5, maxConnections));
+        // RAR header extraction gets the same budget as the rest of step 2 rather than a private
+        // one. One RarProcessor now covers the whole job and reads each volume unbuffered on a
+        // single connection, so this is both the connection count and the volume parallelism.
+        var rarHeaderConnectionBudget = configManager.GetMaxDownloadConnections() + 5;
 
         foreach (var group in finalGroups)
         {
@@ -405,7 +406,8 @@ public class QueueItemProcessor(
             {
                 var rarFiles = group.Files;
                 Log.Debug("[GetFileProcessors] Creating RarProcessor for {Count} volumes", rarFiles.Count);
-                yield return new RarProcessor(rarFiles, usenetClient, archivePassword, ct, connectionsPerRar);
+                yield return new RarProcessor(
+                    rarFiles, usenetClient, archivePassword, ct, rarHeaderConnectionBudget);
             }
 
             else if (group.Type == "multipart-mkv")

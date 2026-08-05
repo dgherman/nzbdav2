@@ -21,36 +21,67 @@ public class RarProcessor(
     UsenetStreamingClient usenet,
     string? password,
     CancellationToken ct,
-    int maxConcurrentConnections = 1
+    int headerConnectionBudget = 1
 ) : BaseProcessor
 {
-    private readonly GetFileInfosStep.FileInfo _primaryFile = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).First();
+    /// <summary>
+    /// Header parsing reads unbuffered, so the header read itself occupies a single connection.
+    /// </summary>
+    private const int HeaderConnectionsPerPart = 1;
 
-    private const int MaxGlobalRarHeaderConnections = 6;
-    private const int MaxRarHeaderConnectionsPerPart = 2;
-    private static readonly SemaphoreSlim RarHeaderConnectionSlots = new(MaxGlobalRarHeaderConnections, MaxGlobalRarHeaderConnections);
+    /// <summary>
+    /// Fan-out of the per-volume segment-size analysis that follows the header read.
+    /// </summary>
+    private const int SegmentAnalysisConnectionsPerPart = 2;
+
+    /// <summary>
+    /// Most connections one volume holds at any moment. The header read and the analysis pass run
+    /// one after the other inside <see cref="ProcessPartAsync"/>, so the peak is the larger of the
+    /// two rather than their sum — but it is the peak the connection budget has to be divided by.
+    /// </summary>
+    private const int PeakConnectionsPerPart =
+        HeaderConnectionsPerPart > SegmentAnalysisConnectionsPerPart
+            ? HeaderConnectionsPerPart
+            : SegmentAnalysisConnectionsPerPart;
+
+    /// <summary>
+    /// Assumed segment size when a volume declares none, used only to size the memory budget.
+    /// Typical usenet segment sizes sit around 700-750 KB.
+    /// </summary>
+    private const long AssumedSegmentBytes = 750 * 1024;
+
+    /// <summary>
+    /// Articles in flight per volume while its headers are parsed: the one at the front of the
+    /// volume, plus the one at its end-archive header across the seek.
+    /// </summary>
+    private const int InFlightArticlesPerPart = 2;
 
     public override async Task<BaseProcessor.Result?> ProcessAsync()
     {
-        Log.Information("[RarProcessor] Starting parallel RAR processing for {Count} parts", fileInfos.Count);
-
         var sortedInfos = fileInfos.OrderBy(f => GetPartNumber(f.FileName)).ToList();
-
-        // Keep RAR header extraction bounded globally. Each active part may use multiple
-        // buffered segment workers, so part concurrency must be capped by the shared header
-        // connection budget rather than scaling directly with archive part count.
         var partCount = sortedInfos.Count;
-        var requestedConcurrency = partCount switch
-        {
-            > 50 => Math.Min(20, maxConcurrentConnections * 3),  // Large sets: up to 20 concurrent
-            > 20 => Math.Min(15, maxConcurrentConnections * 2),  // Medium sets: up to 15 concurrent
-            > 10 => Math.Min(10, maxConcurrentConnections),      // Small-medium: up to 10 concurrent
-            _ => Math.Max(3, maxConcurrentConnections)           // Small sets: at least 3 concurrent
-        };
-        var maxConcurrentHeaderParts = Math.Max(1, MaxGlobalRarHeaderConnections / MaxRarHeaderConnectionsPerPart);
-        var concurrency = Math.Min(requestedConcurrency, maxConcurrentHeaderParts);
-        Log.Debug("[RarProcessor] Processing {Count} parts with concurrency {Concurrency} (requested {RequestedConcurrency}, global header connection cap {HeaderConnectionCap})",
-            partCount, concurrency, requestedConcurrency, MaxGlobalRarHeaderConnections);
+
+        // Two independent limits, whichever is tighter.
+        //
+        // Before v0.12.2 this was a fixed budget of 6 connections at 2 per volume — 3 volumes at
+        // a time, process-wide — because header reads were buffered and each volume prefetched
+        // several segments. That cost was self-inflicted: header parsing reads a few hundred
+        // bytes at the front of a volume and then seeks, so a prefetch window is wasted work as
+        // well as wasted heap. Reading unbuffered drops a volume to roughly one article, which
+        // makes the connection budget the binding limit rather than memory, matching upstream.
+        // The old cap was worth ~240s on a 71-volume archive (71 / 3 * ~10s), long enough for a
+        // Stremio addon to give up waiting for the import.
+        var residentBytesPerPart =
+            AverageSegmentBytes(sortedInfos) * InFlightArticlesPerPart * MemoryBudget.ResidentBytesPerDataByte;
+        var memoryLimit = MemoryBudget.MaxConcurrentRarHeaderParts(
+            MemoryBudget.HeapLimitBytes, residentBytesPerPart);
+        var connectionLimit = Math.Max(1, headerConnectionBudget / PeakConnectionsPerPart);
+        var concurrency = Math.Clamp(Math.Min(connectionLimit, memoryLimit), 1, Math.Max(1, partCount));
+
+        Log.Information(
+            "[RarProcessor] Parsing {Count} RAR volume headers, {Concurrency} at a time " +
+            "(connection budget {ConnectionLimit}, heap affords {MemoryLimit} at ~{PerPartKB}KB each)",
+            partCount, concurrency, connectionLimit, memoryLimit, residentBytesPerPart / 1024);
 
         var tasks = sortedInfos
             .Select(async fileInfo =>
@@ -97,11 +128,9 @@ public class RarProcessor(
         headerCts.CancelAfter(TimeSpan.FromSeconds(60));
 
         var segments = fileInfo.NzbFile.GetSegmentIds();
-        var connectionCount = GetRarHeaderConnectionCount(segments.Length);
-        using var headerConnectionLease = await AcquireRarHeaderConnectionSlotsAsync(connectionCount, headerCts.Token).ConfigureAwait(false);
 
         // Use FAST stream that trusts the file size to avoid slow segment re-scans
-        await using var stream = await GetFastNzbFileStream(fileInfo, segments, connectionCount, headerCts.Token).ConfigureAwait(false);
+        await using var stream = await GetFastNzbFileStream(fileInfo, segments, headerCts.Token).ConfigureAwait(false);
         
         if (fileInfo.MagicOffset > 0)
         {
@@ -132,7 +161,7 @@ public class RarProcessor(
             var partIds = fileInfo.NzbFile.GetSegmentIds();
             if (partIds.Length > 0)
             {
-                var computed = await usenet.AnalyzeNzbAsync(partIds, MaxRarHeaderConnectionsPerPart, null, ct, useSmartAnalysis: true).ConfigureAwait(false);
+                var computed = await usenet.AnalyzeNzbAsync(partIds, SegmentAnalysisConnectionsPerPart, null, ct, useSmartAnalysis: true).ConfigureAwait(false);
                 if (SegmentOffsetTable.TryBuild(computed, partIds.Length, stream.Length, out _))
                     partSegmentSizes = computed;
             }
@@ -267,19 +296,27 @@ public class RarProcessor(
     }
 
     /// <summary>
-    /// Number of connections to use per RAR part for header reading.
-    /// Using a small number of buffered connections speeds up header extraction while the
-    /// global RAR header slot limiter prevents part-count multiplication.
+    /// Mean decoded segment size across the volumes, used only to size the memory budget. Falls
+    /// back to <see cref="AssumedSegmentBytes"/> for volumes whose size PAR2 did not supply.
     /// </summary>
-    private static int GetRarHeaderConnectionCount(int segmentCount)
+    private static long AverageSegmentBytes(List<GetFileInfosStep.FileInfo> infos)
     {
-        return Math.Max(1, Math.Min(MaxRarHeaderConnectionsPerPart, segmentCount));
+        var sizes = infos
+            .Select(x =>
+            {
+                var segmentCount = x.NzbFile.GetSegmentIds().Length;
+                if (segmentCount <= 0) return AssumedSegmentBytes;
+                var fileSize = x.FileSize ?? (x.SegmentSizes?.Sum() ?? 0);
+                return fileSize > 0 ? fileSize / segmentCount : AssumedSegmentBytes;
+            })
+            .ToList();
+
+        return sizes.Count > 0 ? (long)sizes.Average() : AssumedSegmentBytes;
     }
 
     private async Task<NzbFileStream> GetFastNzbFileStream(
         GetFileInfosStep.FileInfo fileInfo,
         string[] segments,
-        int connectionCount,
         CancellationToken cancellationToken)
     {
         // For RAR processing, we trust the Par2/NZB size if available
@@ -296,51 +333,27 @@ public class RarProcessor(
             filesize = await usenet.GetFileSizeAsync(fileInfo.NzbFile, cancellationToken).ConfigureAwait(false);
         }
 
-        // Create a QueueRarProcessing context so NzbFileStream allows buffered streaming
-        // (Queue and QueueAnalysis contexts disable buffering, but QueueRarProcessing does not)
+        // QueueRarProcessing keeps this operation distinguishable from queue downloads in the
+        // connection accounting and provider stats.
         var parentContext = ct.GetContext<ConnectionUsageContext>();
         var usageContext = parentContext.DetailsObject != null
             ? new ConnectionUsageContext(ConnectionUsageType.QueueRarProcessing, parentContext.DetailsObject)
             : new ConnectionUsageContext(ConnectionUsageType.QueueRarProcessing, parentContext.Details);
 
-        // If we have exact segment sizes, use the standard stream with buffering
-        // otherwise use the fast stream that trusts the total size
+        // Unbuffered on purpose. Reading headers touches the front of the volume and then seeks
+        // to the end-archive header; NzbFileStream.Seek only moves a cursor, so a prefetch window
+        // would fetch segments nothing ever reads and hold them against the heap. Dropping it is
+        // what lets many volumes parse at once instead of three.
+        //
+        // Either way the stream must never have to scan segments to locate an offset. With exact
+        // sizes it seeks precisely; without them GetFastFileStream fills in uniform sizes so it
+        // trusts the total instead of re-scanning.
         return segmentSizes != null
-            ? usenet.GetFileStream(segments, filesize.Value, connectionCount, usageContext, useBufferedStreaming: true, bufferSize: connectionCount * 3, segmentSizes: segmentSizes)
-            : usenet.GetFileStream(segments, filesize.Value, connectionCount, usageContext, useBufferedStreaming: true, bufferSize: connectionCount * 3);
-    }
-
-    private static async Task<RarHeaderConnectionLease> AcquireRarHeaderConnectionSlotsAsync(int count, CancellationToken ct)
-    {
-        var acquired = 0;
-        try
-        {
-            while (acquired < count)
-            {
-                await RarHeaderConnectionSlots.WaitAsync(ct).ConfigureAwait(false);
-                acquired++;
-            }
-
-            return new RarHeaderConnectionLease(acquired);
-        }
-        catch
-        {
-            if (acquired > 0) RarHeaderConnectionSlots.Release(acquired);
-            throw;
-        }
-    }
-
-    private sealed class RarHeaderConnectionLease(int count) : IDisposable
-    {
-        private int _disposed;
-
-        public void Dispose()
-        {
-            if (Interlocked.Exchange(ref _disposed, 1) == 0 && count > 0)
-            {
-                RarHeaderConnectionSlots.Release(count);
-            }
-        }
+            ? usenet.GetFileStream(
+                segments, filesize.Value, HeaderConnectionsPerPart, usageContext,
+                useBufferedStreaming: false, segmentSizes: segmentSizes)
+            : usenet.GetFastFileStream(
+                segments, filesize.Value, HeaderConnectionsPerPart, usageContext);
     }
 
     public new class Result : BaseProcessor.Result
