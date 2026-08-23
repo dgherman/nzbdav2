@@ -2,9 +2,14 @@ using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
-public class LimitedLengthStream(Stream stream, long length, bool leaveOpen = false) : Stream
+public class LimitedLengthStream(Stream stream, long length, bool leaveOpen = false) : Stream, IWarmableStream
 {
     private bool _disposed;
+
+    /// <summary>Forwards to the wrapped stream so wrapping (e.g. RAR-part length limiting) doesn't
+    /// hide the ability to pre-warm it. No-op if the wrapped stream doesn't support warmup.</summary>
+    public Task WarmupAsync(CancellationToken ct) =>
+        stream is IWarmableStream warmable ? warmable.WarmupAsync(ct) : Task.CompletedTask;
     private long _position = 0;
     private readonly long _basePosition = stream.CanSeek ? stream.Position : 0;
 

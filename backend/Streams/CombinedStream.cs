@@ -1,4 +1,5 @@
 using System.Buffers;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
@@ -17,6 +18,20 @@ public class CombinedStream : Stream
     private long _position;
     private bool _isDisposed;
     private bool _partRequiresLoading;
+
+    // Pre-warms the next part's stream while the current one is still being read, so a forward
+    // sequential crossing of a part boundary (a RAR volume, for a multipart file) finds a stream
+    // that is already fetching instead of starting cold. This is separate from _streamCache below:
+    // that cache is only ever populated by Seek() switching parts, never by the natural end-of-part
+    // advance in ReadAsync, so it does nothing for sequential forward playback on its own.
+    private Task? _prewarmTask;
+    private int _prewarmedForPartIndex = -1;
+
+    // How close to a part's end (in bytes) triggers pre-warming the next part. Reuses the ring-buffer
+    // size MemoryBudget already derives for one concurrent stream slot, rather than inventing a new
+    // unbudgeted constant: it's the same "how much runway before a stream needs to be delivering data"
+    // figure the rest of the streaming path is sized against.
+    private static readonly long PrewarmTailBytes = MemoryBudget.RingBufferBytes;
 
     // Cache recently used streams to avoid re-creating them on seeks
     private readonly Dictionary<int, CachedStream> _streamCache = new();
@@ -124,7 +139,11 @@ public class CombinedStream : Stream
             //    _position, _currentPartIndex, count, readCount);
 
             _position += readCount;
-            if (readCount > 0) return readCount;
+            if (readCount > 0)
+            {
+                TriggerPrewarmIfNeeded(cancellationToken);
+                return readCount;
+            }
 
             // Current stream is exhausted - dispose and try next part
             Serilog.Log.Debug("[CombinedStream] Part {PartIndex} exhausted. Moving to next.", _currentPartIndex);
@@ -213,6 +232,55 @@ public class CombinedStream : Stream
         }
 
         return left;
+    }
+
+    /// <summary>
+    /// Kicks off background construction of the next part's stream once the current part's remaining
+    /// bytes fall inside the pre-warm tail. Fire-and-forget: LoadPartAsync picks up whatever this
+    /// produced (warm or not — <see cref="StreamPart.GetStreamTask"/> memoizes the factory call, so
+    /// this and the eventual real load share the same task) when the boundary is actually crossed.
+    /// </summary>
+    private void TriggerPrewarmIfNeeded(CancellationToken cancellationToken)
+    {
+        if (_currentPartIndex < 0 || _currentStream == null) return;
+
+        var nextIndex = _currentPartIndex + 1;
+        if (nextIndex >= _parts.Count) return;
+        if (_prewarmedForPartIndex == nextIndex) return;
+
+        var currentPart = _parts[_currentPartIndex];
+        if (currentPart.Length < 0) return; // unknown length (legacy non-seekable mode) — can't judge distance to the end
+
+        var consumedInPart = _position - _cumulativeOffsets[_currentPartIndex];
+        var remainingInPart = currentPart.Length - consumedInPart;
+        if (remainingInPart > PrewarmTailBytes) return;
+
+        _prewarmedForPartIndex = nextIndex;
+        _prewarmTask = Task.Run(() => PrewarmPartAsync(nextIndex, cancellationToken), CancellationToken.None);
+    }
+
+    private async Task PrewarmPartAsync(int partIndex, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var stream = await _parts[partIndex].GetStreamTask().ConfigureAwait(false);
+            if (_isDisposed)
+            {
+                // Disposed while warming — don't leave its background fetch running unattended.
+                await stream.DisposeAsync().ConfigureAwait(false);
+                return;
+            }
+            if (stream is IWarmableStream warmable)
+            {
+                await warmable.WarmupAsync(cancellationToken).ConfigureAwait(false);
+            }
+            Serilog.Log.Debug("[CombinedStream] Pre-warmed part {PartIndex} ahead of the boundary.", partIndex);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Serilog.Log.Debug(ex, "[CombinedStream] Pre-warm of part {PartIndex} failed; will load at the boundary instead.", partIndex);
+        }
     }
 
     private async Task LoadPartAsync(int partIndex, CancellationToken cancellationToken)

@@ -6,7 +6,7 @@ using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
-public class NzbFileStream : Stream
+public class NzbFileStream : Stream, IWarmableStream
 {
     private readonly string[] _fileSegmentIds;
     private readonly long _fileSize;
@@ -23,6 +23,8 @@ public class NzbFileStream : Stream
 
     private long _position = 0;
     private CombinedStream? _innerStream;
+    private Task<CombinedStream>? _innerStreamTask;
+    private readonly object _innerStreamGate = new();
     private bool _disposed;
     // Set after a premature EOF (reader fell behind a shared stream's ring-buffer window).
     // Forces subsequent inner streams to skip the shared-stream attach and use a private
@@ -107,7 +109,7 @@ public class NzbFileStream : Stream
         if (_innerStream == null)
         {
             Serilog.Log.Debug("[NzbFileStream] Creating inner stream at position {Position}", _position);
-            _innerStream = await GetFileStream(_position, cancellationToken).ConfigureAwait(false);
+            _innerStream = await GetOrStartInnerStreamTask(cancellationToken).ConfigureAwait(false);
         }
 
         var read = await _innerStream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
@@ -126,6 +128,7 @@ public class NzbFileStream : Stream
             Serilog.Log.Debug("[NzbFileStream] Premature EOF at position {Position}/{FileSize}, recreating inner stream (private, no shared attach)", _position, _fileSize);
             _innerStream?.Dispose();
             _innerStream = null;
+            _innerStreamTask = null;
             // Avoid re-attaching to the lagging shared stream that just returned 0 — otherwise we
             // loop forever recreating + re-attaching to the same advanced entry. Use a private stream.
             _avoidSharedStream = true;
@@ -142,6 +145,42 @@ public class NzbFileStream : Stream
         }
 
         return read;
+    }
+
+    private Task<CombinedStream> GetOrStartInnerStreamTask(CancellationToken ct)
+    {
+        if (_innerStreamTask != null) return _innerStreamTask;
+        lock (_innerStreamGate)
+        {
+            _innerStreamTask ??= GetFileStream(_position, ct);
+        }
+        return _innerStreamTask;
+    }
+
+    /// <summary>
+    /// Starts constructing the inner stream (and, for a buffered stream, its background prefetch)
+    /// without reading any bytes. Used by CombinedStream to warm the next RAR volume ahead of the
+    /// boundary so the swap does not start prefetching cold. See <see cref="IWarmableStream"/>.
+    /// </summary>
+    public async Task WarmupAsync(CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (_innerStream != null) return;
+
+        var task = GetOrStartInnerStreamTask(ct);
+        var stream = await task.ConfigureAwait(false);
+
+        // Adopt the result only if nothing superseded this task while we awaited it (a Seek or the
+        // premature-EOF recreate path both null out _innerStreamTask). Otherwise this stream is for
+        // a position we've since moved past — dispose it instead of resurrecting or leaking it.
+        if (_innerStreamTask == task && _innerStream == null && !_disposed)
+        {
+            _innerStream = stream;
+        }
+        else if (!ReferenceEquals(_innerStream, stream))
+        {
+            await stream.DisposeAsync().ConfigureAwait(false);
+        }
     }
 
     public override long Seek(long offset, SeekOrigin origin)
@@ -191,6 +230,7 @@ public class NzbFileStream : Stream
         _position = absoluteOffset;
         _innerStream?.Dispose();
         _innerStream = null;
+        _innerStreamTask = null;
         Serilog.Log.Debug("[NzbFileStream] Seek completed. New position: {NewPosition}", _position);
         // "cold" = we discarded a previously-open inner stream and will need a new one;
         // a fresh seek with no prior stream is also effectively cold but cheap.

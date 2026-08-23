@@ -236,6 +236,11 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.3 (2026-08-23)
+Streaming a RAR-multipart file (a season episode split across `.r00`/`.r01`/… volumes) froze for 1-3 seconds every time playback crossed a volume boundary — audio kept going from its own smaller pre-decoded buffer while the video stalled and then caught up. Confirmed via a live debug-log capture on real streams (Alone S13E06, SNL S50E20): `[CombinedStream] Part N exhausted` was immediately followed by a cold `Creating BufferedSegmentStream` and a `PREFETCH WINDOW` line reset to `effective=74 of 74`, then 1-3 seconds later a `Starvation: Waited 1600-2700ms` — the exact moment the freeze happens, roughly once per minute for the whole file (once per ~56MB volume at 1080p).
+
+*   **Fix**: RAR volumes are now pre-warmed one boundary ahead during sequential forward playback. `CombinedStream`'s natural end-of-part advance (as opposed to a `Seek()`) never consulted its stream cache — that cache is only ever populated by `Seek()` switching parts — so every volume crossing cold-rebuilt the next volume's `BufferedSegmentStream` from scratch: a fresh connection acquire and a prefetch window reset to empty. A new `IWarmableStream` interface lets `CombinedStream` start the next part's background fetch (via `NzbFileStream.WarmupAsync`) once the current part's remaining bytes fall inside a tail window (`MemoryBudget.RingBufferBytes`, 32 MB — reused rather than a new unbudgeted constant), so the swap at the boundary finds a stream that's already fetching instead of one starting cold. The pre-warm competes for the same `TryAcquireSlot()` / `StreamingConnectionLimiter` gates as any other buffered stream, so it costs at most one extra concurrent-stream slot (already budgeted into `MemoryBudget`'s floor of 2) and silently degrades to a no-op when no slot is free.
+
 ## v0.12.2 (2026-08-05)
 Importing a large RAR release took minutes, long enough that a Stremio addon gave up waiting before the file was playable. The cause was our own throttle, not the work itself.
 
