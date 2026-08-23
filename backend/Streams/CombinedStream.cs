@@ -269,7 +269,24 @@ public class CombinedStream : Stream
         // Own token (see _prewarmCts) — NOT the triggering read's cancellationToken. That read's
         // token can cancel independently of this construction, which is memoized onto the part and
         // shared with whatever read actually crosses the boundary later.
-        _prewarmTask = Task.Run(() => PrewarmPartAsync(nextIndex, _prewarmCts.Token), CancellationToken.None);
+        //
+        // Captured into a local BEFORE Task.Run, not read as _prewarmCts.Token inside the lambda: the
+        // lambda body only runs once a thread-pool thread picks it up, which can be well after this
+        // method returns. If Dispose() runs in that gap it cancels and then (once the task it can see
+        // has settled) disposes _prewarmCts — reading .Token on an already-disposed CTS from inside
+        // the lambda would throw ObjectDisposedException before PrewarmPartAsync's own try/catch even
+        // starts, leaving an unobserved faulted task. A token obtained here, before scheduling, stays
+        // valid to read/pass around regardless of what happens to its source CTS afterward.
+        var prewarmToken = _prewarmCts.Token;
+        // Only the most recently scheduled prewarm is tracked here, but that's the only one Dispose()
+        // ever needs to catch: TriggerPrewarmIfNeeded only fires for _currentPartIndex + 1, and
+        // _currentPartIndex only reaches nextIndex once LoadPartAsync has already adopted nextIndex's
+        // stream (via the same memoized StreamPart.GetStreamTask this triggers) as _currentStream — at
+        // that point it's a live, in-use stream, not something only reachable through this field. So by
+        // the time a second call here could ever overwrite this field, whatever the previous one
+        // targeted has already become _currentStream and is covered by the normal disposal paths
+        // below, not by this reference.
+        _prewarmTask = Task.Run(() => PrewarmPartAsync(nextIndex, prewarmToken), CancellationToken.None);
     }
 
     private async Task PrewarmPartAsync(int partIndex, CancellationToken prewarmToken)
