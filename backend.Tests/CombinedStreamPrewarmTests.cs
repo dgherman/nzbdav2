@@ -1,9 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using NzbWebDAV.Clients.Usenet;
+using NzbWebDAV.Clients.Usenet.Connections;
+using NzbWebDAV.Clients.Usenet.Models;
+using NzbWebDAV.Extensions;
 using NzbWebDAV.Streams;
+using Usenet.Nzb;
+using UsenetSharp.Models;
 using Xunit;
 
 namespace NzbWebDAV.Tests;
@@ -19,7 +26,13 @@ namespace NzbWebDAV.Tests;
 /// The fix pre-warms the next part's stream (via IWarmableStream) once the current part's remaining
 /// bytes fall inside a tail window, so by the time the boundary is actually crossed the next part's
 /// stream is already fetching instead of starting cold.
+///
+/// [Collection(BufferedStreamCollection.Name)]: the real-fetch test below constructs an actual
+/// BufferedSegmentStream via NzbFileStream, which touches the process-wide concurrent-stream slot
+/// semaphore (BufferedSegmentStream.SetMaxConcurrentStreams) — same serialization every other test
+/// touching that static state uses (see StreamChurnTests, BufferedSegmentStreamDisposeTests).
 /// </summary>
+[Collection(BufferedStreamCollection.Name)]
 public class CombinedStreamPrewarmTests
 {
     /// <summary>A part's stream that records when WarmupAsync and ReadAsync are called, so tests can
@@ -170,5 +183,113 @@ public class CombinedStreamPrewarmTests
         var tail = new byte[1];
         var eof = await combined.ReadAsync(tail, 0, 1).WaitAsync(TimeSpan.FromSeconds(5));
         Assert.Equal(0, eof);
+    }
+
+    /// <summary>Counts real segment fetches so a test can observe genuine background-fetch activity,
+    /// not just that some method returned. A small delay per fetch keeps "nothing fetched yet" and
+    /// "fetching has started" observably distinct instead of racing a same-tick completion.</summary>
+    private sealed class CountingSegmentNntpClient : INntpClient
+    {
+        private readonly int _segmentSize;
+        private int _fetchCount;
+
+        public CountingSegmentNntpClient(int segmentSize) => _segmentSize = segmentSize;
+
+        public int FetchCount => Volatile.Read(ref _fetchCount);
+
+        public async Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders, CancellationToken ct)
+        {
+            Interlocked.Increment(ref _fetchCount);
+            await Task.Delay(15, ct).ConfigureAwait(false);
+            var index = int.Parse(segmentId.Split('-')[1].Split('@')[0]);
+            var header = new UsenetYencHeader
+            {
+                FileName = "volume.r00",
+                FileSize = 0,
+                LineLength = 128,
+                PartNumber = index + 1,
+                TotalParts = 1,
+                PartSize = _segmentSize,
+                PartOffset = (long)_segmentSize * index,
+            };
+            return new YencHeaderStream(header, null, new MemoryStream(new byte[_segmentSize]));
+        }
+
+        public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken ct) => throw new NotSupportedException();
+        public Task<bool> AuthenticateAsync(string user, string pass, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetStatResponse> StatAsync(string segmentId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetYencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<long> GetFileSizeAsync(NzbFile file, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetArticleHeaders> GetArticleHeadersAsync(string segmentId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetDateResponse> DateAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task WaitForReady(CancellationToken ct) => Task.CompletedTask;
+        public Task<UsenetGroupResponse> GroupAsync(string group, CancellationToken ct) => throw new NotSupportedException();
+        public Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken ct) => throw new NotSupportedException();
+        public void Dispose() { }
+    }
+
+    [Fact]
+    public async Task NextVolume_RealBufferedSegmentStream_StartsFetchingBeforeTheBoundaryIsCrossed()
+    {
+        // End-to-end through the real production topology: DavMultipartFileStream wraps each RAR
+        // volume's NzbFileStream in a LimitedLengthStream and hands it to CombinedStream as a part
+        // factory (see DavMultipartFileStream.GetCombinedStream). This is what NextVolume_IsWarmed-
+        // BeforeTheBoundaryIsCrossed above does NOT prove: WarmupTrackingStream's WarmupAsync
+        // completes instantly and does no real fetching, so that test only demonstrates call
+        // ordering. Here the "next volume" is a real NzbFileStream backed by a real
+        // BufferedSegmentStream, and the assertion is on actual (fake-network) segment fetches
+        // landing — i.e. the prefetch window is genuinely non-empty — before any read crosses into it.
+        const int segmentSize = 4096;
+        const int part1SegmentCount = 40; // > concurrentConnections, so the full buffered path engages
+        const int concurrentConnections = 4;
+
+        var part0Payload = new byte[10];
+        Array.Fill(part0Payload, (byte)0xAA);
+
+        var client = new CountingSegmentNntpClient(segmentSize);
+        var segmentIds = Enumerable.Range(0, part1SegmentCount).Select(i => $"seg-{i}@test").ToArray();
+        var context = new ConnectionUsageContext(
+            ConnectionUsageType.Streaming, new ConnectionUsageDetails { Text = "prewarm-integration-test" });
+
+        BufferedSegmentStream.SetMaxConcurrentStreams(4);
+        try
+        {
+            Func<Task<Stream>> part0Factory = () => Task.FromResult<Stream>(new PlainStream(part0Payload));
+            Func<Task<Stream>> part1Factory = () =>
+            {
+                var nzbStream = new NzbFileStream(
+                    segmentIds, fileSize: (long)segmentSize * part1SegmentCount, client,
+                    concurrentConnections, usageContext: context);
+                return Task.FromResult<Stream>(nzbStream.LimitLength((long)segmentSize * part1SegmentCount));
+            };
+            var parts = new List<(Func<Task<Stream>> StreamFactory, long Length)>
+            {
+                (part0Factory, part0Payload.Length),
+                (part1Factory, (long)segmentSize * part1SegmentCount),
+            };
+
+            // maxCachedStreams: 0, matching DavMultipartFileStream's real RAR-multipart configuration.
+            await using var combined = new CombinedStream(parts, maxCachedStreams: 0);
+
+            var buffer = new byte[part0Payload.Length];
+            var read = await ReadFully(combined, buffer).WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.Equal(part0Payload.Length, read);
+
+            // The pre-warm must start real fetch activity for volume 1 before CombinedStream ever
+            // crosses into it — wait for that here, before issuing any read that would cross.
+            var started = await TestAsync.WaitUntil(() => client.FetchCount > 0, TimeSpan.FromSeconds(5));
+            Assert.True(started,
+                "pre-warm did not start any real segment fetches for the next volume before the boundary was crossed");
+
+            // Crossing the boundary now reads from a stream whose background fetch already started —
+            // not one built cold at this exact moment.
+            var buffer2 = new byte[segmentSize];
+            var read2 = await ReadFully(combined, buffer2).WaitAsync(TimeSpan.FromSeconds(10));
+            Assert.Equal(buffer2.Length, read2);
+        }
+        finally
+        {
+            BufferedSegmentStream.SetMaxConcurrentStreams(32); // restore the assembly-wide default
+        }
     }
 }
