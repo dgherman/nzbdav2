@@ -96,18 +96,25 @@ public class NzbFileStreamConstructionRetryTests
                 ids, fileSize: (long)SegmentSize * SegmentCount, client,
                 concurrentConnections: 3, usageContext: context);
 
-            // Seek to a non-zero, segment-aligned offset so construction has to resolve it via
-            // SeekSegment -> GetSegmentYencHeaderAsync — position 0 never calls the client at all,
-            // and would not exercise the failure path this test targets.
+            // ONE-TIME setup: move off position 0 so construction has to resolve the read through
+            // SeekSegment -> GetSegmentYencHeaderAsync — position 0 takes GetFileStream's rangeStart==0
+            // branch straight into GetCombinedStream and never calls the client at all, so it could not
+            // exercise the failure path this test targets. This is the ONLY Seek() call anywhere in
+            // this test — it runs before either read below, not between them.
             stream.Seek(SegmentSize * 2L, SeekOrigin.Begin);
+            var positionBeforeFirstAttempt = stream.Position;
 
             var buffer = new byte[SegmentSize];
             await Assert.ThrowsAsync<IOException>(
                 () => stream.ReadAsync(buffer, 0, buffer.Length).WaitAsync(TimeSpan.FromSeconds(10)));
 
-            // The failed construction must not be memoized: retrying on the SAME instance, at the
-            // SAME position, must attempt construction again instead of forever re-awaiting the dead
-            // task from the first attempt.
+            // No Seek() happens between the failed attempt and the retry below — a failed ReadAsync
+            // never advances _position, and this test does not call Seek() again, so Position is
+            // provably unchanged. The retry is therefore a bare ReadAsync at the SAME position with NO
+            // intervening Seek(): the only thing that can un-stick a memoized _innerStreamTask here is
+            // EnsureInnerStreamAsync's own catch-block compare-and-clear, not Seek()'s
+            // InvalidateInnerStream (which cannot be what's running — Seek() is not called again).
+            Assert.Equal(positionBeforeFirstAttempt, stream.Position);
             var read = await stream.ReadAsync(buffer, 0, buffer.Length).WaitAsync(TimeSpan.FromSeconds(10));
 
             Assert.Equal(SegmentSize, read);
