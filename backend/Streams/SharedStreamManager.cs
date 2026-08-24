@@ -146,13 +146,21 @@ public static class SharedStreamManager
     /// Only called if creating a new entry. Must NOT call SetAcquiredSlot — the entry manages the semaphore slot.
     /// Must use the provided CancellationToken (not a request-scoped one) so the pump outlives individual requests.
     /// If a CancellationToken context is attached to the entry token, return its scope so the entry owns that lifetime.</param>
+    /// <param name="isPrewarm">True when this call originates from an already-active stream's own
+    /// pre-warm of its next RAR volume (see <see cref="CombinedStream.TriggerPrewarmIfNeeded"/>), so
+    /// the slot acquisition below waits for a slot instead of giving up instantly. See
+    /// <see cref="BufferedSegmentStream.TryAcquireSlot"/>.</param>
+    /// <param name="ct">Cancellation for the bounded wait when <paramref name="isPrewarm"/> is true.
+    /// Ignored otherwise.</param>
     public static SharedStreamHandle? GetOrCreate(
         Guid davItemId,
         long startPosition,
         long streamLength,
         int ringBufferSize,
         int gracePeriodSeconds,
-        Func<CancellationToken, SharedStreamFactoryResult> factory)
+        Func<CancellationToken, SharedStreamFactoryResult> factory,
+        bool isPrewarm = false,
+        CancellationToken ct = default)
     {
         // Fast path: an entry that appeared since the caller's TryAttach.
         foreach (var existing in Snapshot(davItemId))
@@ -189,11 +197,11 @@ public static class SharedStreamManager
         }
 
         // Acquire a semaphore slot
-        var slot = BufferedSegmentStream.TryAcquireSlot();
+        var slot = BufferedSegmentStream.TryAcquireSlot(isPrewarm, ct);
         if (slot == null)
         {
             AppMetrics.SharedStreamCreates.WithLabels("no_slot").Inc();
-            Log.Debug("[SharedStreamManager] No semaphore slot available. DavItemId={DavItemId}", davItemId);
+            Log.Debug("[SharedStreamManager] No semaphore slot available. DavItemId={DavItemId}, isPrewarm={IsPrewarm}", davItemId, isPrewarm);
             return null;
         }
 

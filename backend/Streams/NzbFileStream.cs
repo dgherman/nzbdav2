@@ -24,6 +24,10 @@ public class NzbFileStream : Stream, IWarmableStream
     private long _position = 0;
     private CombinedStream? _innerStream;
     private Task<CombinedStream>? _innerStreamTask;
+    // True while _innerStreamTask is a pre-warm-tagged (isPrewarm: true) construction. Lets a live
+    // read that finds one still pending supersede it with its own live-tagged attempt instead of
+    // inheriting pre-warm's bounded slot wait as its own latency — see EnsureInnerStreamAsync.
+    private bool _innerStreamTaskIsPrewarm;
     // Bumped every time _innerStreamTask is invalidated (Seek, the premature-EOF recreate path, or
     // Dispose). A caller that started awaiting a construction task compares its captured generation
     // against this after the await to detect "something moved on while I was constructing" instead
@@ -165,8 +169,37 @@ public class NzbFileStream : Stream, IWarmableStream
     /// of resurrecting it. If construction itself throws or is cancelled, the memoized task is cleared
     /// (when it's still the one that failed) so the next caller retries fresh instead of forever
     /// re-awaiting a dead task — a single cancelled read must not permanently poison every read after it.
+    ///
+    /// A real read can arrive while a pre-warm-tagged construction (isPrewarm: true) is still memoized
+    /// as _innerStreamTask and mid-flight on its own bounded slot wait (BufferedSegmentStream.
+    /// TryAcquireSlot's up-to-PrewarmSlotAcquireTimeout wait — see NzbFileStream.WarmupAsync). A live
+    /// read must not inherit that wait as its own latency — before pre-warming existed, a live read's
+    /// own slot acquisition was always a single non-blocking attempt, degrading instantly on
+    /// contention. So a live (isPrewarm: false) caller that finds the memoized task is pre-warm-tagged
+    /// AND still pending supersedes it with its OWN fresh, live-tagged construction (own instant-fail
+    /// slot semantics) rather than joining it — see the supersede check below. The original pre-warm
+    /// task is not cancelled; it keeps running for whoever (if anyone) still needs it, and the
+    /// existing "adopted" check further down disposes its result instead of resurrecting it once it
+    /// resolves, since by then _innerStreamTask no longer references it.
+    ///
+    /// Whichever task IS current, the await is wrapped in Task.WaitAsync(ct) so THIS caller's own
+    /// token can stop THIS caller's wait without touching shared state it doesn't own — WaitAsync's
+    /// cancellation surfaces only to THIS caller and never affects the underlying `task` itself.
+    ///
+    /// Cleanup on failure is driven by the construction task's OWN terminal transition, not by
+    /// inferring it from inside any particular caller's catch block. A per-caller snapshot check (e.g.
+    /// "is task.IsCanceled false right now?") races the task's own completion: a caller's WaitAsync(ct)
+    /// can throw a moment before the antecedent's status has actually settled to Canceled/Faulted,
+    /// making that snapshot see "not failed yet" for a construction that IS about to fail — leaving it
+    /// memoized. Instead, a ContinueWith(OnlyOnCanceled|OnlyOnFaulted equivalent) is attached at the
+    /// exact moment a NEW task is created below and performs the compare-and-clear itself, driven
+    /// purely by that task's own completion — fires exactly once, exactly when (and only when) THAT
+    /// task genuinely lands in a failed terminal state, regardless of which caller's cancellation fired
+    /// first or how many callers are awaiting it. Callers below therefore just propagate whatever
+    /// Task.WaitAsync(ct) gives them — their own cancellation, or the construction's real failure —
+    /// without needing to decide who's responsible for clearing.
     /// </summary>
-    private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct)
+    private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct, bool isPrewarm = false)
     {
         while (true)
         {
@@ -176,31 +209,53 @@ public class NzbFileStream : Stream, IWarmableStream
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 if (_innerStream != null) return _innerStream;
-                _innerStreamTask ??= GetFileStream(_position, ct);
+
+                var supersedePendingPrewarm = !isPrewarm && _innerStreamTask != null
+                    && _innerStreamTaskIsPrewarm && !_innerStreamTask.IsCompleted;
+
+                // A task that has already gone terminally Canceled/Faulted is treated as if it were
+                // null: the ContinueWith below clears _innerStreamTask once it runs, but that runs on
+                // the thread-pool scheduler and is not synchronous with the antecedent's own
+                // completion — under thread-pool pressure the gap between "task is terminally failed"
+                // and "the continuation has actually cleared the field" is real and unbounded. A caller
+                // whose gate check lands in that gap must not adopt (and immediately re-fail with) a
+                // task that is already known-dead — checking Status here directly, rather than relying
+                // on the continuation's timing, makes recovery synchronous and deterministic for any
+                // caller, regardless of whether the continuation has run yet.
+                var isDeadTask = _innerStreamTask != null && _innerStreamTask.IsCompleted
+                    && _innerStreamTask.Status != TaskStatus.RanToCompletion;
+
+                if (_innerStreamTask == null || supersedePendingPrewarm || isDeadTask)
+                {
+                    var newTask = GetFileStream(_position, ct, isPrewarm);
+                    var newGeneration = _innerStreamGeneration;
+                    _innerStreamTask = newTask;
+                    _innerStreamTaskIsPrewarm = isPrewarm;
+                    // Backstop for the case where no new caller ever arrives to trigger the inline
+                    // isDeadTask check above (so a dead reference doesn't dangle forever with nobody to
+                    // clear it) — not relied on for correctness, since isDeadTask already makes recovery
+                    // synchronous for any caller that DOES arrive. Runs on the default scheduler rather
+                    // than ExecuteSynchronously: same-thread lock re-entry wouldn't deadlock (Monitor is
+                    // reentrant), but the antecedent can fault/cancel from inside code with no
+                    // particular relationship to _innerStreamGate, so there's no benefit to forcing this
+                    // onto whatever thread happens to complete newTask instead of the thread pool.
+                    newTask.ContinueWith(_ =>
+                    {
+                        lock (_innerStreamGate)
+                        {
+                            if (_innerStreamGeneration == newGeneration && _innerStreamTask == newTask)
+                            {
+                                _innerStreamTask = null;
+                                _innerStreamTaskIsPrewarm = false;
+                            }
+                        }
+                    }, CancellationToken.None, TaskContinuationOptions.NotOnRanToCompletion, TaskScheduler.Default);
+                }
                 task = _innerStreamTask;
                 generation = _innerStreamGeneration;
             }
 
-            CombinedStream stream;
-            try
-            {
-                stream = await task.ConfigureAwait(false);
-            }
-            catch
-            {
-                // Construction failed (or was cancelled) — clear the memoized task so the NEXT caller
-                // starts a fresh one instead of forever re-awaiting this dead task. Compare-and-clear:
-                // only if nothing else (a Seek, another failure) already moved past this generation/
-                // task, so we don't stomp on a concurrent invalidation or a newer attempt.
-                lock (_innerStreamGate)
-                {
-                    if (_innerStreamGeneration == generation && _innerStreamTask == task)
-                    {
-                        _innerStreamTask = null;
-                    }
-                }
-                throw;
-            }
+            var stream = await task.WaitAsync(ct).ConfigureAwait(false);
 
             CombinedStream? current;
             bool adopted;
@@ -235,6 +290,7 @@ public class NzbFileStream : Stream, IWarmableStream
             old = _innerStream;
             _innerStream = null;
             _innerStreamTask = null;
+            _innerStreamTaskIsPrewarm = false;
             _innerStreamGeneration++;
         }
         old?.Dispose();
@@ -248,7 +304,7 @@ public class NzbFileStream : Stream, IWarmableStream
     public async Task WarmupAsync(CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        await EnsureInnerStreamAsync(ct).ConfigureAwait(false);
+        await EnsureInnerStreamAsync(ct, isPrewarm: true).ConfigureAwait(false);
     }
 
     public override long Seek(long offset, SeekOrigin origin)
@@ -396,15 +452,28 @@ public class NzbFileStream : Stream, IWarmableStream
         ).ConfigureAwait(false);
     }
 
-    private async Task<CombinedStream> GetFileStream(long rangeStart, CancellationToken cancellationToken)
+    private async Task<CombinedStream> GetFileStream(long rangeStart, CancellationToken cancellationToken, bool isPrewarm = false)
     {
-        if (rangeStart == 0) return GetCombinedStream(0, cancellationToken);
+        // EnsureInnerStreamAsync calls this (via `_innerStreamTask ??= GetFileStream(...)`) WHILE
+        // HOLDING _innerStreamGate. The rangeStart==0 branch below has no await ahead of
+        // GetCombinedStream, so without this yield the synchronous portion of that branch — including
+        // TryAcquireSlot's now-bounded, thread-blocking wait for a pre-warm-tagged acquisition (see
+        // BufferedSegmentStream.TryAcquireSlot) — would run to completion INSIDE the caller's lock.
+        // rangeStart is always 0 for a pre-warm's target NzbFileStream (a fresh, not-yet-read instance
+        // for the next part), so that is exactly the pre-warm path: without yielding first, every other
+        // caller touching this instance (a live ReadAsync, Seek, Dispose) would block synchronously on
+        // the same monitor for the full pre-warm slot wait, not just share its (now-cancellable) task.
+        // Yielding first guarantees GetFileStream always returns a pending Task immediately, so the
+        // gate is released long before any blocking work begins.
+        await Task.Yield();
+
+        if (rangeStart == 0) return GetCombinedStream(0, cancellationToken, isPrewarm);
 
         using var seekCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var _ = seekCts.Token.SetScopedContext(_usageContext);
 
         var foundSegment = await SeekSegment(rangeStart, seekCts.Token).ConfigureAwait(false);
-        var stream = GetCombinedStream(foundSegment.FoundIndex, cancellationToken);
+        var stream = GetCombinedStream(foundSegment.FoundIndex, cancellationToken, isPrewarm);
         try
         {
             var bytesToDiscard = rangeStart - foundSegment.FoundByteRange.StartInclusive;
@@ -428,7 +497,7 @@ public class NzbFileStream : Stream, IWarmableStream
         }
     }
 
-    private CombinedStream GetCombinedStream(int firstSegmentIndex, CancellationToken ct)
+    private CombinedStream GetCombinedStream(int firstSegmentIndex, CancellationToken ct, bool isPrewarm = false)
     {
         // Dispose previous registration to prevent leak
         _cancellationRegistration.Dispose();
@@ -529,12 +598,14 @@ public class NzbFileStream : Stream, IWarmableStream
                         entryContextScope.Dispose();
                         throw;
                     }
-                });
+                },
+                isPrewarm,
+                ct);
 
             if (sharedHandle != null)
             {
-                Serilog.Log.Debug("[NzbFileStream] Created new shared stream for DavItemId={DavItemId} at offset {Offset}",
-                    davItemId.Value, totalBaseOffset);
+                Serilog.Log.Debug("[NzbFileStream] Created new shared stream for DavItemId={DavItemId} at offset {Offset}, isPrewarm={IsPrewarm}",
+                    davItemId.Value, totalBaseOffset, isPrewarm);
                 _cancellationRegistration = ct.Register(() =>
                 {
                     if (!_disposed) { try { _streamCts.Cancel(); } catch (ObjectDisposedException) { } }
@@ -551,7 +622,7 @@ public class NzbFileStream : Stream, IWarmableStream
         // reads and bypass retry/GD handling.
         var canUseAnyDirectBufferedStream = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > 0;
         var shouldUseFullDirectBufferedStream = canUseAnyDirectBufferedStream && _fileSegmentIds.Length > _concurrentConnections;
-        var acquiredSlot = shouldUseFullDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot() : null;
+        var acquiredSlot = shouldUseFullDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot(isPrewarm, ct) : null;
 
         // If a bounded HTTP Range request cannot get one of the scarce full buffered-stream
         // slots, still prefer a tiny direct BufferedSegmentStream over the legacy raw
@@ -609,8 +680,8 @@ public class NzbFileStream : Stream, IWarmableStream
                     }
                 }
 
-                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}, slotAcquired={SlotAcquired}, rangeReliabilityFallback={RangeFallback}",
-                    remainingSegments.Length, remainingSize, directConcurrentConnections, directBufferSize, acquiredSlot != null, useRangeReliabilityFallback);
+                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}, slotAcquired={SlotAcquired}, rangeReliabilityFallback={RangeFallback}, isPrewarm={IsPrewarm}",
+                    remainingSegments.Length, remainingSize, directConcurrentConnections, directBufferSize, acquiredSlot != null, useRangeReliabilityFallback, isPrewarm);
                 _contextScope = _streamCts.Token.SetScopedContext(bufferedContext);
                 var bufferedContextCt = _streamCts.Token;
 
@@ -702,6 +773,7 @@ public class NzbFileStream : Stream, IWarmableStream
             old = _innerStream;
             _innerStream = null;
             _innerStreamTask = null;
+            _innerStreamTaskIsPrewarm = false;
             _innerStreamGeneration++;
         }
         _cancellationRegistration.Dispose(); // Unregister callback first
@@ -721,6 +793,7 @@ public class NzbFileStream : Stream, IWarmableStream
             old = _innerStream;
             _innerStream = null;
             _innerStreamTask = null;
+            _innerStreamTaskIsPrewarm = false;
             _innerStreamGeneration++;
         }
         _cancellationRegistration.Dispose(); // Unregister callback first
