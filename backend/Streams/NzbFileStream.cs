@@ -213,17 +213,32 @@ public class NzbFileStream : Stream, IWarmableStream
                 var supersedePendingPrewarm = !isPrewarm && _innerStreamTask != null
                     && _innerStreamTaskIsPrewarm && !_innerStreamTask.IsCompleted;
 
-                if (_innerStreamTask == null || supersedePendingPrewarm)
+                // A task that has already gone terminally Canceled/Faulted is treated as if it were
+                // null: the ContinueWith below clears _innerStreamTask once it runs, but that runs on
+                // the thread-pool scheduler and is not synchronous with the antecedent's own
+                // completion — under thread-pool pressure the gap between "task is terminally failed"
+                // and "the continuation has actually cleared the field" is real and unbounded. A caller
+                // whose gate check lands in that gap must not adopt (and immediately re-fail with) a
+                // task that is already known-dead — checking Status here directly, rather than relying
+                // on the continuation's timing, makes recovery synchronous and deterministic for any
+                // caller, regardless of whether the continuation has run yet.
+                var isDeadTask = _innerStreamTask != null && _innerStreamTask.IsCompleted
+                    && _innerStreamTask.Status != TaskStatus.RanToCompletion;
+
+                if (_innerStreamTask == null || supersedePendingPrewarm || isDeadTask)
                 {
                     var newTask = GetFileStream(_position, ct, isPrewarm);
                     var newGeneration = _innerStreamGeneration;
                     _innerStreamTask = newTask;
                     _innerStreamTaskIsPrewarm = isPrewarm;
-                    // Driven by newTask's own completion — see the method doc comment above. Runs on
-                    // the default scheduler (not ExecuteSynchronously): the antecedent can fault/cancel
-                    // from inside code that does not hold _innerStreamGate, but there is no guarantee
-                    // of that for every possible failure path, and this must never risk re-entering the
-                    // lock on whatever thread happens to complete newTask.
+                    // Backstop for the case where no new caller ever arrives to trigger the inline
+                    // isDeadTask check above (so a dead reference doesn't dangle forever with nobody to
+                    // clear it) — not relied on for correctness, since isDeadTask already makes recovery
+                    // synchronous for any caller that DOES arrive. Runs on the default scheduler rather
+                    // than ExecuteSynchronously: same-thread lock re-entry wouldn't deadlock (Monitor is
+                    // reentrant), but the antecedent can fault/cancel from inside code with no
+                    // particular relationship to _innerStreamGate, so there's no benefit to forcing this
+                    // onto whatever thread happens to complete newTask instead of the thread pool.
                     newTask.ContinueWith(_ =>
                     {
                         lock (_innerStreamGate)
