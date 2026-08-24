@@ -183,13 +183,21 @@ public class NzbFileStream : Stream, IWarmableStream
     /// resolves, since by then _innerStreamTask no longer references it.
     ///
     /// Whichever task IS current, the await is wrapped in Task.WaitAsync(ct) so THIS caller's own
-    /// token can stop THIS caller's wait without touching shared state it doesn't own. Distinguishing
-    /// "my own wait gave up" from "the construction itself failed" is done by checking `task`'s own
-    /// terminal state (IsCanceled/IsFaulted) after the catch, NOT by comparing the caught exception's
-    /// CancellationToken against ct — two different callers can legitimately pass equal-valued tokens
-    /// (e.g. both CancellationToken.None, or the same shared upstream token), so token-value equality
-    /// cannot reliably tell "my WaitAsync fired" apart from "the construction itself was cancelled
-    /// with a token that happens to compare equal to mine".
+    /// token can stop THIS caller's wait without touching shared state it doesn't own — WaitAsync's
+    /// cancellation surfaces only to THIS caller and never affects the underlying `task` itself.
+    ///
+    /// Cleanup on failure is driven by the construction task's OWN terminal transition, not by
+    /// inferring it from inside any particular caller's catch block. A per-caller snapshot check (e.g.
+    /// "is task.IsCanceled false right now?") races the task's own completion: a caller's WaitAsync(ct)
+    /// can throw a moment before the antecedent's status has actually settled to Canceled/Faulted,
+    /// making that snapshot see "not failed yet" for a construction that IS about to fail — leaving it
+    /// memoized. Instead, a ContinueWith(OnlyOnCanceled|OnlyOnFaulted equivalent) is attached at the
+    /// exact moment a NEW task is created below and performs the compare-and-clear itself, driven
+    /// purely by that task's own completion — fires exactly once, exactly when (and only when) THAT
+    /// task genuinely lands in a failed terminal state, regardless of which caller's cancellation fired
+    /// first or how many callers are awaiting it. Callers below therefore just propagate whatever
+    /// Task.WaitAsync(ct) gives them — their own cancellation, or the construction's real failure —
+    /// without needing to decide who's responsible for clearing.
     /// </summary>
     private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct, bool isPrewarm = false)
     {
@@ -207,47 +215,32 @@ public class NzbFileStream : Stream, IWarmableStream
 
                 if (_innerStreamTask == null || supersedePendingPrewarm)
                 {
-                    _innerStreamTask = GetFileStream(_position, ct, isPrewarm);
+                    var newTask = GetFileStream(_position, ct, isPrewarm);
+                    var newGeneration = _innerStreamGeneration;
+                    _innerStreamTask = newTask;
                     _innerStreamTaskIsPrewarm = isPrewarm;
+                    // Driven by newTask's own completion — see the method doc comment above. Runs on
+                    // the default scheduler (not ExecuteSynchronously): the antecedent can fault/cancel
+                    // from inside code that does not hold _innerStreamGate, but there is no guarantee
+                    // of that for every possible failure path, and this must never risk re-entering the
+                    // lock on whatever thread happens to complete newTask.
+                    newTask.ContinueWith(_ =>
+                    {
+                        lock (_innerStreamGate)
+                        {
+                            if (_innerStreamGeneration == newGeneration && _innerStreamTask == newTask)
+                            {
+                                _innerStreamTask = null;
+                                _innerStreamTaskIsPrewarm = false;
+                            }
+                        }
+                    }, CancellationToken.None, TaskContinuationOptions.NotOnRanToCompletion, TaskScheduler.Default);
                 }
                 task = _innerStreamTask;
                 generation = _innerStreamGeneration;
             }
 
-            CombinedStream stream;
-            try
-            {
-                stream = await task.WaitAsync(ct).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!task.IsCanceled && !task.IsFaulted)
-            {
-                // The shared construction itself is not (yet, or ever) in a failed/cancelled terminal
-                // state — this exception can only be Task.WaitAsync's own synthesized cancellation for
-                // THIS caller's ct, not a real construction failure. The construction may still be
-                // pending or may have already succeeded for someone else, so — unlike the general catch
-                // below — do NOT clear _innerStreamTask: doing so could null out a task that a
-                // concurrent caller (e.g. the original pre-warm caller still directly awaiting `task`)
-                // is about to legitimately adopt, making its freshly-built stream look "superseded" and
-                // get disposed for no reason. Just propagate this caller's own cancellation.
-                throw;
-            }
-            catch
-            {
-                // The construction itself failed or was cancelled via its OWN token (task is now
-                // genuinely Canceled/Faulted) — clear the memoized task so the NEXT caller starts a
-                // fresh one instead of forever re-awaiting this dead task. Compare-and-clear: only if
-                // nothing else (a Seek, another failure, a live-read supersede) already moved past this
-                // generation/task, so we don't stomp on a concurrent invalidation or a newer attempt.
-                lock (_innerStreamGate)
-                {
-                    if (_innerStreamGeneration == generation && _innerStreamTask == task)
-                    {
-                        _innerStreamTask = null;
-                        _innerStreamTaskIsPrewarm = false;
-                    }
-                }
-                throw;
-            }
+            var stream = await task.WaitAsync(ct).ConfigureAwait(false);
 
             CombinedStream? current;
             bool adopted;

@@ -246,12 +246,14 @@ public class NzbFileStreamPrewarmCoalescingCancellationTests
 
         client.Release(); // let any still-unwinding gated call resolve rather than hang forever
 
-        // The memoized task must not stay poisoned forever. There is an inherent small window between
-        // the construction genuinely failing and EnsureInnerStreamAsync's own compare-and-clear
-        // observing task.IsCanceled — this caller's own Task.WaitAsync(ct) can legitimately observe
-        // cancellation microseconds before the antecedent task's status has settled, since it is racing
-        // the same Cancel() call rather than an independent one. A short bounded retry tolerates that
-        // window without weakening the guarantee: it must not stay poisoned indefinitely.
+        // The memoized task must not stay poisoned. Clearing is driven by a ContinueWith attached to
+        // the construction task itself (see EnsureInnerStreamAsync), so it fires deterministically off
+        // that task's own terminal transition rather than being inferred from inside whichever caller's
+        // catch block happens to run first — it should succeed on the very first attempt here. The
+        // short bounded retry below is kept only as a defensive margin against generic scheduling
+        // delays (the continuation still has to be scheduled and run), not because clearing itself is
+        // racy — see ConstructionFailure_ClearsExactlyOnce_EvenUnderAdversarialConcurrentCancellation
+        // for a direct test of the specific TOCTOU window this replaced a snapshot-based check to fix.
         int? read = null;
         Exception? lastEx = null;
         var buffer2 = new byte[SegmentSize];
@@ -273,5 +275,86 @@ public class NzbFileStreamPrewarmCoalescingCancellationTests
             $"a fresh read at the same position must eventually succeed once the failed construction clears; last error: {lastEx}");
         Assert.Equal(SegmentSize, read!.Value);
         Assert.Equal((byte)3, buffer2[0]); // segment index 2's fill byte — real retried data, not stale
+    }
+
+    /// <summary>
+    /// Direct regression test for the round-3 finding: a per-caller snapshot check
+    /// (`!task.IsCanceled &amp;&amp; !task.IsFaulted` read inside a catch block) races the construction
+    /// task's own completion — a caller's Task.WaitAsync(ct) can throw a moment before the antecedent's
+    /// status has actually settled, so the snapshot can see "not failed yet" for a construction that IS
+    /// about to fail, leaving it memoized. The fix moved cleanup onto a ContinueWith attached at the
+    /// construction task's creation, driven purely by that task's own terminal transition.
+    ///
+    /// This fires both an UNRELATED caller's own cancellation (must never clear the shared task) and
+    /// the construction's OWN driving cancellation (must always clear it) as close together in time as
+    /// possible, repeated several iterations, and then requires the next read to succeed on a single,
+    /// short-timeout attempt — no bounded retry loop tolerating a race window, since the fix makes
+    /// clearing deterministic rather than eventually-consistent.
+    /// </summary>
+    [Fact]
+    public async Task ConstructionFailure_ClearsExactlyOnce_EvenUnderAdversarialConcurrentCancellation()
+    {
+        for (var iteration = 0; iteration < 20; iteration++)
+        {
+            var client = new GatedHeaderNntpClient();
+            await using var stream = MakeStream(client);
+            stream.Seek(SegmentSize * 2L, SeekOrigin.Begin);
+
+            // Creates _innerStreamTask; its own token drives the real, underlying construction, so
+            // cancelling it genuinely fails the shared task itself.
+            using var creatorCts = new CancellationTokenSource();
+            var buffer1 = new byte[SegmentSize];
+            var creatorReadTask = stream.ReadAsync(buffer1, 0, buffer1.Length, creatorCts.Token);
+
+            // Coalesces onto the same in-flight task with its own, independent token.
+            using var otherCts = new CancellationTokenSource();
+            var buffer2 = new byte[SegmentSize];
+            var otherReadTask = stream.ReadAsync(buffer2, 0, buffer2.Length, otherCts.Token);
+
+            await Task.Delay(TimeSpan.FromMilliseconds(50)); // let both reach the gated header call
+
+            // Fire both cancellations from separate threads as close together as possible — the
+            // adversarial timing the old snapshot-based check could lose.
+            await Task.WhenAll(
+                Task.Run(() => creatorCts.Cancel()),
+                Task.Run(() => otherCts.Cancel()));
+
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => creatorReadTask.WaitAsync(TimeSpan.FromSeconds(5)));
+            await Assert.ThrowsAnyAsync<OperationCanceledException>(
+                () => otherReadTask.WaitAsync(TimeSpan.FromSeconds(5)));
+
+            client.Release();
+
+            // The shared construction genuinely failed (the creator's own token drove it), so the
+            // memoized task must be cleared — deterministically, regardless of exactly how the two
+            // cancellations interleaved. The clearing ContinueWith is attached to the real construction
+            // task itself, which can settle to its terminal Canceled state a short async scheduling hop
+            // AFTER creatorReadTask (which awaits a Task.WaitAsync wrapper around it, not that task
+            // directly) has already thrown — so this polls briefly rather than asserting success on a
+            // single immediate attempt. That is normal async-continuation latency, not the TOCTOU
+            // window this test targets: it should settle within a couple of scheduler ticks, not
+            // require the many-attempts/long-timeout tolerance the earlier bounded-retry test used
+            // pre-fix.
+            int? read = null;
+            for (var attempt = 0; attempt < 5 && read == null; attempt++)
+            {
+                try
+                {
+                    var buffer3 = new byte[SegmentSize];
+                    var thisRead = await stream.ReadAsync(buffer3, 0, buffer3.Length, CancellationToken.None)
+                        .WaitAsync(TimeSpan.FromMilliseconds(500));
+                    read = thisRead;
+                    Assert.Equal((byte)3, buffer3[0]); // segment index 2's fill byte — real data, not stale
+                }
+                catch (OperationCanceledException) when (attempt < 4)
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(20));
+                }
+            }
+
+            Assert.True(read.HasValue, "the fresh read must succeed once the failed construction's clear settles");
+            Assert.Equal(SegmentSize, read!.Value);
+        }
     }
 }
