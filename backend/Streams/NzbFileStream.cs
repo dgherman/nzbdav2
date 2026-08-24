@@ -24,6 +24,10 @@ public class NzbFileStream : Stream, IWarmableStream
     private long _position = 0;
     private CombinedStream? _innerStream;
     private Task<CombinedStream>? _innerStreamTask;
+    // True while _innerStreamTask is a pre-warm-tagged (isPrewarm: true) construction. Lets a live
+    // read that finds one still pending supersede it with its own live-tagged attempt instead of
+    // inheriting pre-warm's bounded slot wait as its own latency — see EnsureInnerStreamAsync.
+    private bool _innerStreamTaskIsPrewarm;
     // Bumped every time _innerStreamTask is invalidated (Seek, the premature-EOF recreate path, or
     // Dispose). A caller that started awaiting a construction task compares its captured generation
     // against this after the await to detect "something moved on while I was constructing" instead
@@ -168,12 +172,24 @@ public class NzbFileStream : Stream, IWarmableStream
     ///
     /// A real read can arrive while a pre-warm-tagged construction (isPrewarm: true) is still memoized
     /// as _innerStreamTask and mid-flight on its own bounded slot wait (BufferedSegmentStream.
-    /// TryAcquireSlot's up-to-PrewarmSlotAcquireTimeout wait — see NzbFileStream.WarmupAsync). That real
-    /// read must not be stuck un-cancellably behind a wait it never asked for and whose token it does
-    /// not control: the await below is wrapped in Task.WaitAsync(ct) so THIS caller's own token can
-    /// stop THIS caller's wait without touching the shared task, which may still succeed and be
-    /// legitimately adopted (by the pre-warm caller that started it, or a later caller in this
-    /// generation) even after this caller gives up on it.
+    /// TryAcquireSlot's up-to-PrewarmSlotAcquireTimeout wait — see NzbFileStream.WarmupAsync). A live
+    /// read must not inherit that wait as its own latency — before pre-warming existed, a live read's
+    /// own slot acquisition was always a single non-blocking attempt, degrading instantly on
+    /// contention. So a live (isPrewarm: false) caller that finds the memoized task is pre-warm-tagged
+    /// AND still pending supersedes it with its OWN fresh, live-tagged construction (own instant-fail
+    /// slot semantics) rather than joining it — see the supersede check below. The original pre-warm
+    /// task is not cancelled; it keeps running for whoever (if anyone) still needs it, and the
+    /// existing "adopted" check further down disposes its result instead of resurrecting it once it
+    /// resolves, since by then _innerStreamTask no longer references it.
+    ///
+    /// Whichever task IS current, the await is wrapped in Task.WaitAsync(ct) so THIS caller's own
+    /// token can stop THIS caller's wait without touching shared state it doesn't own. Distinguishing
+    /// "my own wait gave up" from "the construction itself failed" is done by checking `task`'s own
+    /// terminal state (IsCanceled/IsFaulted) after the catch, NOT by comparing the caught exception's
+    /// CancellationToken against ct — two different callers can legitimately pass equal-valued tokens
+    /// (e.g. both CancellationToken.None, or the same shared upstream token), so token-value equality
+    /// cannot reliably tell "my WaitAsync fired" apart from "the construction itself was cancelled
+    /// with a token that happens to compare equal to mine".
     /// </summary>
     private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct, bool isPrewarm = false)
     {
@@ -185,7 +201,15 @@ public class NzbFileStream : Stream, IWarmableStream
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 if (_innerStream != null) return _innerStream;
-                _innerStreamTask ??= GetFileStream(_position, ct, isPrewarm);
+
+                var supersedePendingPrewarm = !isPrewarm && _innerStreamTask != null
+                    && _innerStreamTaskIsPrewarm && !_innerStreamTask.IsCompleted;
+
+                if (_innerStreamTask == null || supersedePendingPrewarm)
+                {
+                    _innerStreamTask = GetFileStream(_position, ct, isPrewarm);
+                    _innerStreamTaskIsPrewarm = isPrewarm;
+                }
                 task = _innerStreamTask;
                 generation = _innerStreamGeneration;
             }
@@ -195,30 +219,31 @@ public class NzbFileStream : Stream, IWarmableStream
             {
                 stream = await task.WaitAsync(ct).ConfigureAwait(false);
             }
-            catch (OperationCanceledException ex) when (ex.CancellationToken == ct)
+            catch (OperationCanceledException) when (!task.IsCanceled && !task.IsFaulted)
             {
-                // THIS caller's own token is what fired — Task.WaitAsync synthesizes exactly this
-                // exception (carrying the token passed to it) when ct cancels before the shared task
-                // does, regardless of whether that shared task ever fails. The construction itself is
-                // untouched and may still succeed, so — unlike the general catch below — do NOT clear
-                // _innerStreamTask: doing so could null out a task that a concurrent caller (e.g. the
-                // original pre-warm caller still directly awaiting `task`) is about to legitimately
-                // adopt, making its freshly-built stream look "superseded" and get disposed for no
-                // reason. Just propagate this caller's own cancellation.
+                // The shared construction itself is not (yet, or ever) in a failed/cancelled terminal
+                // state — this exception can only be Task.WaitAsync's own synthesized cancellation for
+                // THIS caller's ct, not a real construction failure. The construction may still be
+                // pending or may have already succeeded for someone else, so — unlike the general catch
+                // below — do NOT clear _innerStreamTask: doing so could null out a task that a
+                // concurrent caller (e.g. the original pre-warm caller still directly awaiting `task`)
+                // is about to legitimately adopt, making its freshly-built stream look "superseded" and
+                // get disposed for no reason. Just propagate this caller's own cancellation.
                 throw;
             }
             catch
             {
-                // Construction failed (or was cancelled via its OWN token) — clear the memoized task so
-                // the NEXT caller starts a fresh one instead of forever re-awaiting this dead task.
-                // Compare-and-clear: only if nothing else (a Seek, another failure) already moved past
-                // this generation/task, so we don't stomp on a concurrent invalidation or a newer
-                // attempt.
+                // The construction itself failed or was cancelled via its OWN token (task is now
+                // genuinely Canceled/Faulted) — clear the memoized task so the NEXT caller starts a
+                // fresh one instead of forever re-awaiting this dead task. Compare-and-clear: only if
+                // nothing else (a Seek, another failure, a live-read supersede) already moved past this
+                // generation/task, so we don't stomp on a concurrent invalidation or a newer attempt.
                 lock (_innerStreamGate)
                 {
                     if (_innerStreamGeneration == generation && _innerStreamTask == task)
                     {
                         _innerStreamTask = null;
+                        _innerStreamTaskIsPrewarm = false;
                     }
                 }
                 throw;
@@ -257,6 +282,7 @@ public class NzbFileStream : Stream, IWarmableStream
             old = _innerStream;
             _innerStream = null;
             _innerStreamTask = null;
+            _innerStreamTaskIsPrewarm = false;
             _innerStreamGeneration++;
         }
         old?.Dispose();
@@ -739,6 +765,7 @@ public class NzbFileStream : Stream, IWarmableStream
             old = _innerStream;
             _innerStream = null;
             _innerStreamTask = null;
+            _innerStreamTaskIsPrewarm = false;
             _innerStreamGeneration++;
         }
         _cancellationRegistration.Dispose(); // Unregister callback first
@@ -758,6 +785,7 @@ public class NzbFileStream : Stream, IWarmableStream
             old = _innerStream;
             _innerStream = null;
             _innerStreamTask = null;
+            _innerStreamTaskIsPrewarm = false;
             _innerStreamGeneration++;
         }
         _cancellationRegistration.Dispose(); // Unregister callback first
