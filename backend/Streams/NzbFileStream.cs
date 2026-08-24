@@ -165,6 +165,15 @@ public class NzbFileStream : Stream, IWarmableStream
     /// of resurrecting it. If construction itself throws or is cancelled, the memoized task is cleared
     /// (when it's still the one that failed) so the next caller retries fresh instead of forever
     /// re-awaiting a dead task — a single cancelled read must not permanently poison every read after it.
+    ///
+    /// A real read can arrive while a pre-warm-tagged construction (isPrewarm: true) is still memoized
+    /// as _innerStreamTask and mid-flight on its own bounded slot wait (BufferedSegmentStream.
+    /// TryAcquireSlot's up-to-PrewarmSlotAcquireTimeout wait — see NzbFileStream.WarmupAsync). That real
+    /// read must not be stuck un-cancellably behind a wait it never asked for and whose token it does
+    /// not control: the await below is wrapped in Task.WaitAsync(ct) so THIS caller's own token can
+    /// stop THIS caller's wait without touching the shared task, which may still succeed and be
+    /// legitimately adopted (by the pre-warm caller that started it, or a later caller in this
+    /// generation) even after this caller gives up on it.
     /// </summary>
     private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct, bool isPrewarm = false)
     {
@@ -184,14 +193,27 @@ public class NzbFileStream : Stream, IWarmableStream
             CombinedStream stream;
             try
             {
-                stream = await task.ConfigureAwait(false);
+                stream = await task.WaitAsync(ct).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException ex) when (ex.CancellationToken == ct)
+            {
+                // THIS caller's own token is what fired — Task.WaitAsync synthesizes exactly this
+                // exception (carrying the token passed to it) when ct cancels before the shared task
+                // does, regardless of whether that shared task ever fails. The construction itself is
+                // untouched and may still succeed, so — unlike the general catch below — do NOT clear
+                // _innerStreamTask: doing so could null out a task that a concurrent caller (e.g. the
+                // original pre-warm caller still directly awaiting `task`) is about to legitimately
+                // adopt, making its freshly-built stream look "superseded" and get disposed for no
+                // reason. Just propagate this caller's own cancellation.
+                throw;
             }
             catch
             {
-                // Construction failed (or was cancelled) — clear the memoized task so the NEXT caller
-                // starts a fresh one instead of forever re-awaiting this dead task. Compare-and-clear:
-                // only if nothing else (a Seek, another failure) already moved past this generation/
-                // task, so we don't stomp on a concurrent invalidation or a newer attempt.
+                // Construction failed (or was cancelled via its OWN token) — clear the memoized task so
+                // the NEXT caller starts a fresh one instead of forever re-awaiting this dead task.
+                // Compare-and-clear: only if nothing else (a Seek, another failure) already moved past
+                // this generation/task, so we don't stomp on a concurrent invalidation or a newer
+                // attempt.
                 lock (_innerStreamGate)
                 {
                     if (_innerStreamGeneration == generation && _innerStreamTask == task)
@@ -398,6 +420,19 @@ public class NzbFileStream : Stream, IWarmableStream
 
     private async Task<CombinedStream> GetFileStream(long rangeStart, CancellationToken cancellationToken, bool isPrewarm = false)
     {
+        // EnsureInnerStreamAsync calls this (via `_innerStreamTask ??= GetFileStream(...)`) WHILE
+        // HOLDING _innerStreamGate. The rangeStart==0 branch below has no await ahead of
+        // GetCombinedStream, so without this yield the synchronous portion of that branch — including
+        // TryAcquireSlot's now-bounded, thread-blocking wait for a pre-warm-tagged acquisition (see
+        // BufferedSegmentStream.TryAcquireSlot) — would run to completion INSIDE the caller's lock.
+        // rangeStart is always 0 for a pre-warm's target NzbFileStream (a fresh, not-yet-read instance
+        // for the next part), so that is exactly the pre-warm path: without yielding first, every other
+        // caller touching this instance (a live ReadAsync, Seek, Dispose) would block synchronously on
+        // the same monitor for the full pre-warm slot wait, not just share its (now-cancellable) task.
+        // Yielding first guarantees GetFileStream always returns a pending Task immediately, so the
+        // gate is released long before any blocking work begins.
+        await Task.Yield();
+
         if (rangeStart == 0) return GetCombinedStream(0, cancellationToken, isPrewarm);
 
         using var seekCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
