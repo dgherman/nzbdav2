@@ -133,6 +133,11 @@ public class BufferedSegmentStream : Stream, ITouchableStream
     // sitting through the real 60s wait.
     internal static TimeSpan PermitAcquireTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
+    // How long a pre-warm request blocks waiting for a slot to free up before giving up (see
+    // TryAcquireSlot). Internal rather than const so a test can drive the wait path without
+    // sitting through the real 5s wait.
+    internal static TimeSpan PrewarmSlotAcquireTimeout { get; set; } = TimeSpan.FromSeconds(5);
+
     // Concurrent stream cap — limits how many BufferedSegmentStreams can exist simultaneously
     private static volatile SemaphoreSlim s_concurrentStreamSlots = new(2, 2);
     private SemaphoreSlim? _acquiredSemaphore; // Tracks which semaphore instance we acquired from
@@ -207,10 +212,29 @@ public class BufferedSegmentStream : Stream, ITouchableStream
         }
     }
 
-    public static SemaphoreSlim? TryAcquireSlot()
+    /// <summary>
+    /// Acquires a global concurrent-stream slot. A plain (non-pre-warm) caller gets exactly today's
+    /// behaviour: one non-blocking attempt, fail fast so it can fall back to the raw/unbuffered path.
+    ///
+    /// <paramref name="isPrewarm"/> requests get a bounded blocking wait instead of a single
+    /// non-blocking attempt. Without this, a brand-new/unrelated stream request landing at the same
+    /// moment an already-playing stream needs to pre-warm its next RAR volume (<see
+    /// cref="CombinedStream.TriggerPrewarmIfNeeded"/>) can win the last free slot outright: pre-warm's
+    /// one-shot check fails and the boundary crossing cold-degrades to the unbuffered fallback,
+    /// producing the multi-second freeze pre-warming exists to avoid. Waiting gives pre-warm a real
+    /// chance at the slot once whatever briefly holds it — often a short-lived, unrelated fetch —
+    /// releases it, instead of giving up the instant it finds none free.
+    ///
+    /// Safe to block here: this is only ever reached with <paramref name="isPrewarm"/> true from
+    /// <see cref="CombinedStream.PrewarmPartAsync"/>'s own <c>Task.Run</c>, never from a thread
+    /// serving a real HTTP request, so the wait cannot stall playback that is already in flight.
+    /// </summary>
+    public static SemaphoreSlim? TryAcquireSlot(bool isPrewarm = false, CancellationToken ct = default)
     {
         var semaphore = s_concurrentStreamSlots;
-        return semaphore.Wait(0) ? semaphore : null;
+        if (semaphore.Wait(0)) return semaphore;
+        if (!isPrewarm) return null;
+        return semaphore.Wait(PrewarmSlotAcquireTimeout, ct) ? semaphore : null;
     }
 
     public void SetAcquiredSlot(SemaphoreSlim semaphore)

@@ -166,7 +166,7 @@ public class NzbFileStream : Stream, IWarmableStream
     /// (when it's still the one that failed) so the next caller retries fresh instead of forever
     /// re-awaiting a dead task — a single cancelled read must not permanently poison every read after it.
     /// </summary>
-    private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct)
+    private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct, bool isPrewarm = false)
     {
         while (true)
         {
@@ -176,7 +176,7 @@ public class NzbFileStream : Stream, IWarmableStream
             {
                 ObjectDisposedException.ThrowIf(_disposed, this);
                 if (_innerStream != null) return _innerStream;
-                _innerStreamTask ??= GetFileStream(_position, ct);
+                _innerStreamTask ??= GetFileStream(_position, ct, isPrewarm);
                 task = _innerStreamTask;
                 generation = _innerStreamGeneration;
             }
@@ -248,7 +248,7 @@ public class NzbFileStream : Stream, IWarmableStream
     public async Task WarmupAsync(CancellationToken ct)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        await EnsureInnerStreamAsync(ct).ConfigureAwait(false);
+        await EnsureInnerStreamAsync(ct, isPrewarm: true).ConfigureAwait(false);
     }
 
     public override long Seek(long offset, SeekOrigin origin)
@@ -396,15 +396,15 @@ public class NzbFileStream : Stream, IWarmableStream
         ).ConfigureAwait(false);
     }
 
-    private async Task<CombinedStream> GetFileStream(long rangeStart, CancellationToken cancellationToken)
+    private async Task<CombinedStream> GetFileStream(long rangeStart, CancellationToken cancellationToken, bool isPrewarm = false)
     {
-        if (rangeStart == 0) return GetCombinedStream(0, cancellationToken);
+        if (rangeStart == 0) return GetCombinedStream(0, cancellationToken, isPrewarm);
 
         using var seekCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         using var _ = seekCts.Token.SetScopedContext(_usageContext);
 
         var foundSegment = await SeekSegment(rangeStart, seekCts.Token).ConfigureAwait(false);
-        var stream = GetCombinedStream(foundSegment.FoundIndex, cancellationToken);
+        var stream = GetCombinedStream(foundSegment.FoundIndex, cancellationToken, isPrewarm);
         try
         {
             var bytesToDiscard = rangeStart - foundSegment.FoundByteRange.StartInclusive;
@@ -428,7 +428,7 @@ public class NzbFileStream : Stream, IWarmableStream
         }
     }
 
-    private CombinedStream GetCombinedStream(int firstSegmentIndex, CancellationToken ct)
+    private CombinedStream GetCombinedStream(int firstSegmentIndex, CancellationToken ct, bool isPrewarm = false)
     {
         // Dispose previous registration to prevent leak
         _cancellationRegistration.Dispose();
@@ -529,12 +529,14 @@ public class NzbFileStream : Stream, IWarmableStream
                         entryContextScope.Dispose();
                         throw;
                     }
-                });
+                },
+                isPrewarm,
+                ct);
 
             if (sharedHandle != null)
             {
-                Serilog.Log.Debug("[NzbFileStream] Created new shared stream for DavItemId={DavItemId} at offset {Offset}",
-                    davItemId.Value, totalBaseOffset);
+                Serilog.Log.Debug("[NzbFileStream] Created new shared stream for DavItemId={DavItemId} at offset {Offset}, isPrewarm={IsPrewarm}",
+                    davItemId.Value, totalBaseOffset, isPrewarm);
                 _cancellationRegistration = ct.Register(() =>
                 {
                     if (!_disposed) { try { _streamCts.Cancel(); } catch (ObjectDisposedException) { } }
@@ -551,7 +553,7 @@ public class NzbFileStream : Stream, IWarmableStream
         // reads and bypass retry/GD handling.
         var canUseAnyDirectBufferedStream = shouldUseBufferedStreaming && _concurrentConnections >= 3 && _fileSegmentIds.Length > 0;
         var shouldUseFullDirectBufferedStream = canUseAnyDirectBufferedStream && _fileSegmentIds.Length > _concurrentConnections;
-        var acquiredSlot = shouldUseFullDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot() : null;
+        var acquiredSlot = shouldUseFullDirectBufferedStream ? BufferedSegmentStream.TryAcquireSlot(isPrewarm, ct) : null;
 
         // If a bounded HTTP Range request cannot get one of the scarce full buffered-stream
         // slots, still prefer a tiny direct BufferedSegmentStream over the legacy raw
@@ -609,8 +611,8 @@ public class NzbFileStream : Stream, IWarmableStream
                     }
                 }
 
-                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}, slotAcquired={SlotAcquired}, rangeReliabilityFallback={RangeFallback}",
-                    remainingSegments.Length, remainingSize, directConcurrentConnections, directBufferSize, acquiredSlot != null, useRangeReliabilityFallback);
+                Serilog.Log.Debug("[NzbFileStream] Creating BufferedSegmentStream for {SegmentCount} segments, approximated size: {ApproximateSize}, concurrent connections: {ConcurrentConnections}, buffer size: {BufferSize}, slotAcquired={SlotAcquired}, rangeReliabilityFallback={RangeFallback}, isPrewarm={IsPrewarm}",
+                    remainingSegments.Length, remainingSize, directConcurrentConnections, directBufferSize, acquiredSlot != null, useRangeReliabilityFallback, isPrewarm);
                 _contextScope = _streamCts.Token.SetScopedContext(bufferedContext);
                 var bufferedContextCt = _streamCts.Token;
 

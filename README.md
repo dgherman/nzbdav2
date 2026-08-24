@@ -236,6 +236,11 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.4 (2026-08-24)
+The v0.12.3 RAR-volume pre-warm fix (below) could itself be starved: pre-warming a stream's next volume and a brand-new, unrelated request for the same file competed for the same scarce global concurrent-stream slot pool (2 slots at the shipped 512 MB heap tier), and both made exactly one non-blocking attempt to acquire one. Production logs showed a fresh byte-0 request winning the last free slot moments before an already-playing stream's own pre-warm needed one — degrading that pre-warm to the raw/unbuffered fallback right at the boundary crossing and cold-stalling playback, the exact freeze the pre-warm exists to prevent. Measured: 3056ms and 1731ms starvation waits immediately following a rogue `Part 0` stream request and a fallback `Creating BufferedSegmentStream ... slotAcquired=True` log line, in the same second as the real stream's own volume-boundary crossing.
+
+*   **Fix**: A pre-warm's slot acquisition now blocks (bounded by a 5s timeout) for a slot to free up instead of giving up after a single failed non-blocking attempt. A brand-new/unrelated stream request's acquisition is unchanged — still exactly one non-blocking attempt, so it degrades instantly under contention rather than waiting. This is safe because a pre-warm-tagged acquisition is only ever reached from `CombinedStream.PrewarmPartAsync`'s own background task, never a request-serving thread, so blocking there cannot stall a read already in flight. No change to the global slot cap itself — capacity for ordinary streams is unaffected.
+
 ## v0.12.3 (2026-08-23)
 Streaming a RAR-multipart file (a season episode split across `.r00`/`.r01`/… volumes) froze for 1-3 seconds every time playback crossed a volume boundary — audio kept going from its own smaller pre-decoded buffer while the video stalled and then caught up. Confirmed via a live debug-log capture on real streams (Alone S13E06, SNL S50E20): `[CombinedStream] Part N exhausted` was immediately followed by a cold `Creating BufferedSegmentStream` and a `PREFETCH WINDOW` line reset to `effective=74 of 74`, then 1-3 seconds later a `Starvation: Waited 1600-2700ms` — the exact moment the freeze happens, roughly once per minute for the whole file (once per ~56MB volume at 1080p).
 
