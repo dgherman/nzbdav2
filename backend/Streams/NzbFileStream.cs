@@ -6,7 +6,7 @@ using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
-public class NzbFileStream : Stream
+public class NzbFileStream : Stream, IWarmableStream
 {
     private readonly string[] _fileSegmentIds;
     private readonly long _fileSize;
@@ -23,6 +23,15 @@ public class NzbFileStream : Stream
 
     private long _position = 0;
     private CombinedStream? _innerStream;
+    private Task<CombinedStream>? _innerStreamTask;
+    // Bumped every time _innerStreamTask is invalidated (Seek, the premature-EOF recreate path, or
+    // Dispose). A caller that started awaiting a construction task compares its captured generation
+    // against this after the await to detect "something moved on while I was constructing" instead
+    // of unconditionally resurrecting a stream for a position (or a disposed stream) it's no longer
+    // valid for. All reads AND mutations of _innerStream / _innerStreamTask / _innerStreamGeneration
+    // go through _innerStreamGate so ReadAsync and WarmupAsync (background pre-warm) can't race it.
+    private int _innerStreamGeneration;
+    private readonly object _innerStreamGate = new();
     private bool _disposed;
     // Set after a premature EOF (reader fell behind a shared stream's ring-buffer window).
     // Forces subsequent inner streams to skip the shared-stream attach and use a private
@@ -104,13 +113,14 @@ public class NzbFileStream : Stream
         ObjectDisposedException.ThrowIf(_disposed, this);
         _totalReadCount++;
 
-        if (_innerStream == null)
-        {
-            Serilog.Log.Debug("[NzbFileStream] Creating inner stream at position {Position}", _position);
-            _innerStream = await GetFileStream(_position, cancellationToken).ConfigureAwait(false);
-        }
+        // EnsureInnerStreamAsync is the ONLY place _innerStream is ever assigned — deliberately not
+        // re-assigned here. If it were, a concurrent Seek()/InvalidateInnerStream() that runs in the
+        // gap between EnsureInnerStreamAsync returning and this continuation resuming would have its
+        // invalidation silently undone by this line writing the (now-stale/disposed) stream straight
+        // back into the field. Use the returned reference locally for this call only.
+        var stream = await EnsureInnerStreamAsync(cancellationToken).ConfigureAwait(false);
 
-        var read = await _innerStream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+        var read = await stream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
         _position += read;
 
         // Reset consecutive seek counter on successful read
@@ -124,14 +134,13 @@ public class NzbFileStream : Stream
         if (read == 0 && _position < _fileSize)
         {
             Serilog.Log.Debug("[NzbFileStream] Premature EOF at position {Position}/{FileSize}, recreating inner stream (private, no shared attach)", _position, _fileSize);
-            _innerStream?.Dispose();
-            _innerStream = null;
+            InvalidateInnerStream();
             // Avoid re-attaching to the lagging shared stream that just returned 0 — otherwise we
             // loop forever recreating + re-attaching to the same advanced entry. Use a private stream.
             _avoidSharedStream = true;
-            // Re-attempt the read with a new inner stream
-            _innerStream = await GetFileStream(_position, cancellationToken).ConfigureAwait(false);
-            read = await _innerStream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
+            // Re-attempt the read with a new inner stream — again, local only, never re-assigned here.
+            stream = await EnsureInnerStreamAsync(cancellationToken).ConfigureAwait(false);
+            read = await stream.ReadAsync(buffer, offset, count, cancellationToken).ConfigureAwait(false);
             _position += read;
         }
 
@@ -142,6 +151,104 @@ public class NzbFileStream : Stream
         }
 
         return read;
+    }
+
+    /// <summary>
+    /// Returns the current inner stream, constructing it if necessary. This is the ONLY method that
+    /// ever assigns _innerStream — callers (ReadAsync, WarmupAsync) must use the returned reference
+    /// locally and never write it back to the field themselves, or they can undo a concurrent Seek().
+    ///
+    /// Safe to call concurrently from both a real read and a background pre-warm: both route through
+    /// this, so at most one construction ever happens per generation. An awaiter that started before
+    /// an intervening Seek()/recreate/Dispose adopts the result only if that generation is still
+    /// current — otherwise it disposes the now-stale stream and defers to whatever is current instead
+    /// of resurrecting it. If construction itself throws or is cancelled, the memoized task is cleared
+    /// (when it's still the one that failed) so the next caller retries fresh instead of forever
+    /// re-awaiting a dead task — a single cancelled read must not permanently poison every read after it.
+    /// </summary>
+    private async Task<CombinedStream> EnsureInnerStreamAsync(CancellationToken ct)
+    {
+        while (true)
+        {
+            Task<CombinedStream> task;
+            int generation;
+            lock (_innerStreamGate)
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                if (_innerStream != null) return _innerStream;
+                _innerStreamTask ??= GetFileStream(_position, ct);
+                task = _innerStreamTask;
+                generation = _innerStreamGeneration;
+            }
+
+            CombinedStream stream;
+            try
+            {
+                stream = await task.ConfigureAwait(false);
+            }
+            catch
+            {
+                // Construction failed (or was cancelled) — clear the memoized task so the NEXT caller
+                // starts a fresh one instead of forever re-awaiting this dead task. Compare-and-clear:
+                // only if nothing else (a Seek, another failure) already moved past this generation/
+                // task, so we don't stomp on a concurrent invalidation or a newer attempt.
+                lock (_innerStreamGate)
+                {
+                    if (_innerStreamGeneration == generation && _innerStreamTask == task)
+                    {
+                        _innerStreamTask = null;
+                    }
+                }
+                throw;
+            }
+
+            CombinedStream? current;
+            bool adopted;
+            lock (_innerStreamGate)
+            {
+                adopted = !_disposed && _innerStreamGeneration == generation && _innerStreamTask == task;
+                if (adopted) _innerStream = stream;
+                current = _innerStream;
+            }
+
+            if (adopted) return stream;
+
+            // Superseded (or disposed) while we were constructing — this stream is for a position,
+            // or a lifetime, that's no longer current. Don't resurrect or leak it.
+            if (!ReferenceEquals(current, stream))
+            {
+                await stream.DisposeAsync().ConfigureAwait(false);
+            }
+            if (current != null) return current;
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            // Nothing has started a fresh construction at the new position/generation yet — retry.
+        }
+    }
+
+    /// <summary>Disposes the current inner stream (if any) and bumps the generation so any in-flight
+    /// construction started before this call knows, once it resolves, not to adopt its result.</summary>
+    private void InvalidateInnerStream()
+    {
+        CombinedStream? old;
+        lock (_innerStreamGate)
+        {
+            old = _innerStream;
+            _innerStream = null;
+            _innerStreamTask = null;
+            _innerStreamGeneration++;
+        }
+        old?.Dispose();
+    }
+
+    /// <summary>
+    /// Starts constructing the inner stream (and, for a buffered stream, its background prefetch)
+    /// without reading any bytes. Used by CombinedStream to warm the next RAR volume ahead of the
+    /// boundary so the swap does not start prefetching cold. See <see cref="IWarmableStream"/>.
+    /// </summary>
+    public async Task WarmupAsync(CancellationToken ct)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await EnsureInnerStreamAsync(ct).ConfigureAwait(false);
     }
 
     public override long Seek(long offset, SeekOrigin origin)
@@ -189,8 +296,7 @@ public class NzbFileStream : Stream
         }
 
         _position = absoluteOffset;
-        _innerStream?.Dispose();
-        _innerStream = null;
+        InvalidateInnerStream();
         Serilog.Log.Debug("[NzbFileStream] Seek completed. New position: {NewPosition}", _position);
         // "cold" = we discarded a previously-open inner stream and will need a new one;
         // a fresh seek with no prior stream is also effectively cold but cheap.
@@ -587,23 +693,39 @@ public class NzbFileStream : Stream
 
     protected override void Dispose(bool disposing)
     {
-        if (_disposed) return;
-        Serilog.Log.Debug("[NzbFileStream] Disposing NzbFileStream. Disposing: {Disposing}", disposing);
-        _disposed = true;
+        CombinedStream? old;
+        lock (_innerStreamGate)
+        {
+            if (_disposed) return;
+            Serilog.Log.Debug("[NzbFileStream] Disposing NzbFileStream. Disposing: {Disposing}", disposing);
+            _disposed = true;
+            old = _innerStream;
+            _innerStream = null;
+            _innerStreamTask = null;
+            _innerStreamGeneration++;
+        }
         _cancellationRegistration.Dispose(); // Unregister callback first
         try { _streamCts.Cancel(); } catch (ObjectDisposedException) { } // Cancel before disposing inner stream
-        _innerStream?.Dispose();
+        old?.Dispose();
         _streamCts.Dispose();
         _contextScope?.Dispose();
     }
 
     public override async ValueTask DisposeAsync()
     {
-        if (_disposed) return;
-        _disposed = true;
+        CombinedStream? old;
+        lock (_innerStreamGate)
+        {
+            if (_disposed) return;
+            _disposed = true;
+            old = _innerStream;
+            _innerStream = null;
+            _innerStreamTask = null;
+            _innerStreamGeneration++;
+        }
         _cancellationRegistration.Dispose(); // Unregister callback first
         try { _streamCts.Cancel(); } catch (ObjectDisposedException) { } // Cancel before disposing inner stream
-        if (_innerStream != null) await _innerStream.DisposeAsync().ConfigureAwait(false);
+        if (old != null) await old.DisposeAsync().ConfigureAwait(false);
         _streamCts.Dispose();
         _contextScope?.Dispose();
         GC.SuppressFinalize(this);

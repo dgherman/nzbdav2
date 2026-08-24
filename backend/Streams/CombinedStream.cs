@@ -1,4 +1,5 @@
 using System.Buffers;
+using NzbWebDAV.Utils;
 
 namespace NzbWebDAV.Streams;
 
@@ -17,6 +18,41 @@ public class CombinedStream : Stream
     private long _position;
     private bool _isDisposed;
     private bool _partRequiresLoading;
+
+    // Pre-warms the next part's stream while the current one is still being read, so a forward
+    // sequential crossing of a part boundary (a RAR volume, for a multipart file) finds a stream
+    // that is already fetching instead of starting cold. This is separate from _streamCache below:
+    // that cache is only ever populated by Seek() switching parts, never by the natural end-of-part
+    // advance in ReadAsync, so it does nothing for sequential forward playback on its own.
+    private Task? _prewarmTask;
+    private int _prewarmedForPartIndex = -1;
+
+    // Drives all pre-warm background work — deliberately NOT the per-ReadAsync-call CancellationToken.
+    // A single triggering read's token can cancel (e.g. that specific request winds down) without the
+    // pre-warmed part's construction being torn down: that construction is memoized onto the part's
+    // StreamPart and a LATER, unrelated read depends on it too, so cancelling it because one read
+    // happened to be in flight when it started would poison a shared result for every read after it.
+    // Cancelled (and best-effort awaited) from Dispose/DisposeAsync so a pre-warm never outlives this
+    // CombinedStream holding a connection slot for nobody.
+    private readonly CancellationTokenSource _prewarmCts = new();
+
+    // Guards the check-then-act sequence that decides whether it's still safe to read _prewarmCts.Token
+    // and schedule a new pre-warm: TriggerPrewarmIfNeeded's disposed-check + _prewarmedForPartIndex
+    // update + token read + Task.Run, and Dispose/DisposeAsync's _isDisposed=true + _prewarmCts.Cancel().
+    // Without this, TriggerPrewarmIfNeeded could pass its disposed-check, then Dispose() could run to
+    // completion (cancel AND dispose _prewarmCts, seeing no _prewarmTask yet to wait on), and only then
+    // would TriggerPrewarmIfNeeded resume and read .Token on an already-disposed CTS — throwing
+    // synchronously out of the calling ReadAsync, not merely into a background task. Holding this lock
+    // for both sequences makes them mutually exclusive: whichever runs first is fully visible to the
+    // other. The CTS's own .Dispose() call stays outside this lock (after the bounded wait on
+    // _prewarmTask in Dispose/DisposeAsync) — only the cancel-vs-schedule race needs closing here.
+    private readonly object _prewarmGate = new();
+
+    // How close to a part's end (in bytes) triggers pre-warming the next part. Reuses the ring-buffer
+    // size MemoryBudget already derives for one concurrent stream slot, rather than inventing a new
+    // unbudgeted constant: it's the same "how much runway before a stream needs to be delivering data"
+    // figure the rest of the streaming path is sized against.
+    private static readonly long PrewarmTailBytes = MemoryBudget.RingBufferBytes;
 
     // Cache recently used streams to avoid re-creating them on seeks
     private readonly Dictionary<int, CachedStream> _streamCache = new();
@@ -124,7 +160,11 @@ public class CombinedStream : Stream
             //    _position, _currentPartIndex, count, readCount);
 
             _position += readCount;
-            if (readCount > 0) return readCount;
+            if (readCount > 0)
+            {
+                TriggerPrewarmIfNeeded();
+                return readCount;
+            }
 
             // Current stream is exhausted - dispose and try next part
             Serilog.Log.Debug("[CombinedStream] Part {PartIndex} exhausted. Moving to next.", _currentPartIndex);
@@ -213,6 +253,89 @@ public class CombinedStream : Stream
         }
 
         return left;
+    }
+
+    /// <summary>
+    /// Kicks off background construction of the next part's stream once the current part's remaining
+    /// bytes fall inside the pre-warm tail. Fire-and-forget: LoadPartAsync picks up whatever this
+    /// produced (warm or not — <see cref="StreamPart.GetStreamTask"/> memoizes the factory call, so
+    /// this and the eventual real load share the same task) when the boundary is actually crossed.
+    /// </summary>
+    private void TriggerPrewarmIfNeeded()
+    {
+        // Everything here — the disposed-check, the _prewarmedForPartIndex read/update, the
+        // _prewarmCts.Token read, and the Task.Run scheduling — happens under _prewarmGate, the same
+        // lock Dispose/DisposeAsync take around _isDisposed=true + _prewarmCts.Cancel(). That makes the
+        // two mutually exclusive: either this whole method runs (and observes a not-yet-disposed CTS)
+        // before Dispose starts, or Dispose's disposed-check here sees true and this returns before
+        // ever touching _prewarmCts. There is no interleaving where this reads .Token after Dispose has
+        // cancelled-and-possibly-disposed it.
+        lock (_prewarmGate)
+        {
+            if (_isDisposed) return;
+            if (_currentPartIndex < 0 || _currentStream == null) return;
+
+            var nextIndex = _currentPartIndex + 1;
+            if (nextIndex >= _parts.Count) return;
+            if (_prewarmedForPartIndex == nextIndex) return;
+
+            var currentPart = _parts[_currentPartIndex];
+            if (currentPart.Length < 0) return; // unknown length (legacy non-seekable mode) — can't judge distance to the end
+
+            var consumedInPart = _position - _cumulativeOffsets[_currentPartIndex];
+            var remainingInPart = currentPart.Length - consumedInPart;
+            if (remainingInPart > PrewarmTailBytes) return;
+
+            _prewarmedForPartIndex = nextIndex;
+            // Own token — NOT the triggering read's cancellationToken. That read's token can cancel
+            // independently of this construction, which is memoized onto the part and shared with
+            // whatever read actually crosses the boundary later. Captured into a local rather than read
+            // as _prewarmCts.Token inside the Task.Run lambda: the lambda body only runs once a
+            // thread-pool thread picks it up, by which point _prewarmGate is no longer held, so reading
+            // the CTS's .Token property from inside it would reopen exactly the race this lock closes.
+            var prewarmToken = _prewarmCts.Token;
+            // Only the most recently scheduled prewarm is tracked here, but that's the only one
+            // Dispose() ever needs to catch: TriggerPrewarmIfNeeded only fires for _currentPartIndex + 1,
+            // and _currentPartIndex only reaches nextIndex once LoadPartAsync has already adopted
+            // nextIndex's stream (via the same memoized StreamPart.GetStreamTask this triggers) as
+            // _currentStream — at that point it's a live, in-use stream, not something only reachable
+            // through this field. So by the time a second call here could ever overwrite this field,
+            // whatever the previous one targeted has already become _currentStream and is covered by
+            // the normal disposal paths below, not by this reference.
+            _prewarmTask = Task.Run(() => PrewarmPartAsync(nextIndex, prewarmToken), CancellationToken.None);
+        }
+    }
+
+    private async Task PrewarmPartAsync(int partIndex, CancellationToken prewarmToken)
+    {
+        try
+        {
+            var stream = await _parts[partIndex].GetStreamTask().ConfigureAwait(false);
+            if (_isDisposed || prewarmToken.IsCancellationRequested)
+            {
+                // Disposed (or cancelled) while warming — don't leave its background fetch running
+                // unattended, and don't let it get adopted by a real read after us.
+                await stream.DisposeAsync().ConfigureAwait(false);
+                return;
+            }
+            if (stream is IWarmableStream warmable)
+            {
+                await warmable.WarmupAsync(prewarmToken).ConfigureAwait(false);
+            }
+            if (_isDisposed || prewarmToken.IsCancellationRequested)
+            {
+                // Disposed mid-warmup. WarmupAsync's own adopt-if-still-current check means the
+                // constructed inner stream is either already disposed or was never adopted; nothing
+                // further to clean up here, but this must not log as a normal successful warm.
+                return;
+            }
+            Serilog.Log.Debug("[CombinedStream] Pre-warmed part {PartIndex} ahead of the boundary.", partIndex);
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Serilog.Log.Debug(ex, "[CombinedStream] Pre-warm of part {PartIndex} failed; will load at the boundary instead.", partIndex);
+        }
     }
 
     private async Task LoadPartAsync(int partIndex, CancellationToken cancellationToken)
@@ -378,6 +501,28 @@ public class CombinedStream : Stream
         if (_isDisposed) return;
         if (!disposing) return;
 
+        // Under _prewarmGate — the same lock TriggerPrewarmIfNeeded holds around its own disposed-check
+        // and _prewarmCts.Token read — so the two can never interleave. Set before touching anything
+        // else so a concurrently-running PrewarmPartAsync's _isDisposed checks (after each of its
+        // awaits) see this promptly instead of racing our cleanup below.
+        lock (_prewarmGate)
+        {
+            if (_isDisposed) return; // lost a race with another Dispose/DisposeAsync call
+            _isDisposed = true;
+            _prewarmCts.Cancel();
+        }
+
+        // Best-effort: give an in-flight pre-warm a short bounded window to unwind — it observes the
+        // cancellation / _isDisposed and disposes whatever it constructed — before moving on. Dispose
+        // is a synchronous, must-not-hang API, so this is bounded rather than awaited indefinitely;
+        // the "dispose all loaded streams" loop below is the backstop if it doesn't finish in time.
+        var prewarmSettled = _prewarmTask == null;
+        if (_prewarmTask != null)
+        {
+            try { prewarmSettled = _prewarmTask.Wait(TimeSpan.FromSeconds(2)); }
+            catch { prewarmSettled = true; /* the task's own already-logged failure — settled, just faulted */ }
+        }
+
         _currentStream?.Dispose();
         _currentStream = null;
 
@@ -388,7 +533,10 @@ public class CombinedStream : Stream
         }
         _streamCache.Clear();
 
-        // Dispose all loaded streams
+        // Dispose all loaded streams, including any part the pre-warm task above constructed but
+        // never got adopted as _currentStream. Every stream type here guards its own Dispose /
+        // DisposeAsync against double-invocation, so this is safe even if the pre-warm task already
+        // disposed the same stream itself upon observing cancellation.
         foreach (var part in _parts)
         {
             if (part.IsTaskCreated && part.GetStreamTask().IsCompletedSuccessfully)
@@ -397,12 +545,37 @@ public class CombinedStream : Stream
             }
         }
 
-        _isDisposed = true;
+        // Only dispose the CTS once the pre-warm task has actually settled — a still-running task past
+        // the bounded wait above may still be holding/observing its token (e.g. inside a Register()
+        // call several frames down in NzbFileStream), and disposing out from under it can throw
+        // ObjectDisposedException there. Cancellation was already requested either way, so an orphaned
+        // task still unwinds; we just leave its small CTS for the GC instead of the task.
+        if (prewarmSettled) _prewarmCts.Dispose();
     }
 
     public override async ValueTask DisposeAsync()
     {
         if (_isDisposed) return;
+
+        // See the comment in Dispose(bool) above: same _prewarmGate lock, same reason.
+        lock (_prewarmGate)
+        {
+            if (_isDisposed) return; // lost a race with another Dispose/DisposeAsync call
+            _isDisposed = true;
+            _prewarmCts.Cancel();
+        }
+
+        var prewarmSettled = _prewarmTask == null;
+        if (_prewarmTask != null)
+        {
+            try
+            {
+                await _prewarmTask.WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                prewarmSettled = true;
+            }
+            catch (TimeoutException) { /* still running past the bounded wait — leave it to unwind on its own */ }
+            catch { prewarmSettled = true; /* the task's own already-logged failure — settled, just faulted */ }
+        }
 
         if (_currentStream != null)
         {
@@ -417,7 +590,8 @@ public class CombinedStream : Stream
         }
         _streamCache.Clear();
 
-        // Dispose all loaded streams
+        // Dispose all loaded streams — see the comment in Dispose(bool) above about why this is safe
+        // even for a part the pre-warm task already cleaned up itself.
         foreach (var part in _parts)
         {
             if (part.IsTaskCreated && part.GetStreamTask().IsCompletedSuccessfully)
@@ -428,7 +602,9 @@ public class CombinedStream : Stream
             }
         }
 
-        _isDisposed = true;
+        // See the comment in Dispose(bool) above: only dispose the CTS once the pre-warm task has
+        // actually settled, so we never pull its token out from under a still-running task.
+        if (prewarmSettled) _prewarmCts.Dispose();
         GC.SuppressFinalize(this);
     }
 
