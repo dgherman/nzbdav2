@@ -236,6 +236,11 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.5 (2026-08-24)
+Live playback would freeze for 1-5+ seconds during otherwise-healthy streaming, correlated with a protocol-desync error on the NNTP connection across every configured provider.
+
+*   **Fix**: `UsenetProtocolException` (thrown when an NNTP response line is null, empty, or missing its numeric prefix — a protocol desync distinct from a timeout or dropped socket) is now a subtype of `UsenetException` instead of a sibling `Exception`. Every catch filter that decides a connection is unhealthy (`ThreadSafeNntpClient`'s dispose paths, `MultiConnectionNntpClient.RunWithConnection`/`RunStreamWithConnection`) matches on `is UsenetException`, so the sibling relationship let this exception slip past all of them: the circuit breaker never recorded the failure, and the desynced connection was returned to the idle pool as if healthy, where it could misparse again on the next request. The fix is provider-agnostic — it corrects the exception taxonomy, not provider-specific handling.
+
 ## v0.12.4 (2026-08-24)
 The v0.12.3 RAR-volume pre-warm fix (below) could itself be starved: pre-warming a stream's next volume and a brand-new, unrelated request for the same file competed for the same scarce global concurrent-stream slot pool (2 slots at the shipped 512 MB heap tier), and both made exactly one non-blocking attempt to acquire one. Production logs showed a fresh byte-0 request winning the last free slot moments before an already-playing stream's own pre-warm needed one — degrading that pre-warm to the raw/unbuffered fallback right at the boundary crossing and cold-stalling playback, the exact freeze the pre-warm exists to prevent. Measured: 3056ms and 1731ms starvation waits immediately following a rogue `Part 0` stream request and a fallback `Creating BufferedSegmentStream ... slotAcquired=True` log line, in the same second as the real stream's own volume-boundary crossing.
 
