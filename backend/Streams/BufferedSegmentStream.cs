@@ -734,6 +734,11 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             // Track which segments are currently being raced to avoid double-racing
             var racingIndices = new ConcurrentDictionary<int, bool>();
 
+            // A cancellation callback may resume its worker inline, before the monitor that called
+            // Cancel() gets to publish the replacement job. The worker exit path uses this handshake
+            // to distinguish that transient empty-queue window from true completion.
+            var pendingRetryPublications = 0;
+
             // Lock-free segment ordering: workers write to slots, ordering task reads in order
             var segmentSlots = new PooledSegmentData?[segmentIds.Length];
             var nextIndexToWrite = 0;
@@ -867,14 +872,20 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                                     Log.Debug("[BufferedStream] STRAGGLER DETECTED: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Preempting Segment {Victim} to race.",
                                         nextNeeded, duration.TotalSeconds, stragglerTimeout, victimAssignment.Index);
 
-                                    // Cancel victim to free up its worker
-                                    TryCancelAttempt(victimAssignment);
-
-                                    // Re-queue victim (high priority to avoid starvation)
-                                    await QueueUrgentSegmentAsync(victimAssignment.Index, markRacing: false, "preempted-victim").ConfigureAwait(false);
-
-                                    // Race the needed segment
-                                    await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "blocking-straggler-race").ConfigureAwait(false);
+                                    Interlocked.Increment(ref pendingRetryPublications);
+                                    try
+                                    {
+                                        // Cancel victim to free up its worker, then publish both replacement jobs.
+                                        // The publication handshake keeps an inline-resumed last worker from exiting
+                                        // during the transient interval between Cancel() and these channel writes.
+                                        TryCancelAttempt(victimAssignment);
+                                        await QueueUrgentSegmentAsync(victimAssignment.Index, markRacing: false, "preempted-victim").ConfigureAwait(false);
+                                        await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "blocking-straggler-race").ConfigureAwait(false);
+                                    }
+                                    finally
+                                    {
+                                        Interlocked.Decrement(ref pendingRetryPublications);
+                                    }
                                 }
                                 else
                                 {
@@ -896,8 +907,16 @@ public class BufferedSegmentStream : Stream, ITouchableStream
 
                                     Log.Debug("[BufferedStream] STRAGGLER SELF-CANCEL: Segment {Index} running for {Duration:F1}s (timeout: {Timeout:F1}s). Cancelling stalled worker and queueing for retry.",
                                         nextNeeded, duration.TotalSeconds, stragglerTimeout);
-                                    TryCancelAttempt(assignment);
-                                    await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "self-cancel-straggler").ConfigureAwait(false);
+                                    Interlocked.Increment(ref pendingRetryPublications);
+                                    try
+                                    {
+                                        TryCancelAttempt(assignment);
+                                        await QueueUrgentSegmentAsync(nextNeeded, markRacing: true, "self-cancel-straggler").ConfigureAwait(false);
+                                    }
+                                    finally
+                                    {
+                                        Interlocked.Decrement(ref pendingRetryPublications);
+                                    }
                                 }
                             }
                         }
@@ -1056,7 +1075,18 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                                         }
                                         else
                                         {
-                                            // Both truly empty - worker can exit
+                                            // Cancellation can resume the final worker inline while the monitor is
+                                            // still inside Cancel(), before it has published the urgent replacement.
+                                            // Yield out of that callback instead of mistaking this transient empty
+                                            // window for completion. Once publication finishes, the next iteration
+                                            // consumes the replacement; with no publication in flight, both queues
+                                            // really are drained and this worker may exit normally.
+                                            if (Volatile.Read(ref pendingRetryPublications) > 0)
+                                            {
+                                                await Task.Yield();
+                                                continue;
+                                            }
+
                                             break;
                                         }
                                     }

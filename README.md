@@ -236,6 +236,12 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.7 (2026-08-31)
+A live Synology playback of *Alone* S13E08 reproduced the video-freezes-while-audio-continues symptom. The backend recorded a definite truncated RAR volume: `Ordering task timed out. NextIndexToWrite=61, TotalSegments=68`. The same signature appeared repeatedly in the preceding 72 hours on unrelated episodes, ruling out a single bad release.
+
+*   **Fix**: Buffered-stream worker shutdown now coordinates with straggler-retry publication. A straggler is cancelled before the monitor publishes its replacement job; cancellation can resume the last surviving worker inline, and the old worker saw both queues empty and exited before the replacement became visible. The replacement was then stranded with no consumer, the ordering slot stayed null, and the stream eventually returned a truncated volume. The monitor now marks that publication interval explicitly, and a worker that resumes inside it yields until the replacement is visible instead of treating the transient empty queues as final completion.
+*   **Reliability**: Added a deterministic regression that forces cancellation to resume inline after every other worker has drained. It times out against the old exit condition and now verifies that the cancelled segment is retried and the complete byte-exact stream is returned.
+
 ## v0.12.6 (2026-08-31)
 Password-protected (`-hp`) multi-volume RAR imports failed for a large share of releases (GitHub issue #28). The queue logged `malformed vint`, `Unknown Rar Header: N`, `arithmetic overflow`, `Unsupported crypto version of 99`, or `Could not read the requested amount of bytes. End of stream reached. Requested: 16 Read: 0`, and the job either failed outright or mounted an incomplete file. The password was present in the NZB and correctly plumbed all the way to SharpCompress — the defect was one layer down, in NZB stream assembly.
 

@@ -74,7 +74,118 @@ public class StreamingPermitRequeueTests
         public void Dispose() { }
     }
 
+    private sealed class InlineCancellationNntpClient : INntpClient
+    {
+        private int _segmentZeroAttempts;
+        public int SegmentZeroAttempts => Volatile.Read(ref _segmentZeroAttempts);
+
+        public Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders, CancellationToken ct)
+        {
+            var index = int.Parse(segmentId.Split('-')[1].Split('@')[0]);
+            var header = new UsenetYencHeader
+            {
+                FileName = "test.mkv",
+                FileSize = SegmentSize * 2L,
+                LineLength = 128,
+                PartNumber = index + 1,
+                TotalParts = 2,
+                PartSize = SegmentSize,
+                PartOffset = SegmentSize * (long)index,
+            };
+
+            Stream payload;
+            if (index == 0 && Interlocked.Increment(ref _segmentZeroAttempts) == 1)
+            {
+                payload = new InlineCancellationStream();
+            }
+            else
+            {
+                var bytes = new byte[SegmentSize];
+                Array.Fill(bytes, PayloadByte(index));
+                payload = new MemoryStream(bytes);
+            }
+
+            return Task.FromResult(new YencHeaderStream(header, null, payload));
+        }
+
+        public Task<bool> ConnectAsync(string host, int port, bool useSsl, CancellationToken ct) => throw new NotSupportedException();
+        public Task<bool> AuthenticateAsync(string user, string pass, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetStatResponse> StatAsync(string segmentId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetYencHeader> GetSegmentYencHeaderAsync(string segmentId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<long> GetFileSizeAsync(NzbFile file, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetArticleHeaders> GetArticleHeadersAsync(string segmentId, CancellationToken ct) => throw new NotSupportedException();
+        public Task<UsenetDateResponse> DateAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task WaitForReady(CancellationToken ct) => Task.CompletedTask;
+        public Task<UsenetGroupResponse> GroupAsync(string group, CancellationToken ct) => throw new NotSupportedException();
+        public Task<long> DownloadArticleBodyAsync(string group, long articleId, CancellationToken ct) => throw new NotSupportedException();
+        public void Dispose() { }
+    }
+
+    /// <summary>
+    /// Completes its pending read synchronously inside CancellationTokenSource.Cancel(). This makes
+    /// the production race deterministic: the cancelled last worker can run through its continuation,
+    /// observe both queues empty and exit before Cancel() returns to the monitor.
+    /// </summary>
+    private sealed class InlineCancellationStream : Stream
+    {
+        public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+        {
+            var completion = new TaskCompletionSource<int>();
+            _ = cancellationToken.Register(() => completion.TrySetCanceled(cancellationToken));
+            return new ValueTask<int>(completion.Task);
+        }
+
+        public override bool CanRead => true;
+        public override bool CanSeek => false;
+        public override bool CanWrite => false;
+        public override long Length => throw new NotSupportedException();
+        public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+        public override void Flush() { }
+        public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+        public override void SetLength(long value) => throw new NotSupportedException();
+        public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+    }
+
     private static byte PayloadByte(int index) => (byte)(index + 1);
+
+    [Fact]
+    public async Task SelfCancelledLastWorker_WaitsForReplacementPublication()
+    {
+        // Production capture, 2026-08-30: Alone S13E08 logged "Ordering task timed out,
+        // NextIndexToWrite=61, TotalSegments=68". Once the standard queue drains, all idle workers
+        // exit. If the one remaining straggler resumes inline when cancelled, cancel-before-queue
+        // lets that last worker also exit; the monitor then publishes a retry that nobody can consume.
+        // The ordering task waits forever on the resulting null slot and the volume is truncated.
+        var segmentIds = new[] { "seg-0@test", "seg-1@test" };
+        var segmentSizes = new long[] { SegmentSize, SegmentSize };
+        var client = new InlineCancellationNntpClient();
+        var context = new ConnectionUsageContext(ConnectionUsageType.BufferedStreaming,
+            new ConnectionUsageDetails { Text = "inline-cancellation-test" });
+
+        await using var stream = new BufferedSegmentStream(
+            segmentIds,
+            fileSize: SegmentSize * 2L,
+            client,
+            concurrentConnections: 2,
+            bufferSegmentCount: 2,
+            cancellationToken: CancellationToken.None,
+            usageContext: context,
+            segmentSizes: segmentSizes);
+
+        var buffer = new byte[SegmentSize * 2];
+        var read = await ReadFully(stream, buffer).WaitAsync(TimeSpan.FromSeconds(8));
+
+        Assert.Equal(buffer.Length, read);
+        Assert.True(client.SegmentZeroAttempts >= 2, "the straggler was not cancelled and retried");
+        for (var i = 0; i < 2; i++)
+        {
+            for (var offset = 0; offset < SegmentSize; offset++)
+            {
+                Assert.Equal(PayloadByte(i), buffer[i * SegmentSize + offset]);
+            }
+        }
+    }
 
     [Fact]
     public async Task PermitTimeout_RequeuesTheSegment_InsteadOfStrandingTheStream()
