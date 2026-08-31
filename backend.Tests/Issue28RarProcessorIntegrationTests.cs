@@ -123,6 +123,37 @@ public class Issue28RarProcessorIntegrationTests : IAsyncLifetime
     }
 
     /// <summary>
+    /// Probes whether the native <c>rapidyenc</c> decoder RapidYencSharp p/invokes into is loadable
+    /// on this machine. This is the FIRST test in the suite to exercise real yEnc decode (every
+    /// other test either fakes <c>INntpClient</c> or stays above the decode layer), and
+    /// <c>RapidYencSharp</c> ships prebuilt native assets only for linux-x64/linux-arm64/win-x64 --
+    /// there is no macOS asset. On a macOS dev machine this throws
+    /// <see cref="DllNotFoundException"/> (surfaced through <see cref="TypeInitializationException"/>,
+    /// since RapidYencSharp's native init runs inside a <c>Lazy&lt;T&gt;</c>) the first time
+    /// <c>YencDecoder</c> is touched at all.
+    ///
+    /// Linux -- where CI and the Docker build actually run -- has the real asset and is the source
+    /// of truth for this test; a macOS skip here does not weaken that coverage. It exists so a
+    /// contributor running `dotnet test` locally on a Mac gets a clean, explained "Skipped" instead
+    /// of a `DllNotFoundException` failure that looks like a real regression.
+    /// </summary>
+    private static bool IsRapidYencAvailable()
+    {
+        try
+        {
+            RapidYencSharp.RapidYencDecoderState? state = null;
+            ReadOnlySpan<byte> input = "A"u8;
+            Span<byte> output = stackalloc byte[4];
+            RapidYencSharp.YencDecoder.DecodeEx(input, output, ref state, isRaw: false);
+            return true;
+        }
+        catch (Exception ex) when (ex is DllNotFoundException or TypeInitializationException or EntryPointNotFoundException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Builds a real <see cref="UsenetStreamingClient"/> pointed at <paramref name="mockPort"/>.
     /// Requires a migrated <c>CONFIG_PATH</c> because <see cref="ConfigManager"/> and
     /// <see cref="UsenetStreamingClient"/> are concrete classes with no test seam of their own --
@@ -177,9 +208,13 @@ public class Issue28RarProcessorIntegrationTests : IAsyncLifetime
         return sp.GetRequiredService<UsenetStreamingClient>();
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task RarProcessor_KeepsBothVolumesAligned_AgainstRealNntpServer()
     {
+        Skip.IfNot(IsRapidYencAvailable(),
+            "rapidyenc has no macOS native asset (RapidYencSharp ships linux-x64/linux-arm64/win-x64 " +
+            "only); this test's real coverage runs on Linux, where CI and the Docker build run.");
+
         var part1 = Issue28Fixtures.Volume("hp.part1.rar");
         var part2 = Issue28Fixtures.Volume("hp.part2.rar");
 
