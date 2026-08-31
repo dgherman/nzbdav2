@@ -68,31 +68,67 @@ public class InterpolationSearchCapTests
     }
 
     /// <summary>
-    /// A genuinely corrupt/adversarial size table (one that never converges -- every probe reports
-    /// a range that keeps missing) hits the cap and fails fast with the existing
-    /// <see cref="NzbWebDAV.Exceptions.SeekPositionNotFoundException"/>, rather than looping forever.
+    /// A COHERENT (monotonic, physically valid) size table can still degrade interpolation search
+    /// toward its O(n) worst case: many uniform tiny segments followed by one huge outlier. Every
+    /// round here genuinely narrows the search range by exactly one index -- this is real linear
+    /// degradation, not range exhaustion or an inconsistent probe response -- so hitting the cap
+    /// proves the cap is load-bearing, not a formality.
+    ///
+    /// <see cref="ProbeCapMirror"/> tiny leading segments is the exact count that needs 65 rounds
+    /// to converge with NO cap (verified by simulating the same guess/narrow arithmetic
+    /// <see cref="InterpolationSearch.Find"/> uses, in Python, outside this test). With the real
+    /// 64-round cap in place, round 65 never gets a probe: it throws immediately, so exactly 64
+    /// probes happen before <see cref="NzbWebDAV.Exceptions.SeekPositionNotFoundException"/> fires.
+    /// Asserting the EXACT probe count (not just "it throws" or "it throws below some loose bound")
+    /// is what makes this fail if the cap is removed or its value changes: remove the cap and this
+    /// layout converges on the real 65th probe instead of throwing (<c>Assert.ThrowsAsync</c>
+    /// fails); raise or lower the cap and the probe count no longer matches
+    /// <see cref="ProbeCapMirror"/>.
+    ///
+    /// <see cref="ProbeCapMirror"/> mirrors <c>InterpolationSearch.MaxProbeRounds</c>, which is
+    /// `private` and so not visible here; keep the two in sync if that constant ever changes.
     /// </summary>
     [Fact]
-    public async Task NonConvergingLayout_FailsFastAtTheProbeCap_InsteadOfLoopingForever()
+    public async Task NonConvergingLayout_HitsTheProbeCapExactly_ThenFailsFast()
     {
-        const int segmentCount = 1000;
-        // Every segment reports the SAME tiny range, so a search for a byte outside it can never
-        // narrow the index range: each probe's result satisfies neither "too low" nor "too high"
-        // relative to a target far beyond it, forcing the search to keep re-probing without
-        // shrinking the window it excludes.
-        ValueTask<LongRange> Probe(int _) => new(new LongRange(0, 1));
+        const int probeCapMirror = 64;
+        const int tinySegmentCount = probeCapMirror; // see doc comment: this exact count needs 65 rounds uncapped
+        const long tinySegmentSize = 100;
+        const long hugeTailSize = 50_000_000;
+
+        var sizes = new long[tinySegmentCount + 1];
+        for (var i = 0; i < tinySegmentCount; i++) sizes[i] = tinySegmentSize;
+        sizes[tinySegmentCount] = hugeTailSize;
+
+        var offsets = new long[sizes.Length];
+        long running = 0;
+        for (var i = 0; i < sizes.Length; i++)
+        {
+            offsets[i] = running;
+            running += sizes[i];
+        }
+        var totalBytes = running;
 
         var probeCount = 0;
-        ValueTask<LongRange> CountingProbe(int i) { probeCount++; return Probe(i); }
+        ValueTask<LongRange> CountingProbe(int index)
+        {
+            probeCount++;
+            return new ValueTask<LongRange>(new LongRange(offsets[index], offsets[index] + sizes[index]));
+        }
 
-        await Assert.ThrowsAsync<NzbWebDAV.Exceptions.SeekPositionNotFoundException>(() =>
+        // Target the huge tail segment itself -- the position that forces the pathological
+        // one-index-per-round elimination all the way through the tiny leading segments.
+        var targetByte = offsets[tinySegmentCount] + 1;
+
+        var ex = await Assert.ThrowsAsync<NzbWebDAV.Exceptions.SeekPositionNotFoundException>(() =>
             InterpolationSearch.Find(
-                searchByte: 500,
-                new LongRange(0, segmentCount),
-                new LongRange(0, segmentCount), // each segment "claims" range [0,1), sums don't add up to this
+                targetByte,
+                new LongRange(0, sizes.Length),
+                new LongRange(0, totalBytes),
                 CountingProbe,
                 CancellationToken.None));
 
-        Assert.True(probeCount <= 65, $"cap should stop it at ~64 rounds, used {probeCount}");
+        Assert.Equal(probeCapMirror, probeCount);
+        Assert.Contains($"within {probeCapMirror} probes", ex.Message);
     }
 }
