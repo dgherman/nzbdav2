@@ -27,12 +27,13 @@ public static class RarUtil
 
     internal static List<IRarHeader> GetRarHeaders(Stream stream, string? password)
     {
-        // issue #28 guard rail state: has a Mark, then an Archive or Crypt header, been read cleanly?
-        // If so and the parse later blows up on a password-protected volume, the front of the stream
-        // was fine but a deeper seek landed on garbage -- i.e. the byte stream is misaligned, not the
-        // archive corrupt. See the catch clause below.
+        // issue #28 guard rail state: has an Archive header been read cleanly? For a RAR5 -hp
+        // archive, Crypt precedes Archive and is metadata ONLY -- decoding it needs no password.
+        // Archive is the first header actually encrypted with the password, so a wrong/missing
+        // password fails right there. Only counting Archive (not Crypt alone) as "parsed cleanly"
+        // keeps a genuine password failure from being relabeled as stream misalignment below.
         var markIteration = -1;
-        var sawArchiveOrCryptHeader = false;
+        var sawArchiveHeader = false;
 
         try
         {
@@ -62,9 +63,9 @@ public static class RarUtil
                 {
                     markIteration = iterationCount;
                 }
-                else if (header.HeaderType is HeaderType.Archive or HeaderType.Crypt)
+                else if (header.HeaderType == HeaderType.Archive)
                 {
-                    sawArchiveOrCryptHeader = true;
+                    sawArchiveHeader = true;
                 }
                 else if (markIteration >= 0 && iterationCount == markIteration + 1
                          && password != null
@@ -158,7 +159,7 @@ public static class RarUtil
         {
             throw;
         }
-        catch (Exception ex) when (password != null && sawArchiveOrCryptHeader && IsLikelyMisalignment(ex))
+        catch (Exception ex) when (password != null && sawArchiveHeader && IsLikelyMisalignment(ex))
         {
             // The Mark + Archive/Crypt headers at the front parsed cleanly, then a later header --
             // reached by seeking past the stored data -- decoded as garbage. On a password-protected

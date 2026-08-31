@@ -18,9 +18,9 @@ using Xunit;
 namespace NzbWebDAV.Tests;
 
 /// <summary>
-/// Regression coverage for issue #28: password-protected (<c>-hp</c>) multi-volume RAR imports
-/// failed with "malformed vint", "Unknown Rar Header: N", "arithmetic overflow" or
-/// "End of stream reached. Requested: 16 Read: 0".
+/// Regression coverage for issue #28's <c>RarUtil</c>/<c>NzbFileStream</c> seam: password-protected
+/// (<c>-hp</c>) multi-volume RAR imports failed with "malformed vint", "Unknown Rar Header: N",
+/// "arithmetic overflow" or "End of stream reached. Requested: 16 Read: 0".
 ///
 /// Root cause was on the feed side, not in SharpCompress. <see cref="NzbWebDAV.Queue.FileProcessors.RarProcessor"/>
 /// built the header-parsing stream through the old <c>UsenetStreamingClient.GetFastFileStream</c>,
@@ -34,53 +34,18 @@ namespace NzbWebDAV.Tests;
 /// The fix: RarProcessor no longer fabricates. It passes <c>segmentSizes: null</c>, so NzbFileStream
 /// locates the target segment by interpolation-searching the real yEnc part headers.
 ///
-/// These tests exercise that exact seam — <see cref="NzbFileStream"/> feeding
-/// <see cref="RarUtil.GetRarHeadersAsync"/> — against a real 3-volume <c>-hp</c> RAR5 archive
-/// (store mode, password "testpass", random payload; see <c>Fixtures/issue28</c>) served through a
-/// fake <see cref="INntpClient"/> with a deliberately non-uniform segment layout: many full
-/// segments followed by one short one, the same shape that broke fixture 1's continuation volume.
+/// These tests exercise the <c>NzbFileStream</c> feeding <see cref="RarUtil.GetRarHeadersAsync"/>
+/// seam directly, via a fake <see cref="INntpClient"/> -- they pin the guard-rail exception typing
+/// (including that a genuine wrong-password failure must NOT be relabeled as misalignment) at the
+/// unit level. They do NOT drive <c>RarProcessor</c>'s own stream-selection code
+/// (<c>GetFastNzbFileStream</c>) -- <see cref="Issue28RarProcessorIntegrationTests"/> does that,
+/// against a real <c>UsenetStreamingClient</c> over a real (mock) NNTP server, and is the test that
+/// actually fails if <c>RarProcessor</c> reverts to fabricating a uniform size table.
 /// </summary>
 public class Issue28RarStreamMisalignmentTests
 {
-    private const string Password = "testpass";
-    private const long DeclaredUncompressedSize = 2_600_000; // random payload size fed to `rar a`
-
-    private static string FixtureDir()
-    {
-        var dir = AppContext.BaseDirectory;
-        while (dir is not null && !Directory.Exists(Path.Combine(dir, "backend.Tests", "Fixtures", "issue28")))
-            dir = Path.GetDirectoryName(dir);
-        Assert.NotNull(dir);
-        return Path.Combine(dir!, "backend.Tests", "Fixtures", "issue28");
-    }
-
-    private static byte[] Volume(string name) => File.ReadAllBytes(Path.Combine(FixtureDir(), name));
-
-    /// <summary>
-    /// Non-uniform layout matching the issue's trigger: <paramref name="fullCount"/> segments of
-    /// <paramref name="fullSize"/> bytes then one short remainder segment. The sizes sum exactly to
-    /// <paramref name="totalBytes"/>.
-    /// </summary>
-    private static long[] NonUniformLayout(long totalBytes, int fullCount, int fullSize)
-    {
-        var sizes = new long[fullCount + 1];
-        for (var i = 0; i < fullCount; i++) sizes[i] = fullSize;
-        sizes[fullCount] = totalBytes - (long)fullCount * fullSize;
-        Assert.True(sizes[fullCount] > 0 && sizes[fullCount] < fullSize,
-            "layout must end with a genuinely short segment");
-        Assert.Equal(totalBytes, sizes.Sum());
-        return sizes;
-    }
-
-    /// <summary>What the pre-fix <c>GetFastFileStream</c> fabricated: uniform size, remainder last.</summary>
-    private static long[] FabricateUniformTable(long fileSize, int segmentCount)
-    {
-        var sizes = new long[segmentCount];
-        var avg = fileSize / segmentCount;
-        Array.Fill(sizes, avg);
-        sizes[^1] = fileSize - avg * (segmentCount - 1);
-        return sizes;
-    }
+    private const string Password = Issue28Fixtures.Password;
+    private const long DeclaredUncompressedSize = Issue28Fixtures.DeclaredUncompressedSize;
 
     /// <summary>Serves a single volume's bytes sliced at an arbitrary (non-uniform) segment layout,
     /// with truthful yEnc part headers.</summary>
@@ -133,20 +98,20 @@ public class Issue28RarStreamMisalignmentTests
     }
 
     private static async Task<System.Collections.Generic.List<IRarHeader>> ParseHeadersAsync(
-        byte[] volume, long[] realLayout, long[]? streamSegmentSizes)
+        byte[] volume, long[] realLayout, long[]? streamSegmentSizes, string? password = Password)
     {
         var client = new SlicingNntpClient(volume, realLayout);
         var ctx = new ConnectionUsageContext(ConnectionUsageType.QueueRarProcessing, "issue28-test");
         await using var stream = new NzbFileStream(
             client.SegmentIds, volume.Length, client, concurrentConnections: 3, usageContext: ctx,
             useBufferedStreaming: false, segmentSizes: streamSegmentSizes);
-        return await RarUtil.GetRarHeadersAsync(stream, Password, CancellationToken.None);
+        return await RarUtil.GetRarHeadersAsync(stream, password, CancellationToken.None);
     }
 
     [Fact]
     public async Task Baseline_HeadersParseStraightFromDisk()
     {
-        await using var fs = File.OpenRead(Path.Combine(FixtureDir(), "hp.part2.rar"));
+        await using var fs = File.OpenRead(Path.Combine(Issue28Fixtures.FixtureDir(), "hp.part2.rar"));
         var headers = await RarUtil.GetRarHeadersAsync(fs, Password, CancellationToken.None);
         var file = Assert.Single(headers, h => h.HeaderType == HeaderType.File);
         Assert.Equal(DeclaredUncompressedSize, file.GetUncompressedSize());
@@ -163,9 +128,9 @@ public class Issue28RarStreamMisalignmentTests
     [Fact]
     public async Task FabricatedUniformSizeTable_IsRejectedAsMisaligned()
     {
-        var volume = Volume("hp.part2.rar"); // 1,000,000-byte continuation volume
-        var realLayout = NonUniformLayout(volume.Length, fullCount: 7, fullSize: 131_072);
-        var fabricated = FabricateUniformTable(volume.Length, realLayout.Length);
+        var volume = Issue28Fixtures.Volume("hp.part2.rar"); // 1,000,000-byte continuation volume
+        var realLayout = Issue28Fixtures.NonUniformLayout(volume.Length, fullCount: 7, fullSize: 131_072);
+        var fabricated = Issue28Fixtures.FabricateUniformTable(volume.Length, realLayout.Length);
 
         // Genuinely the pre-fix input: a uniform table that sums to the file size but whose offsets
         // do not match the real (non-uniform) layout.
@@ -187,12 +152,31 @@ public class Issue28RarStreamMisalignmentTests
     [Fact]
     public async Task NoFabricatedTable_InterpolationSearchKeepsHeaderParseAligned()
     {
-        var volume = Volume("hp.part2.rar");
-        var realLayout = NonUniformLayout(volume.Length, fullCount: 7, fullSize: 131_072);
+        var volume = Issue28Fixtures.Volume("hp.part2.rar");
+        var realLayout = Issue28Fixtures.NonUniformLayout(volume.Length, fullCount: 7, fullSize: 131_072);
 
         var headers = await ParseHeadersAsync(volume, realLayout, streamSegmentSizes: null);
 
         var file = Assert.Single(headers, h => h.HeaderType == HeaderType.File);
         Assert.Equal(DeclaredUncompressedSize, file.GetUncompressedSize());
+    }
+
+    /// <summary>
+    /// Cross-review requirement: a genuine wrong-password failure on an <c>-hp</c> archive must keep
+    /// surfacing as a password/crypto error, never get relabeled as stream misalignment. RAR5's
+    /// <c>Crypt</c> header is unencrypted metadata read successfully regardless of password
+    /// correctness; the <c>Archive</c> header right after it is the first thing actually decrypted,
+    /// and SharpCompress verifies the password there via a check value, throwing
+    /// <see cref="SharpCompress.Common.CryptographicException"/> before any header content is
+    /// trusted. The guard rail only relabels exceptions occurring AFTER a clean Archive header, so
+    /// this must reach the caller unmodified.
+    /// </summary>
+    [Fact]
+    public async Task WrongPassword_KeepsOriginalExceptionClass()
+    {
+        await using var fs = File.OpenRead(Path.Combine(Issue28Fixtures.FixtureDir(), "hp.part1.rar"));
+        var ex = await Assert.ThrowsAsync<SharpCompress.Common.CryptographicException>(
+            () => RarUtil.GetRarHeadersAsync(fs, "wrong-password", CancellationToken.None));
+        Assert.IsNotType<RarStreamMisalignedException>(ex);
     }
 }
