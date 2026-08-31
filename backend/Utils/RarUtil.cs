@@ -27,6 +27,13 @@ public static class RarUtil
 
     internal static List<IRarHeader> GetRarHeaders(Stream stream, string? password)
     {
+        // issue #28 guard rail state: has a Mark, then an Archive or Crypt header, been read cleanly?
+        // If so and the parse later blows up on a password-protected volume, the front of the stream
+        // was fine but a deeper seek landed on garbage -- i.e. the byte stream is misaligned, not the
+        // archive corrupt. See the catch clause below.
+        var markIteration = -1;
+        var sawArchiveOrCryptHeader = false;
+
         try
         {
             Serilog.Log.Debug("[RarUtil] GetRarHeaders starting. Stream position: {Position}, Length: {Length}, CanSeek: {CanSeek}",
@@ -44,6 +51,29 @@ public static class RarUtil
             {
                 iterationCount++;
                 var currentPosition = stream.Position;
+
+                // issue #28 guard rail: a well-formed RAR always yields Mark, then Archive -- or, for
+                // a RAR5 -hp archive, Crypt then Archive. If the header right after Mark is neither
+                // while a password was supplied, the byte stream feeding SharpCompress is already
+                // misaligned at the front (a segment-size table that drifted from the real yEnc
+                // article sizes). Fail fast rather than let the factory walk ciphertext to
+                // end-of-stream -- that costs up to the 60s header-parse timeout per volume.
+                if (header.HeaderType == HeaderType.Mark)
+                {
+                    markIteration = iterationCount;
+                }
+                else if (header.HeaderType is HeaderType.Archive or HeaderType.Crypt)
+                {
+                    sawArchiveOrCryptHeader = true;
+                }
+                else if (markIteration >= 0 && iterationCount == markIteration + 1
+                         && password != null
+                         && header.HeaderType is not (HeaderType.Archive or HeaderType.Crypt))
+                {
+                    throw new RarStreamMisalignedException(
+                        $"RAR stream misaligned: header after MarkHeader was {header.HeaderType}, " +
+                        "expected Archive or Crypt.");
+                }
 
                 // Detect infinite loop - if we've iterated 1000 times or position hasn't changed in 100 iterations
                 if (iterationCount > 1000)
@@ -124,6 +154,24 @@ public static class RarUtil
 
             return headers;
         }
+        catch (RarStreamMisalignedException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (password != null && sawArchiveOrCryptHeader && IsLikelyMisalignment(ex))
+        {
+            // The Mark + Archive/Crypt headers at the front parsed cleanly, then a later header --
+            // reached by seeking past the stored data -- decoded as garbage. On a password-protected
+            // volume that is the issue #28 signature: the stream's segment offsets do not match the
+            // real yEnc article sizes, so the seek landed on ciphertext or ran off the end. Surface
+            // it as one clear, non-retryable error instead of the raw SharpCompress exception.
+            Serilog.Log.Warning(
+                "[RarUtil] Password-protected RAR header parse failed after the archive header at " +
+                "stream position {Position}; treating as stream misalignment (issue #28): {Message}",
+                stream.Position, ex.Message);
+            throw new RarStreamMisalignedException(
+                $"RAR stream misaligned while parsing password-protected volume headers: {ex.Message}");
+        }
         catch (Exception e) when (e.TryGetInnerException<UsenetArticleNotFoundException>(out var missingArticleException))
         {
             Serilog.Log.Warning("[RarUtil] Missing article exception caught: {Message}", missingArticleException!.Message);
@@ -136,4 +184,17 @@ public static class RarUtil
             throw;
         }
     }
+
+    /// <summary>
+    /// The exception shapes SharpCompress produces when it is handed bytes that are not a valid
+    /// header -- the five faces of issue #28: "malformed vint", "Unknown Rar Header: N",
+    /// "arithmetic overflow", "Unsupported crypto version of 99", "End of stream reached".
+    /// </summary>
+    private static bool IsLikelyMisalignment(Exception ex) => ex
+        is SharpCompress.Common.InvalidFormatException
+        or FormatException
+        or OverflowException
+        or EndOfStreamException
+        or IndexOutOfRangeException
+        or ArgumentOutOfRangeException;
 }

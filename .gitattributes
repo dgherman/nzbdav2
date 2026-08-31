@@ -1,2 +1,4 @@
 * text=auto
 * text eol=lf
+# issue #28 RAR fixtures are binary archives; never normalize line endings
+backend.Tests/Fixtures/** binary

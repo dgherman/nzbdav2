@@ -236,6 +236,12 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.6 (2026-08-31)
+Password-protected (`-hp`) multi-volume RAR imports failed for a large share of releases (GitHub issue #28). The queue logged `malformed vint`, `Unknown Rar Header: N`, `arithmetic overflow`, `Unsupported crypto version of 99`, or `Could not read the requested amount of bytes. End of stream reached. Requested: 16 Read: 0`, and the job either failed outright or mounted an incomplete file. The password was present in the NZB and correctly plumbed all the way to SharpCompress — the defect was one layer down, in NZB stream assembly.
+
+*   **Fix**: `RarProcessor` no longer builds the header-parsing stream through `UsenetStreamingClient.GetFastFileStream`, which fabricated a *uniform* per-segment size table (`fileSize / segmentCount` for every segment, remainder in the last). Real yEnc articles are a fixed larger size with a short final segment, so the fabricated table's byte offsets drift hundreds of KB from reality across a volume. RAR5 header parsing seeks past the stored data to the file/end-archive header near end-of-volume; `NzbFileStream` mapped that file offset to the wrong segment and intra-segment offset through the drifted table, and SharpCompress then walked ciphertext or read off the end. `RarProcessor` now passes `segmentSizes: null`, so `NzbFileStream` locates the target segment by interpolation-searching the real yEnc part headers — a few HEAD fetches per seek, and exact. Verified end-to-end against both issue #28 fixtures: the 2-volume release now extracts its 208,423,296-byte MKV byte-for-byte, and every volume of the 52-volume season pack parses and its episodes stream and `ffprobe`-validate.
+*   **Reliability**: `RarUtil.GetRarHeaders` now fails fast with a distinct `RarStreamMisalignedException` when a volume's `MarkHeader` is followed by anything other than an `Archive`/`Crypt` header, or when a password-protected volume's parse blows up *after* a clean archive header — both of which mean the byte stream is misaligned rather than the archive corrupt. Previously SharpCompress would walk to end-of-stream, costing up to the 60-second header-parse timeout per volume.
+
 ## v0.12.5 (2026-08-24)
 Live playback would freeze for 1-5+ seconds during otherwise-healthy streaming, correlated with a protocol-desync error on the NNTP connection across every configured provider.
 
