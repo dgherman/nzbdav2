@@ -117,6 +117,52 @@ public class MockNntpServer : IDisposable
         };
     }
 
+    /// <summary>
+    /// Registers segments carrying REAL bytes (e.g. a genuine RAR volume read off disk) at
+    /// caller-chosen, possibly non-uniform, offsets/sizes -- unlike <see cref="RegisterLayout"/>,
+    /// which always synthesizes filler content at generator-computed uniform-minus-remainder
+    /// sizes. Exists so a regression test can drive real production code (a real
+    /// <c>UsenetStreamingClient</c> over real NNTP) against a real encrypted archive whose
+    /// per-segment sizes are deliberately irregular, without inventing a second NZB/server stack.
+    /// </summary>
+    /// <param name="fileName">Value the yEnc header reports as this file's name.</param>
+    /// <param name="fileSize">Value the yEnc header reports as this file's total size (the
+    /// "declared" size a client would trust, e.g. from a Par2 descriptor).</param>
+    /// <param name="segments">(message id, real payload bytes, byte offset within the file) for
+    /// each segment, in order. Payload lengths may vary segment to segment.</param>
+    public void RegisterRawSegments(
+        string fileName, long fileSize, IReadOnlyList<(string SegmentId, byte[] Payload, long PartOffset)> segments)
+    {
+        var totalParts = segments.Count;
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var (segmentId, payload, partOffset) = segments[i];
+            _layouts[NormalizeMsgId(segmentId)] =
+                BuildRawLayout(fileName, partNumber: i + 1, totalParts, fileSize, partOffset, payload);
+        }
+    }
+
+    private SegmentLayout BuildRawLayout(
+        string fileName, int partNumber, int totalParts, long fileSize, long partOffset, byte[] payload)
+    {
+        var begin = partOffset + 1;
+        var end = partOffset + payload.Length;
+
+        var header = $"=ybegin part={partNumber} total={totalParts} line=128 size={fileSize} name={fileName}\r\n" +
+                     $"=ypart begin={begin} end={end}\r\n";
+        var footer = $"=yend size={payload.Length} part={partNumber}\r\n.\r\n";
+
+        return new SegmentLayout
+        {
+            FileName = fileName,
+            PartNumber = partNumber,
+            PartSize = payload.Length,
+            HeaderBytes = Encoding.ASCII.GetBytes(header),
+            FooterBytes = Encoding.ASCII.GetBytes(footer),
+            Payload = YencEncode(payload),
+        };
+    }
+
     private static string NormalizeMsgId(string raw) => raw.Trim('<', '>');
 
     private SegmentLayout GetLayout(string msgId) =>
@@ -293,6 +339,17 @@ public class MockNntpServer : IDisposable
             Array.Fill(decodedData, (byte)'A');
         }
 
+        return YencEncode(decodedData);
+    }
+
+    /// <summary>
+    /// yEnc-encodes arbitrary already-decoded bytes — real file content, unlike
+    /// <see cref="EncodePayload"/>'s synthetic filler. Shared so <see cref="RegisterRawSegments"/>
+    /// produces wire-identical framing to the generator-driven path.
+    /// </summary>
+    private static byte[] YencEncode(byte[] decodedData)
+    {
+        var size = decodedData.Length;
         var buffer = new List<byte>();
         var crlf = new byte[] { 13, 10 };
         int bytesWritten = 0;

@@ -345,15 +345,17 @@ public class RarProcessor(
         // would fetch segments nothing ever reads and hold them against the heap. Dropping it is
         // what lets many volumes parse at once instead of three.
         //
-        // Either way the stream must never have to scan segments to locate an offset. With exact
-        // sizes it seeks precisely; without them GetFastFileStream fills in uniform sizes so it
-        // trusts the total instead of re-scanning.
-        return segmentSizes != null
-            ? usenet.GetFileStream(
-                segments, filesize.Value, HeaderConnectionsPerPart, usageContext,
-                useBufferedStreaming: false, segmentSizes: segmentSizes)
-            : usenet.GetFastFileStream(
-                segments, filesize.Value, HeaderConnectionsPerPart, usageContext);
+        // Seeking has to be exact. When exact per-segment sizes are known (passed in), the stream
+        // seeks straight through the offset table. When they are NOT known we pass null and let
+        // NzbFileStream locate the target segment by interpolation-searching the real yEnc part
+        // headers -- a few HEAD fetches per seek, and correct. Fabricating a uniform size table
+        // (the old GetFastFileStream path) is what issue #28 was: fileSize/segmentCount drifts
+        // hundreds of KB from the real article sizes across a volume, so the seek to a -hp
+        // archive's file/end header near EOF lands in the wrong segment and SharpCompress walks
+        // ciphertext -- "malformed vint", "Unknown Rar Header: N", "End of stream reached".
+        return usenet.GetFileStream(
+            segments, filesize.Value, HeaderConnectionsPerPart, usageContext,
+            useBufferedStreaming: false, segmentSizes: segmentSizes);
     }
 
     public new class Result : BaseProcessor.Result
