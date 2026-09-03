@@ -236,6 +236,10 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.8 (2026-09-03)
+*   **Fix**: Password-protected stored 7z imports now identify the first non-AES coder before mapping the entry's compression type, allowing AES + Copy entries to reach the existing stored-entry path instead of failing with a message-less `InvalidFormatException`. The app-level fallback now also handles that vendored SharpCompress exception shape.
+*   **Fix**: Streamless 7z entries now report no compression and are not misidentified as encrypted when their folder is null.
+
 ## v0.12.7 (2026-08-31)
 A live Synology playback of *Alone* S13E08 reproduced the video-freezes-while-audio-continues symptom. The backend recorded a definite truncated RAR volume: `Ordering task timed out. NextIndexToWrite=61, TotalSegments=68`. The same signature appeared repeatedly in the preceding 72 hours on unrelated episodes, ruling out a single bad release.
 

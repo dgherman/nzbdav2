@@ -6,28 +6,31 @@ namespace NzbWebDAV.Extensions;
 
 public static class SevenZipArchiveEntryExtensions
 {
+    // Matches SharpCompress's CMethodId.K_AES_ID (0x06F10701 / 116459265).
+    private const ulong AesMethodId = 0x06F10701;
+
     public static CompressionType GetCompressionType(this SevenZipArchiveEntry entry)
     {
         try
         {
             return entry.CompressionType;
         }
-        catch (NotImplementedException)
+        catch (Exception exception)
+            when (exception is NotImplementedException or InvalidFormatException)
         {
             var coders = entry?.GetCoders();
             var compressionMethodId = GetCoderMethodId(coders?.FirstOrDefault());
             return compressionMethodId == 0 ? CompressionType.None
-                : compressionMethodId == 116459265 ? CompressionType.None
+                : compressionMethodId == AesMethodId ? CompressionType.None
                 : CompressionType.Unknown;
         }
     }
 
     public static byte[]? GetAesCoderInfoProps(this SevenZipArchiveEntry entry)
     {
-        const ulong aesMethodId = 0x06F10701;
         return (byte[]?)entry
             ?.GetCoders()
-            ?.FirstOrDefault(x => GetCoderMethodId(x) == aesMethodId)
+            ?.FirstOrDefault(x => GetCoderMethodId(x) == AesMethodId)
             ?.GetReflectionField("_props");
     }
 

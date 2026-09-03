@@ -1,5 +1,4 @@
 using System.IO;
-using System.Linq;
 using SharpCompress.IO;
 
 namespace SharpCompress.Common.SevenZip;
@@ -80,7 +79,12 @@ internal class SevenZipFilePart : FilePart
             return CompressionType.None;
         }
 
-        var coder = Folder.NotNull()._coders.First();
+        if (!Header.HasStream || Folder is null)
+        {
+            return CompressionType.None;
+        }
+
+        var coder = GetPrimaryCoder();
         return coder._methodId._id switch
         {
             K_COPY => CompressionType.None,
@@ -91,7 +95,22 @@ internal class SevenZipFilePart : FilePart
         };
     }
 
+    private CCoderInfo GetPrimaryCoder()
+    {
+        var coders = Folder.NotNull()._coders;
+        foreach (var coder in coders)
+        {
+            if (coder._methodId._id != CMethodId.K_AES_ID)
+            {
+                return coder;
+            }
+        }
+
+        return coders[0];
+    }
+
     internal bool IsEncrypted =>
         !Header.IsDir
-        && Folder?._coders.FindIndex(c => c._methodId._id == CMethodId.K_AES_ID) != -1;
+        && Folder is not null
+        && Folder._coders.FindIndex(c => c._methodId._id == CMethodId.K_AES_ID) != -1;
 }
