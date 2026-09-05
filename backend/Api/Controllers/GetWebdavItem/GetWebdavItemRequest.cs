@@ -11,6 +11,7 @@ public class GetWebdavItemRequest
     public string Item { get; init; }
     public long? RangeStart { get; init; }
     public long? RangeEnd { get; init; }
+    public long? SuffixLength { get; init; }
     public bool ShouldDownload { get; init; }
 
     public GetWebdavItemRequest(HttpContext context)
@@ -31,12 +32,28 @@ public class GetWebdavItemRequest
         if (!VerifyDownloadKey(downloadKey, Item, configManager))
             throw new UnauthorizedAccessException("Invalid download key");
 
-        // parse range header
+        // parse range header (RFC 9110 14.1.2: "bytes=first-last", "bytes=first-", or the
+        // suffix form "bytes=-suffixLength" meaning "the last suffixLength bytes")
         var rangeHeader = context.Request.Headers["Range"].FirstOrDefault() ?? "";
         if (!rangeHeader.StartsWith("bytes=")) return;
-        var parts = rangeHeader[6..].Split("-", StringSplitOptions.RemoveEmptyEntries);
-        RangeStart = long.Parse(parts[0]);
-        if (parts.Length > 1) RangeEnd = long.Parse(parts[1]);
+        var spec = rangeHeader[6..];
+        var dashIndex = spec.IndexOf('-');
+        if (dashIndex < 0) return;
+        var startPart = spec[..dashIndex];
+        var endPart = spec[(dashIndex + 1)..];
+
+        if (startPart.Length == 0)
+        {
+            // suffix range: bytes=-N. Resolved against the actual file size in the controller,
+            // once it is known, since that's the only place the total length is available.
+            if (endPart.Length == 0) return;
+            SuffixLength = long.Parse(endPart);
+        }
+        else
+        {
+            RangeStart = long.Parse(startPart);
+            if (endPart.Length > 0) RangeEnd = long.Parse(endPart);
+        }
     }
 
     private static bool VerifyDownloadKey(string? downloadKey, string path, ConfigManager configManager)

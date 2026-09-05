@@ -236,6 +236,9 @@ nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and per
 
 ## Changelog
 
+## v0.12.9 (2026-09-05)
+*   **Fix**: Suffix byte ranges (`bytes=-N`, RFC 9110 14.1.2: "the last N bytes") were parsed and resolved as `bytes=N-` on both HTTP endpoints that serve file content, turning a request for a small trailing slice into a near-whole-file response. On `/view/`, `GetWebdavItemRequest` split the range header on `-` with empty entries removed, so the empty leading token of a suffix range was silently dropped and the suffix length was read as an absolute start offset; it now parses `bytes=-N` into a distinct suffix length and resolves it against the file's real size once known, clamping to the whole file instead of going negative when the suffix is at least as large as the file. On the WebDAV GET/HEAD path, `GetAndHeadHandlerPatch` used NWebDav's already-correct `Start=null/End=N` suffix parse but then treated `End` as an absolute byte offset, serving the *first* N bytes instead of the *last* N; it now resolves the suffix against the stream's actual length before seeking, and the byte window actually copied to the response body is computed from that resolution instead of the raw, unresolved range. This was breaking Jellyfin `.strm` playback, which fetches the trailing Matroska Cues via a suffix range and was instead receiving up to the entire file, causing multi-minute playback starts and HTTP client timeouts.
+
 ## v0.12.8 (2026-09-03)
 *   **Fix**: Password-protected stored 7z imports now identify the first non-AES coder before mapping the entry's compression type, allowing AES + Copy entries to reach the existing stored-entry path instead of failing with a message-less `InvalidFormatException`. The app-level fallback now also handles that vendored SharpCompress exception shape.
 *   **Fix**: Streamless 7z entries now report no compression and are not misidentified as encrypted when their folder is null.
