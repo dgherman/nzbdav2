@@ -35,18 +35,17 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
         Response.Headers["Accept-Ranges"] = "bytes";
         Response.Headers["Content-Disposition"] = GetContentDisposition(item.Name, request.ShouldDownload);
 
-        if (request.RangeStart is not null)
+        var resolvedRange = ResolveByteRange(request, fileSize);
+        if (resolvedRange is not null)
         {
-            // compute
-            var end = request.RangeEnd ?? (fileSize - 1);
-            var chunkSize = 1 + end - request.RangeStart!.Value;
+            var (start, end, chunkSize, isBoundedEnd) = resolvedRange.Value;
 
             // seek
-            stream.Seek(request.RangeStart.Value, SeekOrigin.Begin);
-            if (request.RangeEnd is not null) stream = stream.LimitLength(chunkSize);
+            stream.Seek(start, SeekOrigin.Begin);
+            if (isBoundedEnd) stream = stream.LimitLength(chunkSize);
 
             // set response headers
-            Response.Headers["Content-Range"] = $"bytes {request.RangeStart}-{end}/{fileSize}";
+            Response.Headers["Content-Range"] = $"bytes {start}-{end}/{fileSize}";
             Response.Headers["Content-Length"] = chunkSize.ToString();
             Response.StatusCode = 206;
         }
@@ -82,6 +81,31 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
             Response.StatusCode = 500;
             await Response.WriteAsync($"Error streaming file: {ex.Message}", HttpContext.RequestAborted).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Resolves a request's byte range against the now-known file size. Handles normal ranges
+    /// (bytes=N-M, bytes=N-) as well as the suffix form (bytes=-N, RFC 9110 14.1.2: "the last N
+    /// bytes"), clamping a suffix >= fileSize to the whole file instead of going negative.
+    /// Returns null when the request has no range at all.
+    /// </summary>
+    internal static (long Start, long End, long ChunkSize, bool HasExplicitEnd)? ResolveByteRange(
+        GetWebdavItemRequest request, long fileSize)
+    {
+        long? start = request.RangeStart;
+        long? end = request.RangeEnd;
+        if (request.SuffixLength is not null)
+        {
+            var suffixLength = Math.Clamp(request.SuffixLength.Value, 0, fileSize);
+            start = fileSize - suffixLength;
+            end = null;
+        }
+
+        if (start is null) return null;
+
+        var resolvedEnd = end ?? (fileSize - 1);
+        var chunkSize = 1 + resolvedEnd - start.Value;
+        return (start.Value, resolvedEnd, chunkSize, end is not null);
     }
 
     private static string GetContentDisposition(string filename, bool shouldDownload)

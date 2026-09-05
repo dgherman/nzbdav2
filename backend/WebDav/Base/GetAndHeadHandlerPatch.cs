@@ -48,12 +48,25 @@ public class GetAndHeadHandlerPatch : IRequestHandler
         // Determine the requested range
         var range = request.GetRange();
 
+        // The byte window actually copied to the response body (defaults to the whole file).
+        // For a suffix range (bytes=-N, RFC 9110 14.1.2), NWebDav's GetRange() returns
+        // Start=null/End=N ("the last N bytes"), so the true start/end can only be resolved
+        // once the stream length is known below; that resolution overwrites these.
+        var copyStart = 0L;
+        long? copyEnd = null;
+        if (range is { Start: long rangeStart })
+        {
+            copyStart = rangeStart;
+            copyEnd = range.End;
+        }
+
         // Propagate the requested range end byte to downstream stream factories so that
         // BufferedSegmentStream prefetch can be bounded to the requested segment(s)
-        // (plus a small overshoot). Only set when the consumer specified a closed range
-        // bytes=X-Y; open-ended bytes=X- and unbounded requests stay unbounded so streaming
-        // playback (Plex/Jellyfin/rclone full-file pulls) is unaffected.
-        if (range?.End is long requestedRangeEnd)
+        // (plus a small overshoot). Only set when the consumer specified a genuine closed range
+        // bytes=X-Y; open-ended bytes=X-, unbounded requests, and suffix ranges bytes=-N (whose
+        // true end is only known once the file length is resolved below) stay unbounded so
+        // streaming playback (Plex/Jellyfin/rclone full-file pulls) is unaffected.
+        if (range is { Start: not null, End: long requestedRangeEnd })
         {
             httpContext.Items["RequestedRangeEnd"] = requestedRangeEnd;
         }
@@ -120,8 +133,22 @@ public class GetAndHeadHandlerPatch : IRequestHandler
                         // Check if a range was specified
                         if (range != null)
                         {
-                            var start = range.Start ?? 0;
-                            var end = Math.Min(range.End ?? long.MaxValue, length - 1);
+                            long start;
+                            long end;
+                            if (range.Start is null && range.End is long suffixLength)
+                            {
+                                // Suffix range (RFC 9110 14.1.2): bytes=-N means "the last N
+                                // bytes". Clamp to the whole representation when the suffix is
+                                // >= its length, rather than going negative.
+                                var clampedSuffixLength = Math.Clamp(suffixLength, 0, length);
+                                start = length - clampedSuffixLength;
+                                end = length - 1;
+                            }
+                            else
+                            {
+                                start = range.Start ?? 0;
+                                end = Math.Min(range.End ?? long.MaxValue, length - 1);
+                            }
 
                             // Return 416 if the range start is beyond the end of the file
                             if (start > end)
@@ -131,6 +158,8 @@ public class GetAndHeadHandlerPatch : IRequestHandler
                                 return true;
                             }
 
+                            copyStart = start;
+                            copyEnd = end;
                             length = end - start + 1;
 
                             // Write the range
@@ -160,7 +189,7 @@ public class GetAndHeadHandlerPatch : IRequestHandler
 
                 // HEAD method doesn't require the actual item data
                 if (!isHeadRequest)
-                    await CopyToAsync(stream, response.Body, range?.Start ?? 0, range?.End, httpContext.RequestAborted).ConfigureAwait(false);
+                    await CopyToAsync(stream, response.Body, copyStart, copyEnd, httpContext.RequestAborted).ConfigureAwait(false);
             }
             else
             {
