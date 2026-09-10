@@ -22,10 +22,13 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
         if (item is null) throw new BadHttpRequestException("The file does not exist.");
         if (item is IStoreCollection) throw new BadHttpRequestException("The file does not exist.");
 
-        // Issue #35: mark the payload as uncompressed so the frontend Express proxy never
-        // gzip/br-compresses it. Compression drops Content-Length and forces chunked
-        // transfer, breaking HTTP range requests / seeking for media streamed to
-        // Plex/Jellyfin via .strm Direct Play.
+        // Issue #35: advertise the payload as uncompressed. This is a signal for any
+        // downstream/reverse proxy (nginx/traefik/CDN) and an explicit hint to the
+        // client that the body is verbatim, so Content-Length stays valid and HTTP
+        // range requests / seeking keep working for media streamed to Plex/Jellyfin
+        // via .strm Direct Play. Note: the frontend Express `compression` middleware
+        // ignores an "identity" Content-Encoding and would still compress this hop —
+        // the frontend is protected separately by the `shouldCompress` path filter.
         Response.Headers["Content-Encoding"] = "identity";
 
         // handle par2 preview
