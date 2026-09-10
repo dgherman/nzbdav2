@@ -22,6 +22,12 @@ public class ListWebdavDirectoryController(DatabaseStore store, ConfigManager co
         if (item is null) throw new BadHttpRequestException("The file does not exist.");
         if (item is IStoreCollection) throw new BadHttpRequestException("The file does not exist.");
 
+        // Issue #35: mark the payload as uncompressed so the frontend Express proxy never
+        // gzip/br-compresses it. Compression drops Content-Length and forces chunked
+        // transfer, breaking HTTP range requests / seeking for media streamed to
+        // Plex/Jellyfin via .strm Direct Play.
+        Response.Headers["Content-Encoding"] = "identity";
+
         // handle par2 preview
         if (Path.GetExtension(item.Name).ToLower() == ".par2" && configManager.IsPreviewPar2FilesEnabled())
             return await GetPar2PreviewStream(item).ConfigureAwait(false);

@@ -3,6 +3,7 @@ import express from "express";
 import morgan from "morgan";
 import http from "http";
 import { WebSocketServer } from "ws";
+import { shouldCompress } from "./server-compression.js";
 
 // Short-circuit the type-checking of the built output.
 const BUILD_PATH = "../build/server/index.js";
@@ -11,7 +12,18 @@ const PORT = Number.parseInt(process.env.PORT || "3000");
 
 // Initialize the express app
 const app = express();
-app.use(compression());
+// Issue #35: skip compression for responses proxied to the backend (media streams,
+// WebDAV file endpoints, JSON APIs, /metrics). Compressing them drops Content-Length
+// and forces chunked transfer, which breaks HTTP range/seek (Jellyfin .strm Direct
+// Play). `shouldCompress` holds the exempt-path list; see ./server-compression.ts.
+app.use(
+  compression({
+    filter: (req, res) => {
+      if (!shouldCompress(decodeURIComponent(req.path || ""))) return false;
+      return compression.filter(req, res);
+    },
+  }),
+);
 app.disable("x-powered-by");
 
 // Initialize the websocket server as soon as both it and the server-module are ready
