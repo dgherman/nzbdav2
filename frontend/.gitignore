@@ -9,5 +9,7 @@
 /dist-node/
 server.js
 server.d.ts
+server-compression.js
+server-compression.d.ts
 vite.config.js
 vite.config.d.ts

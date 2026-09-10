@@ -42,7 +42,8 @@ RUN mkdir /config \
 # Copy frontend
 COPY --from=frontend-build /frontend/node_modules ./frontend/node_modules
 COPY --from=frontend-build /frontend/package.json ./frontend/package.json
-COPY --from=frontend-build /frontend/dist-node/server.js ./frontend/dist-node/server.js
+# Whole dist-node dir: server.js plus its compiled local imports (e.g. server-compression.js, issue #35)
+COPY --from=frontend-build /frontend/dist-node ./frontend/dist-node
 COPY --from=frontend-build /frontend/build ./frontend/build
 
 # Copy backend

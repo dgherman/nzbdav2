@@ -117,6 +117,16 @@ public class GetAndHeadHandlerPatch : IRequestHandler
                 // Set the response
                 response.SetStatus(DavStatusCode.Ok);
 
+                // Issue #35: advertise these file responses (/.ids, /content, /nzbs,
+                // /completed-symlinks) as uncompressed. This is a signal for any
+                // downstream/reverse proxy (nginx/traefik/CDN) and an explicit hint to the
+                // client, keeping Content-Length valid so HTTP range requests / seeking work.
+                // Set on both GET and HEAD so the advertised headers match. Note: the
+                // frontend Express `compression` middleware treats "identity" as no encoding
+                // and would still compress this hop — the frontend is protected separately by
+                // the `shouldCompress` path filter.
+                response.Headers["Content-Encoding"] = "identity";
+
                 // Set the expected content length
                 try
                 {

@@ -279,24 +279,9 @@ export function SabnzbdSettings({ config, setNewConfig }: SabnzbdSettingsProps) 
     );
 }
 
-export function isSabnzbdSettingsUpdated(config: Record<string, string>, newConfig: Record<string, string>) {
-    return config["api.key"] !== newConfig["api.key"]
-        || config["api.categories"] !== newConfig["api.categories"]
-        || config["api.manual-category"] !== newConfig["api.manual-category"]
-        || config["rclone.mount-dir"] !== newConfig["rclone.mount-dir"]
-        || config["api.max-queue-connections"] !== newConfig["api.max-queue-connections"]
-        || config["api.ensure-importable-video"] !== newConfig["api.ensure-importable-video"]
-        || config["api.ensure-article-existence"] !== newConfig["api.ensure-article-existence"]
-        || config["api.ignore-history-limit"] !== newConfig["api.ignore-history-limit"]
-        || config["api.duplicate-nzb-behavior"] !== newConfig["api.duplicate-nzb-behavior"]
-        || config["api.download-extension-blacklist"] !== newConfig["api.download-extension-blacklist"]
-        || config["api.download-filename-blacklist"] !== newConfig["api.download-filename-blacklist"]
-        || config["api.sample-filter-enabled"] !== newConfig["api.sample-filter-enabled"]
-        || config["api.import-strategy"] !== newConfig["api.import-strategy"]
-        || config["api.completed-downloads-dir"] !== newConfig["api.completed-downloads-dir"]
-        || config["general.base-url"] !== newConfig["general.base-url"]
-        || config["api.history-retention-hours"] !== newConfig["api.history-retention-hours"]
-}
+// Issue #37: definition moved to ./sabnzbd-dirty-check so it can be unit-tested in
+// isolation. Re-exported here so existing import sites keep working unchanged.
+export { isSabnzbdSettingsUpdated } from "./sabnzbd-dirty-check";
 
 export function isSabnzbdSettingsValid(newConfig: Record<string, string>) {
     return isValidCategories(newConfig["api.categories"])
