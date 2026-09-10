@@ -14,7 +14,16 @@
     <PackageVersion Include="xunit" Version="2.9.3" />
     <PackageVersion Include="xunit.runner.visualstudio" Version="3.1.5" />
     <PackageVersion Include="Microsoft.NET.ILLink.Tasks" Version="9.0.0" />
-    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="8.0.0" />
+    <!--
+      Bumped 8.0.0 -> 10.0.401. NuGet advisory GHSA-23fw-v26w-5fgq (published
+      2026-08-11, updated 2026-09-08) flags the transitive Microsoft.Build.Tasks.Git
+      8.0.0 that SourceLink 8.0.0 pulls in; after the 2026-09-08 update it started
+      failing `dotnet restore` here as NU1902 under this subtree's
+      TreatWarningsAsErrors. SourceLink 10.0.401 carries Microsoft.Build.Tasks.Git /
+      Microsoft.SourceLink.Common 10.0.401, which are not flagged. Transitive
+      auditing stays fully on. Keep the major aligned with the build SDK.
+    -->
+    <PackageVersion Include="Microsoft.SourceLink.GitHub" Version="10.0.401" />
     <PackageVersion Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" />
   </ItemGroup>
 </Project>

@@ -12,16 +12,5 @@
     <RunAnalyzersDuringBuild>False</RunAnalyzersDuringBuild>
     <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
     <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
-    <!--
-      Audit only our direct package references, not the transitive graph.
-      TreatWarningsAsErrors above promotes NuGet-audit warnings to errors; a security
-      advisory (GHSA-23fw-v26w-5fgq) published after 2026-09-05 for the *transitive*
-      Microsoft.Build.Tasks.Git 8.0.0 (pulled in by Microsoft.SourceLink.* in these
-      vendored SharpCompress projects) then makes `dotnet restore` fail with NU1902.
-      It is not a direct dependency here and cannot be bumped without forking
-      SourceLink. Revisit / drop this when the vendored SharpCompress libs are next
-      updated. Direct-dependency advisories (e.g. NU1903) still surface.
-    -->
-    <NuGetAuditMode>direct</NuGetAuditMode>
   </PropertyGroup>
 </Project>
