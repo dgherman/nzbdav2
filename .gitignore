@@ -45,3 +45,8 @@ backend/local_data/
 
 # Local benchmark harness config/db (docs/superpowers/plans OOM harness)
 /cfg/
+
+# Local AI/tool state
+.claude/
+.pi/
+.polly/
