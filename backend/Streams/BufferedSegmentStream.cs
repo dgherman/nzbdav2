@@ -1256,9 +1256,13 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                             }
                             catch (OperationCanceledException)
                             {
-                                // If main CT not cancelled, we were preempted (straggler detection).
-                                if (!ct.IsCancellationRequested)
+                                if (ct.IsCancellationRequested) throw;
+
+                                if (jobCts.IsCancellationRequested)
                                 {
+                                    // The straggler monitor cancelled this exact attempt and publishes its
+                                    // replacement under pendingRetryPublications. Re-queueing here as well would
+                                    // duplicate that race.
                                     Log.Debug("[BufferedStream] Worker {WorkerId} preempted on segment {Index}.", workerId, job.index);
 
                                     // Record straggler for the provider that was being used
@@ -1278,12 +1282,17 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                                             failedSet.Add(preemptProviderIndex.Value);
                                         }
                                     }
-
-                                    // We DO NOT re-queue here; the monitor already re-queued it (or the race duplicate).
-                                    // If we were the victim, monitor queued us.
-                                    // If we were the slow straggler being killed, monitor queued a duplicate.
                                 }
-                                else throw;
+                                else
+                                {
+                                    // A provider can cancel its own operation token while neither the stream nor
+                                    // this job was cancelled. Never mistake that for monitor preemption: the monitor
+                                    // did not publish a replacement, so dropping the dequeued job leaves a null
+                                    // ordering slot and truncates the range.
+                                    Log.Warning("[BufferedStream] Worker {WorkerId} received an unrequested cancellation for segment {Index}. Re-queueing.",
+                                        workerId, job.index);
+                                    await QueueUrgentSegmentAsync(job.index, markRacing: false, "provider-cancellation").ConfigureAwait(false);
+                                }
                             }
                             finally
                             {
@@ -1658,6 +1667,26 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                 Log.Warning("[BufferedStream] PERMANENT FAILURE: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}): Article not found (no fallbacks remaining). Proceeding to zero-fill.",
                     jobName, index, segmentIds.Length, segmentId);
                 break;
+            }
+            catch (OperationCanceledException ex) when (!ct.IsCancellationRequested)
+            {
+                // MultiProviderNntpClient treats a provider-local cancellation as retryable while it
+                // walks its provider list, but rethrows the captured OperationCanceledException unchanged
+                // once that list is exhausted. Lower-level connection setup and custom clients can surface
+                // the same exception directly. This is a provider failure, not stream/straggler cancellation. Propagating
+                // it made the worker assume the monitor had already queued a replacement and silently
+                // drop this segment, leaving the ordering slot null until the range was truncated.
+                lastException = ex;
+
+                var failedProviderIndex = operationDetails?.CurrentProviderIndex;
+                if (failedProviderIndex.HasValue)
+                {
+                    excludedProviders.Add(failedProviderIndex.Value);
+                }
+
+                Log.Warning("[BufferedStream] PROVIDER CANCELLATION: Job={Job}, Segment={SegmentIndex}/{TotalSegments} (ID: {SegmentId}), Attempt={Attempt}/{MaxRetries}, FailedProvider={FailedProvider}: {Message}",
+                    jobName, index, segmentIds.Length, segmentId, attempt + 1, maxRetries,
+                    failedProviderIndex?.ToString() ?? "unknown", ex.Message);
             }
             catch (OperationCanceledException)
             {

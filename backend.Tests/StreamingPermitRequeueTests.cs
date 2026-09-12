@@ -8,6 +8,7 @@ using NzbWebDAV.Clients.Usenet.Connections;
 using NzbWebDAV.Clients.Usenet.Models;
 using NzbWebDAV.Config;
 using NzbWebDAV.Database.Models;
+using NzbWebDAV.Models;
 using NzbWebDAV.Services;
 using NzbWebDAV.Streams;
 using Usenet.Nzb;
@@ -37,15 +38,29 @@ public class StreamingPermitRequeueTests
     /// Serves a payload unique to each segment index, so the assertion distinguishes "the segment
     /// was actually fetched" from "the segment was zero-filled or served out of order".
     /// </summary>
-    private sealed class PerSegmentNntpClient : INntpClient
+    private sealed class PerSegmentNntpClient(bool cancelFirstSegmentZero = false) : INntpClient
     {
         private int _served;
+        private int _segmentZeroAttempts;
         public int Served => Volatile.Read(ref _served);
+        public int SegmentZeroAttempts => Volatile.Read(ref _segmentZeroAttempts);
 
         public Task<YencHeaderStream> GetSegmentStreamAsync(string segmentId, bool includeHeaders, CancellationToken ct)
         {
-            Interlocked.Increment(ref _served);
             var index = int.Parse(segmentId.Split('-')[1].Split('@')[0]);
+            if (index == 0)
+            {
+                var attempt = Interlocked.Increment(ref _segmentZeroAttempts);
+                if (cancelFirstSegmentZero && attempt == 1)
+                {
+                    // Simulates a provider-local timeout/cancellation. The caller's token is
+                    // deliberately still live, so this must be retried rather than interpreted as
+                    // straggler-monitor preemption.
+                    throw new OperationCanceledException("provider operation timed out");
+                }
+            }
+
+            Interlocked.Increment(ref _served);
             var header = new UsenetYencHeader
             {
                 FileName = "test.mkv",
@@ -178,6 +193,58 @@ public class StreamingPermitRequeueTests
 
         Assert.Equal(buffer.Length, read);
         Assert.True(client.SegmentZeroAttempts >= 2, "the straggler was not cancelled and retried");
+        for (var i = 0; i < 2; i++)
+        {
+            for (var offset = 0; offset < SegmentSize; offset++)
+            {
+                Assert.Equal(PayloadByte(i), buffer[i * SegmentSize + offset]);
+            }
+        }
+    }
+
+    [Fact]
+    public async Task ProviderCancellation_WithLiveCallerToken_RetriesInsteadOfDroppingSegment()
+    {
+        // Production capture, 2026-09-12: Planet Earth III S01E02 returned 20 truncated
+        // 100 MB ranges during one playback, all with an unfilled ordering slot and no terminal
+        // segment error. Four occurred in the final seven minutes where video visibly froze while
+        // audio continued. A provider-originated OperationCanceledException reached the worker while
+        // both its stream token and job token were live; the worker called it monitor preemption and
+        // did not re-queue the dequeued segment.
+        var segmentIds = new[] { "seg-0@test", "seg-1@test" };
+        var segmentSizes = new long[] { SegmentSize, SegmentSize };
+        var providerTransport = new PerSegmentNntpClient(cancelFirstSegmentZero: true);
+        await using var pool = new ConnectionPool<INntpClient>(
+            2,
+            new ExtendedSemaphoreSlim(2, 2),
+            _ => ValueTask.FromResult<INntpClient>(providerTransport),
+            poolName: "provider-cancellation-test",
+            idleTimeout: TimeSpan.FromMinutes(15));
+        var provider = new MultiConnectionNntpClient(
+            pool, ProviderType.Pooled, providerIndex: 0, host: "cancelling-provider");
+        var client = new MultiProviderNntpClient(new List<MultiConnectionNntpClient> { provider });
+        var context = new ConnectionUsageContext(ConnectionUsageType.BufferedStreaming,
+            new ConnectionUsageDetails { Text = "provider-cancellation-test" });
+
+        await using var stream = new BufferedSegmentStream(
+            segmentIds,
+            fileSize: SegmentSize * 2L,
+            client,
+            concurrentConnections: 2,
+            bufferSegmentCount: 2,
+            cancellationToken: CancellationToken.None,
+            usageContext: context,
+            segmentSizes: segmentSizes);
+
+        var buffer = new byte[SegmentSize * 2];
+        var read = await ReadFully(stream, buffer).WaitAsync(TimeSpan.FromSeconds(8));
+
+        Assert.Equal(buffer.Length, read);
+        // This traverses the production wrapper chain. MultiConnectionNntpClient lets an
+        // unrequested cancellation through; MultiProviderNntpClient tries its provider list and,
+        // once exhausted, rethrows that same cancellation to BufferedSegmentStream.
+        Assert.Equal(2, providerTransport.SegmentZeroAttempts);
+        Assert.Equal(2, providerTransport.Served);
         for (var i = 0; i < 2; i++)
         {
             for (var offset = 0; offset < SegmentSize; offset++)

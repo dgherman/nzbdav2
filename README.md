@@ -228,13 +228,22 @@ docker logs nzbdav 2>&1 | grep -E "OOM HEAP STATE|RUNAWAY SEGMENT"
 download would not stop growing, which is a different problem — please report it.
 
 For reproducing streaming problems locally without touching your real setup, see
-[docs/repro-harness.md](docs/repro-harness.md).
+[docs/repro-harness.md](docs/repro-harness.md). For the historical playback-freeze fixes, their
+cross-cutting invariants, production signatures, and regression checklist, see
+[PLAYBACK_STALL_FIXES.md](PLAYBACK_STALL_FIXES.md).
 
 ## Upstream Sync
 
 nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and periodically cherry-picks relevant upstream changes manually. Each sync documents which changes were adopted, which were skipped, and the rationale for each decision. Sync history is in [`docs/upstream-sync-*.md`](./docs/). The most recent file contains the last reviewed upstream commit and a table of all items evaluated.
 
 ## Changelog
+
+## v0.12.11 (2026-09-12)
+A live Synology playback of *Planet Earth III* S01E02 returned 20 prematurely truncated buffered ranges, including four in the final seven minutes where the reported video freezes occurred. Every range ended with `Ordering task timed out` and an unfilled segment slot, while no terminal segment-fetch error was logged. This distinguished the failure from NAS resource pressure, Plex transcoding, or a permanently unavailable article.
+
+*   **Fix**: Provider-local cancellation is now retried by the normal per-segment retry loop when the caller token is still live. Previously an `OperationCanceledException` originating below the multi-provider layer could reach a worker while neither its stream token nor job token was cancelled; the worker misclassified it as straggler-monitor preemption, assumed the monitor had already published a replacement, and silently dropped the dequeued segment. The missing ordering slot eventually truncated the HTTP range, forcing the player to recover and sometimes exhausting its video buffer while separately buffered audio continued.
+*   **Reliability**: The worker now also distinguishes actual monitor preemption (`jobCts` cancelled) from any unrequested cancellation that escapes the retry layer, re-queueing the latter defensively. Added a deterministic regression in which the provider cancels its first attempt with a live caller token and the stream must retry it and return complete byte-exact output.
+*   **Docs**: Added `PLAYBACK_STALL_FIXES.md` as a durable ledger of prior playback-stall fixes, the streaming invariants they protect, production log signatures, regression-test coverage, and the investigation checklist for future incidents.
 
 ## v0.12.10 (2026-09-10)
 *   **Fix**: (#35) The Express frontend compressed proxied backend responses because `app.use(compression())` had no filter, so media streams and JSON from `/view`, the WebDAV file endpoints, `/api` and `/metrics` were gzip/br-encoded — dropping the upstream `Content-Length` and forcing `Transfer-Encoding: chunked`, which breaks HTTP range requests and seeking (Jellyfin `.strm` Direct Play would buffer the whole file). The frontend now skips compression for those proxied paths — the decision lives in `shouldCompress` / `shouldCompressRequestPath` in `frontend/server-compression.ts` (the request-path variant decodes defensively so a malformed `%`-sequence such as `GET /%` cannot throw out of the filter and crash the process). The backend additionally sends `Content-Encoding: identity` on `/view` (`GetWebdavItemController`) and the WebDAV GET/HEAD file path (`GetAndHeadHandlerPatch`); Express `compression` ignores that header, so it is a signal for any downstream/reverse proxy (nginx/traefik/CDN) and an explicit client hint — the frontend hop is protected by the path filter.
