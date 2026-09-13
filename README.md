@@ -228,13 +228,28 @@ docker logs nzbdav 2>&1 | grep -E "OOM HEAP STATE|RUNAWAY SEGMENT"
 download would not stop growing, which is a different problem — please report it.
 
 For reproducing streaming problems locally without touching your real setup, see
-[docs/repro-harness.md](docs/repro-harness.md).
+[docs/repro-harness.md](docs/repro-harness.md). For the historical playback-freeze fixes, their
+cross-cutting invariants, production signatures, and regression checklist, see
+[PLAYBACK_STALL_FIXES.md](PLAYBACK_STALL_FIXES.md).
 
 ## Upstream Sync
 
 nzbdav2 tracks [nzbdav-dev/nzbdav](https://github.com/nzbdav-dev/nzbdav) and periodically cherry-picks relevant upstream changes manually. Each sync documents which changes were adopted, which were skipped, and the rationale for each decision. Sync history is in [`docs/upstream-sync-*.md`](./docs/). The most recent file contains the last reviewed upstream commit and a table of all items evaluated.
 
 ## Changelog
+
+## v0.12.12 (2026-09-12)
++A second instrumented Synology playback, *The Secret Life of Pets 2*, reproduced the video freeze 13 times in roughly one hour on the deployed v0.12.11 build. No provider-cancellation, segment-fetch, degradation, OOM, restart, or worker-error path fired. Instead, every correlated 145-segment range logged `Ordering task timed out` exactly 32–34 seconds after creation: 2–4 seconds for workers to fetch the range followed by the hard-coded 30-second ordering deadline. The shared-stream byte counts tracked `NextIndexToWrite`, proving that the ordering task was successfully filling its bounded output channel and waiting for the media client to consume at playback speed—not waiting on an unfilled segment slot.
+
+*   **Fix**: Removed the unconditional 30-second deadline for the ordering stage to drain after fetch workers finish. A fast Usenet connection can fetch an entire ~100 MB RAR range long before a media client consumes it; once the 60-segment output channel filled, `orderingTask.WaitAsync(30s)` treated healthy downstream backpressure as failure, closed the channel, disposed the unwritten tail, and truncated the range. Post-worker completion now distinguishes an ordering writer blocked on its consumer from a genuinely absent slot. Normal backpressure may continue for as long as the live reader needs, while 30 seconds with neither index progress nor output-channel backpressure still triggers the intended missing-slot safeguard.
+*   **Reliability**: Added an accelerated deterministic regression that lets instantaneous workers fill the output channel, pauses the consumer beyond the configured no-progress deadline, then verifies that every segment is delivered byte-exactly rather than being cut off. Updated `PLAYBACK_STALL_FIXES.md` with the corrected interpretation of the old ambiguous timeout message and this incident's timing signature.
+
+## v0.12.11 (2026-09-12)
+A live Synology playback of *Planet Earth III* S01E02 returned 20 prematurely truncated buffered ranges, including four in the final seven minutes where the reported video freezes occurred. Every range ended with the then-ambiguous `Ordering task timed out` message while no terminal segment-fetch error was logged. This ruled out NAS resource pressure, Plex transcoding, and a permanently unavailable article, but v0.12.12 subsequently proved that this message did not by itself distinguish an unfilled segment slot from healthy output-channel backpressure.
+
+*   **Fix**: Provider-local cancellation is now retried by the normal per-segment retry loop when the caller token is still live. Previously an `OperationCanceledException` originating below the multi-provider layer could reach a worker while neither its stream token nor job token was cancelled; the worker misclassified it as straggler-monitor preemption, assumed the monitor had already published a replacement, and silently dropped the dequeued segment. The missing ordering slot eventually truncated the HTTP range, forcing the player to recover and sometimes exhausting its video buffer while separately buffered audio continued.
+*   **Reliability**: The worker now also distinguishes actual monitor preemption (`jobCts` cancelled) from any unrequested cancellation that escapes the retry layer, re-queueing the latter defensively. Added a deterministic regression in which the provider cancels its first attempt with a live caller token and the stream must retry it and return complete byte-exact output.
+*   **Docs**: Added `PLAYBACK_STALL_FIXES.md` as a durable ledger of prior playback-stall fixes, the streaming invariants they protect, production log signatures, regression-test coverage, and the investigation checklist for future incidents.
 
 ## v0.12.10 (2026-09-10)
 *   **Fix**: (#35) The Express frontend compressed proxied backend responses because `app.use(compression())` had no filter, so media streams and JSON from `/view`, the WebDAV file endpoints, `/api` and `/metrics` were gzip/br-encoded — dropping the upstream `Content-Length` and forcing `Transfer-Encoding: chunked`, which breaks HTTP range requests and seeking (Jellyfin `.strm` Direct Play would buffer the whole file). The frontend now skips compression for those proxied paths — the decision lives in `shouldCompress` / `shouldCompressRequestPath` in `frontend/server-compression.ts` (the request-path variant decodes defensively so a malformed `%`-sequence such as `GET /%` cannot throw out of the filter and crash the process). The backend additionally sends `Content-Encoding: identity` on `/view` (`GetWebdavItemController`) and the WebDAV GET/HEAD file path (`GetAndHeadHandlerPatch`); Express `compression` ignores that header, so it is a signal for any downstream/reverse proxy (nginx/traefik/CDN) and an explicit client hint — the frontend hop is protected by the path filter.
