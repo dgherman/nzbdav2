@@ -31,8 +31,14 @@ already adopted. Only `nzbdav-dev/nzbdav` is canonical upstream.
 5. Search first for these high-value signatures:
 
    ```bash
-   grep -E 'Ordering task timed out|PERMANENT FAILURE|GRACEFUL DEGRADATION|PROVIDER CANCELLATION|timed out|STRAGGLER|premature|EOF|OutOfMemory|OOM|RUNAWAY' /tmp/nzbdav2.log
+   grep -E 'Ordering stalled waiting for segment slot|Ordering task timed out|PERMANENT FAILURE|GRACEFUL DEGRADATION|PROVIDER CANCELLATION|timed out|STRAGGLER|premature|EOF|OutOfMemory|OOM|RUNAWAY' /tmp/nzbdav2.log
    ```
+
+   In builds through v0.12.11, `Ordering task timed out` was ambiguous: it could mean an absent
+   segment slot, but it also fired when the ordering writer was healthy and merely blocked on a full
+   output channel. Correlate it with range creation time and shared-stream pumped bytes before
+   assigning a cause. v0.12.12 reports `Ordering stalled waiting for segment slot` only after the
+   writer is confirmed not to be waiting for its consumer.
 
 6. Rule out container restart/OOM, NAS resource saturation, and a Plex/Jellyfin transcoder failure,
    but do not infer that the backend is healthy merely because audio continued. Audio and video can
@@ -128,6 +134,7 @@ recovered with `git show -s --format=fuller <commit>`.
 | `a9b3e5d9` | Added coverage for requeueing after streaming-permit timeout | Dequeued-job ownership |
 | `55c7efe9` | Kept the last retry worker alive through monitor publication | Cancel-before-publish race |
 | v0.12.11 | Retries provider-local cancellation when caller/job tokens remain live | Cancellation ownership and null-slot prevention |
+| v0.12.12 | Distinguishes output-channel backpressure from a missing ordered slot after workers finish | Slow-consumer range truncation |
 
 ### Provider fallback and connection health
 
@@ -206,16 +213,19 @@ The final worker could resume synchronously inside monitor cancellation, see bot
 exit before the monitor published the replacement. `55c7efe9` added the publication handshake and a
 deterministic inline-cancellation regression.
 
-### v0.12.11 — *Planet Earth III* S01E02
+### v0.12.11 — *Planet Earth III* S01E02 cancellation hypothesis
 
 One Synology playback returned 20 prematurely truncated 100 MB ranges. Four occurred in the final
-seven minutes where video visibly froze while audio continued. Each range had an ordering timeout
-and unfilled slot, with no terminal segment error, container restart, OOM, NAS saturation, or
-transcoder failure.
+seven minutes where video visibly froze while audio continued. Each range had the old ambiguous
+`Ordering task timed out` message, with no terminal segment error, container restart, OOM, NAS
+saturation, or transcoder failure. At the time this was interpreted as an unfilled slot. The
+v0.12.12 capture below showed that the same message also represented a healthy ordering writer
+blocked by a full output channel, so the Planet Earth logs alone did not prove the slot was null.
 
-A provider-originated `OperationCanceledException` could reach a worker while both stream and job
-tokens remained live. The old worker catch treated every cancellation with a live stream as monitor
-preemption, assumed a replacement already existed, and dropped the dequeued segment. v0.12.11:
+A real defensive gap still existed: a provider-originated `OperationCanceledException` could reach a
+worker while both stream and job tokens remained live. The old worker catch treated every
+cancellation with a live stream as monitor preemption, assumed a replacement already existed, and
+dropped the dequeued segment. v0.12.11:
 
 - retries this condition in `FetchSegmentWithRetryAsync`;
 - excludes the last identified failed provider as a preference on the next attempt;
@@ -232,7 +242,31 @@ BufferedSegmentStream
 ```
 
 It cancels the first provider attempt while the caller token is live and requires complete,
-byte-exact output on retry.
+byte-exact output on retry. This remains valid hardening, but the next production playback emitted
+zero provider-cancellation events and established a different dominant cause.
+
+### v0.12.12 — *The Secret Life of Pets 2*
+
+The deployed v0.12.11 build reproduced 13 ordering timeouts during roughly one hour of playback.
+There were zero `PROVIDER CANCELLATION`, unrequested-cancellation requeue, segment-fetch error,
+graceful-degradation, permanent-failure, OOM, restart, or critical-worker events.
+
+Every correlated 145-segment buffered range timed out 32–34 seconds after its `PREFETCH WINDOW`
+creation log. Fetch workers needed only 2–4 seconds, after which the old unconditional
+`orderingTask.WaitAsync(30s)` expired. The shared-stream `Pumped` byte totals matched the reported
+`NextIndexToWrite`: the ordering task had successfully written until its 60-segment output channel
+filled and was waiting for playback-rate consumption. The timeout then completed the channel and
+disposed the unwritten tail, directly truncating the range.
+
+v0.12.12 publishes whether the ordering writer is blocked on its consumer. Once workers finish:
+
+- progress or a blocked output-channel write continually resets the no-progress deadline;
+- a live, slow consumer may take as long as needed to drain the bounded channel; and
+- only 30 seconds with no index progress and no consumer backpressure triggers the missing-slot
+  safeguard.
+
+The accelerated regression fills the output channel with an instantaneous provider, pauses the
+consumer beyond a shortened deadline, and then requires every segment byte in order.
 
 ## Regression-test map
 
@@ -268,9 +302,9 @@ new evidence:
 
 1. Normalize lower-level connection timeouts that still surface as `OperationCanceledException` to a
    dedicated timeout exception where the originating layer can distinguish them reliably.
-2. If workers finish while an effective-range slot remains null, fail the HTTP response explicitly
-   rather than completing the channel after the ordering timeout. This would make any future
-   ownership bug loud instead of returning a silent truncated range.
+2. If the new backpressure-aware guard confirms a genuinely absent effective-range slot, propagate an
+   explicit HTTP failure instead of ending the channel after the diagnostic. This would make any
+   future ownership bug louder to the client as well as in logs.
 3. Add a combined adversarial test where provider-local cancellation and monitor cancellation race
    each other. Existing tests cover each ownership path independently.
 4. Add request-level telemetry that records expected versus emitted range bytes and the first missing

@@ -133,6 +133,11 @@ public class BufferedSegmentStream : Stream, ITouchableStream
     // sitting through the real 60s wait.
     internal static TimeSpan PermitAcquireTimeout { get; set; } = TimeSpan.FromSeconds(60);
 
+    // How long the ordering stage may make no progress after every worker has finished, provided it
+    // is not blocked on the bounded output channel waiting for its consumer. Internal so the
+    // backpressure regression can exercise the old 30s failure in milliseconds.
+    internal static TimeSpan OrderingNoProgressTimeout { get; set; } = TimeSpan.FromSeconds(30);
+
     // How long a pre-warm request blocks waiting for a slot to free up before giving up (see
     // TryAcquireSlot). Internal rather than const so a test can drive the wait path without
     // sitting through the real 5s wait.
@@ -742,6 +747,10 @@ public class BufferedSegmentStream : Stream, ITouchableStream
             // Lock-free segment ordering: workers write to slots, ordering task reads in order
             var segmentSlots = new PooledSegmentData?[segmentIds.Length];
             var nextIndexToWrite = 0;
+            // Distinguishes a genuinely absent ordered slot from normal backpressure. Once workers
+            // finish, the ordering stage can still spend minutes here while a media client consumes
+            // a large range at playback speed; that is not an ordering stall.
+            var orderingWaitingForConsumer = 0;
 
             // How far ahead of the reader a segment may be dispatched. A completed segment parks a
             // ~1MB pooled buffer in segmentSlots until the ordering task drains it, and segmentSlots
@@ -967,7 +976,10 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                             // Try to write, but channel may be closed if stream disposed early
                             if (!_bufferChannel.Writer.TryWrite(segment))
                             {
-                                // Channel is full or closed - try async write with cancellation
+                                // A full channel means the ordering stage is correctly waiting for the
+                                // downstream reader. Publish that state so post-worker completion cannot
+                                // mistake ordinary playback-rate backpressure for a missing segment.
+                                Volatile.Write(ref orderingWaitingForConsumer, 1);
                                 try
                                 {
                                     await _bufferChannel.Writer.WriteAsync(segment, ct).ConfigureAwait(false);
@@ -978,6 +990,10 @@ public class BufferedSegmentStream : Stream, ITouchableStream
                                     segment.Dispose();
                                     Log.Debug("[BufferedStream] Ordering task exiting - channel closed");
                                     return;
+                                }
+                                finally
+                                {
+                                    Volatile.Write(ref orderingWaitingForConsumer, 0);
                                 }
                             }
 
@@ -1322,20 +1338,51 @@ public class BufferedSegmentStream : Stream, ITouchableStream
 
             await Task.WhenAll(workers).ConfigureAwait(false);
 
-            // Wait for ordering task to finish writing all segments to channel
-            // Give it a reasonable timeout in case something went wrong
+            // Workers can finish fetching a whole range long before the media client consumes it.
+            // The ordering task then waits on the bounded output channel by design. The former fixed
+            // 30s WaitAsync deadline treated that healthy backpressure as a stall, closed the channel,
+            // and truncated each ~100 MB RAR range after roughly 30 seconds of playback.
+            //
+            // Retain a guard for the failure it was intended to catch: once workers are gone, time out
+            // only if the ordering index makes no progress AND the writer is not waiting for its
+            // consumer. Progress or normal channel backpressure continually resets the deadline.
             try
             {
-                await orderingTask.WaitAsync(TimeSpan.FromSeconds(30), ct).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                Log.Warning("[BufferedStream] Ordering task timed out. NextIndexToWrite={NextIndex}, TotalSegments={Total}",
-                    nextIndexToWrite, effectiveSegmentCount);
+                var lastObservedIndex = Volatile.Read(ref nextIndexToWrite);
+                var noProgress = Stopwatch.StartNew();
+                var pollMilliseconds = Math.Clamp(OrderingNoProgressTimeout.TotalMilliseconds / 4, 1, 100);
+                var pollInterval = TimeSpan.FromMilliseconds(pollMilliseconds);
+
+                while (!orderingTask.IsCompleted)
+                {
+                    await Task.WhenAny(orderingTask, Task.Delay(pollInterval, ct)).ConfigureAwait(false);
+                    if (orderingTask.IsCompleted) break;
+                    ct.ThrowIfCancellationRequested();
+
+                    var observedIndex = Volatile.Read(ref nextIndexToWrite);
+                    if (observedIndex != lastObservedIndex || Volatile.Read(ref orderingWaitingForConsumer) != 0)
+                    {
+                        lastObservedIndex = observedIndex;
+                        noProgress.Restart();
+                        continue;
+                    }
+
+                    if (noProgress.Elapsed >= OrderingNoProgressTimeout)
+                    {
+                        Log.Warning("[BufferedStream] Ordering stalled waiting for segment slot. NextIndexToWrite={NextIndex}, TotalSegments={Total}, OutputBackpressured={OutputBackpressured}",
+                            observedIndex, effectiveSegmentCount, false);
+                        break;
+                    }
+                }
+
+                if (orderingTask.IsCompleted)
+                {
+                    await orderingTask.ConfigureAwait(false);
+                }
             }
             catch (OperationCanceledException)
             {
-                // Expected when stream is disposed early
+                // Expected when stream is disposed early or the idle watchdog tears down an abandoned reader.
             }
 
             _bufferChannel.Writer.TryComplete(); // Use TryComplete to avoid exception if already closed

@@ -255,6 +255,65 @@ public class StreamingPermitRequeueTests
     }
 
     [Fact]
+    public async Task CompletedWorkers_WithFullOutputChannel_WaitForConsumerWithoutTruncating()
+    {
+        // Production capture, 2026-09-12: Secret Life of Pets 2 created ~100 MB shared ranges
+        // containing 145 segments. Workers fetched each range in 2-4 seconds, then the ordering
+        // stage correctly blocked on its 60-segment output channel while the client consumed at
+        // playback speed. The old unconditional 30-second orderingTask.WaitAsync expired 32-34
+        // seconds after every affected range was created, closed the channel, and truncated it.
+        const int segmentCount = 20;
+        var segmentIds = new string[segmentCount];
+        var segmentSizes = new long[segmentCount];
+        for (var i = 0; i < segmentCount; i++)
+        {
+            segmentIds[i] = $"seg-{i}@test";
+            segmentSizes[i] = SegmentSize;
+        }
+
+        var previousTimeout = BufferedSegmentStream.OrderingNoProgressTimeout;
+        BufferedSegmentStream.OrderingNoProgressTimeout = TimeSpan.FromMilliseconds(80);
+
+        try
+        {
+            var client = new PerSegmentNntpClient();
+            var context = new ConnectionUsageContext(ConnectionUsageType.BufferedStreaming,
+                new ConnectionUsageDetails { Text = "ordering-backpressure-test" });
+
+            await using var stream = new BufferedSegmentStream(
+                segmentIds,
+                fileSize: SegmentSize * (long)segmentCount,
+                client,
+                concurrentConnections: 2,
+                bufferSegmentCount: 4,
+                cancellationToken: CancellationToken.None,
+                usageContext: context,
+                segmentSizes: segmentSizes);
+
+            // The fake provider finishes immediately. Do not read until well beyond the accelerated
+            // no-progress deadline, forcing the ordering writer to sit on a full output channel.
+            await Task.Delay(TimeSpan.FromMilliseconds(300));
+            Assert.Equal(segmentCount, client.Served); // all workers finished while the consumer stayed paused
+
+            var buffer = new byte[SegmentSize * segmentCount];
+            var read = await ReadFully(stream, buffer).WaitAsync(TimeSpan.FromSeconds(5));
+
+            Assert.Equal(buffer.Length, read);
+            for (var i = 0; i < segmentCount; i++)
+            {
+                for (var offset = 0; offset < SegmentSize; offset++)
+                {
+                    Assert.Equal(PayloadByte(i), buffer[i * SegmentSize + offset]);
+                }
+            }
+        }
+        finally
+        {
+            BufferedSegmentStream.OrderingNoProgressTimeout = previousTimeout;
+        }
+    }
+
+    [Fact]
     public async Task PermitTimeout_RequeuesTheSegment_InsteadOfStrandingTheStream()
     {
         // Regression for the 2026-07-16 spec, Finding 3. The worker had already popped the job from
