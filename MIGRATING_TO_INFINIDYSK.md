@@ -1,8 +1,10 @@
 # Migrating from nzbdav2 to infinidysk
 
 This is an **unofficial, community-maintained** migration path. It is not supported or
-endorsed by the infinidysk project. infinidysk's own documentation only officially supports
-migrating from `nzbdav-dev/nzbdav` v0.6.4 and two other named forks - **not** from nzbdav2.
+endorsed by the infinidysk project. infinidysk's own documentation names `nzbdav-dev/nzbdav`
+v0.6.4, `Pukabyte/nzbdav`, and `qooode/nzbdavex` as **community-validated** migration sources
+(per infinidysk's own docs wording - not an officially guaranteed migration path even for
+those) - nzbdav2 is **not** among them.
 nzbdav2 diverged from that shared ancestor a long time ago (33 nzbdav2-only migrations vs 37
 infinidysk-only migrations since the last shared migration,
 `20251113081523_Populate-Usenet-Providers-Config`), so a raw `dotnet ef database update`
@@ -68,8 +70,10 @@ then.
    ```
    Read the per-table report carefully. It shows exactly what will be copied, mapped, or
    skipped, with row counts, and flags:
-   - any `DavMultipartFiles`/`DavRarFiles` rows with an obfuscation key (or RAR-sourced rows
-     with no recorded key) that cannot be faithfully migrated,
+   - any `DavMultipartFiles`/`DavRarFiles` rows with an obfuscation key, or with no recorded key
+     at all (nzbdav2 gives no reliable way to prove a given row's content definitely isn't
+     obfuscated - see "What is NOT preserved" below), that will be excluded entirely - both the
+     file's metadata and its `DavItems` entry, so it simply won't appear in the target library,
    - any `ConfigItems` keys infinidysk doesn't recognize (notably nzbdav2's discrete
      `usenet.host`/`port`/`use-ssl`/`connections`/`user`/`pass` keys - infinidysk consolidates
      usenet provider configuration into a single `usenet.providers` key with a different shape,
@@ -125,11 +129,18 @@ The following nzbdav2 data has **no destination in infinidysk** and is archived 
 sidecar (not silently dropped, but not imported into infinidysk's working database either):
 
 - **Obfuscated/deobfuscated media playback state.** infinidysk's `DavMultipartFile.Meta` has no
-  field for RAR obfuscation keys. Any file where nzbdav2 recorded a non-null obfuscation key -
-  or where the file came from a RAR archive with no recorded key (nzbdav2 falls back to
-  content-sniffed default-key detection for those at playback time, which this tool cannot
-  reproduce from the database alone) - is **not imported**. You will need to re-download or
-  re-process that content under infinidysk.
+  field for RAR obfuscation keys. Any `DavMultipartFiles`/`DavRarFiles` row where nzbdav2
+  recorded a non-null obfuscation key is not imported, since there's nowhere in infinidysk's
+  schema to put that key. Rows with **no** recorded key are conservatively excluded too:
+  nzbdav2 provides no way to prove from the database alone that a given row's content isn't
+  obfuscated (`RarAggregator`, `MultipartMkvProcessor`, and `SevenZipProcessor` all produce
+  identically-shaped rows regardless of origin, and nzbdav2's `RarDeobfuscationStream` wraps
+  every multipart file read and falls back to content-sniffed default-key detection whenever no
+  key was recorded). **The affected file's entire entry - both its metadata and its place in the
+  file listing - is left out of the target library**, not just its playback data; it will not
+  appear at all until you manually re-download or re-process it under infinidysk. Every skipped
+  file's ID, recorded key (if any), and full source metadata are written to the JSON archive so
+  you can identify and recover them.
 - **Bandwidth/provider diagnostics history**: `BandwidthSamples`, `NzbProviderStats`,
   `ProviderBenchmarkResults`. infinidysk has no equivalent tables; this is historical telemetry
   only and does not affect functionality going forward.
@@ -148,6 +159,13 @@ sidecar (not silently dropped, but not imported into infinidysk's working databa
   sizes, since this tool cannot reproduce infinidysk's live second-segment probe that its own
   trust provenance depends on. infinidysk will safely re-derive these via header-probed seeking
   on first access - this only affects initial-seek performance, not correctness.
+- **`DavNzbFiles.SegmentFallbacks`** (alternate message IDs for segments with duplicate segment
+  numbers in the NZB, used as a retry path when a primary article is missing). Unlike the
+  byte-range optimization above, this is **not** re-derivable data - it's a literal list of
+  alternate article IDs recorded when the NZB was originally queued. infinidysk's `DavNzbFiles`
+  table has no SQL column for it (only `Id`/`SegmentIds`), so it cannot be written into the live
+  target database; it is archived to the JSON sidecar instead, aligned by segment index, so it
+  isn't silently lost. If you rely on this retry path, check the archive for affected files.
 - **Legacy `usenet.host`/`port`/`use-ssl`/`connections`/`user`/`pass` config keys.** infinidysk
   replaced these with a single `usenet.providers` key of a different shape. You must
   reconfigure your usenet provider(s) manually in infinidysk after migrating.
@@ -157,8 +175,8 @@ sidecar (not silently dropped, but not imported into infinidysk's working databa
 | nzbdav2 table | Status | Notes |
 |---|---|---|
 | `DavItems` | Mapped | Legacy `Type` enum split into `Type`+`SubType`; fixed root IDs merged by ID, not duplicated |
-| `DavNzbFiles` | Mapped | `SegmentIds` copied; segment byte-range/fallback data left for infinidysk's blob store to lazily re-derive |
-| `DavMultipartFiles` / `DavRarFiles` | Mapped, with skips | Obfuscation-key rows skipped and archived; `DavRarFiles` rows converted into `DavMultipartFiles` the same way nzbdav2 itself converts them |
+| `DavNzbFiles` | Mapped | `SegmentIds` copied; byte-range optimization left for infinidysk to lazily re-derive; `SegmentFallbacks` (not re-derivable) archived to the JSON sidecar - no SQL column exists for it |
+| `DavMultipartFiles` / `DavRarFiles` | Mapped, with skips | Rows with an obfuscation key, or with no recorded key at all (nzbdav2 gives us no reliable way to tell those apart from the database alone), are skipped along with their `DavItems` row and archived with full recoverable payload; `DavRarFiles` rows are otherwise converted into `DavMultipartFiles` the same way nzbdav2 itself converts them |
 | `LocalLinks` | **Incompatible** | Archived to JSON sidecar only |
 | `QueueItems` | Mapped | `SortOrder` backfilled with infinidysk's own `ROW_NUMBER() OVER (PARTITION BY Priority ORDER BY CreatedAt, Id) * 1024` formula |
 | `QueueNzbContents` | Compatible | Copied unchanged |

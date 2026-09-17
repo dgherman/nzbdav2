@@ -17,11 +17,12 @@ public class MigratorTests
         var mpId = Guid.NewGuid();
         var snapshot = EmptySnapshot() with
         {
+            DavItems = [new SourceDavItem(mpId, "abcde", 0, null, "movie.mkv", 1000, 6, "/content/movie.mkv", null, null, null, null, false, null, null)],
             DavMultipartFiles =
             [
                 new SourceDavMultipartFile(
                     mpId, AesParams: null, ObfuscationKey: [0xB0, 0x41, 0xC2, 0xCE],
-                    FileParts: [new SourceSegmentFilePart(["seg"], 0, 100, 0, 100, null)])
+                    FileParts: [new SourceSegmentFilePart(["seg-1", "seg-2"], 0, 100, 0, 100, null)])
             ]
         };
 
@@ -30,8 +31,20 @@ public class MigratorTests
         Assert.True(result.Success);
         Assert.Empty(result.DavMultipartFiles);
         Assert.Equal(1, result.Counts["DavMultipartFiles"].Skipped);
-        Assert.Single(result.Archive.SkippedObfuscatedRows);
-        Assert.Contains(mpId.ToString(), result.Archive.SkippedObfuscatedRows[0]);
+
+        // The file simply doesn't appear in the target library: its DavItems row is skipped
+        // too, not just its (unmigratable) DavMultipartFiles payload.
+        Assert.Empty(result.DavItems);
+        Assert.Equal(1, result.Counts["DavItems"].Skipped);
+
+        // The archive carries a full recoverable payload for manual reprocessing, not just a
+        // diagnostic message: the DavItem id, the key itself, and the source metadata JSON
+        // (which must still contain the actual segment ids a human would need).
+        var archived = Assert.Single(result.Archive.SkippedObfuscatedFiles);
+        Assert.Equal(mpId, archived.DavItemId);
+        Assert.Equal(Convert.ToBase64String([0xB0, 0x41, 0xC2, 0xCE]), archived.ObfuscationKeyBase64);
+        Assert.Contains("seg-1", archived.SourceMetadataJson);
+        Assert.Contains("seg-2", archived.SourceMetadataJson);
     }
 
     [Fact]
@@ -159,5 +172,62 @@ public class MigratorTests
         Assert.Equal("api.key", result.ConfigItems[0].ConfigName);
         Assert.Single(result.Archive.SkippedConfigItems);
         Assert.Contains(result.Warnings, w => w.Contains("usenet.host"));
+    }
+
+    [Fact]
+    public void Run_DavNzbFileWithSegmentFallbacks_ArchivesAlignedFallbackIds()
+    {
+        var nzbId = Guid.NewGuid();
+        var snapshot = EmptySnapshot() with
+        {
+            DavNzbFiles =
+            [
+                new SourceDavNzbFile(
+                    nzbId,
+                    SegmentIds: ["seg-1", "seg-2", "seg-3"],
+                    SegmentFallbacks: new Dictionary<int, string[]> { [1] = ["fallback-for-seg-2"] })
+            ]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        Assert.True(result.Success);
+        // SegmentIds itself still copies through into the live DavNzbFiles row...
+        Assert.Single(result.DavNzbFiles);
+        Assert.Contains("seg-1", result.DavNzbFiles[0].SegmentIdsJson);
+        // ...but the fallback ids (infinidysk has no SQL column for these on DavNzbFiles) are
+        // preserved in the archive, aligned by segment index, not silently dropped.
+        var archived = Assert.Single(result.Archive.DavNzbFileFallbackIds);
+        Assert.Equal(nzbId, archived.DavNzbFileId);
+        Assert.Equal(3, archived.SegmentFallbackIds.Length);
+        Assert.Empty(archived.SegmentFallbackIds[0]);
+        Assert.Equal(["fallback-for-seg-2"], archived.SegmentFallbackIds[1]);
+        Assert.Empty(archived.SegmentFallbackIds[2]);
+    }
+
+    [Fact]
+    public void Run_NativeDavMultipartFileRow_WithNullObfuscationKey_IsFlaggedNotSilentlyImported()
+    {
+        // Reproduces the review finding: a row that lives directly in nzbdav2's
+        // DavMultipartFiles table (never went through the legacy DavRarFiles table) with a null
+        // ObfuscationKey must still be conservatively flagged, since nzbdav2 provides no
+        // DB-observable signal proving this particular row's bytes are safe.
+        var mpId = Guid.NewGuid();
+        var snapshot = EmptySnapshot() with
+        {
+            DavMultipartFiles =
+            [
+                new SourceDavMultipartFile(
+                    mpId, AesParams: null, ObfuscationKey: null,
+                    FileParts: [new SourceSegmentFilePart(["seg"], 0, 100, 0, 100, null)])
+            ]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        Assert.True(result.Success);
+        Assert.Empty(result.DavMultipartFiles);
+        Assert.Equal(1, result.Counts["DavMultipartFiles"].Skipped);
+        Assert.Single(result.Archive.SkippedObfuscatedFiles);
     }
 }

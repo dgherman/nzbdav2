@@ -36,30 +36,49 @@ public static class Migrator
         if (errors.Count > 0)
             return MigrationResult.Failed(errors.ToArray());
 
-        // --- DavItems: Type/SubType mapping, fixed-root merge by ID. ---
-        var targetDavItems = source.DavItems.Select(MapDavItem).ToList();
-        counts["DavItems"] = new TableCounts(targetDavItems.Count, 0, 0);
+        // --- DavNzbFiles: SegmentIds carry over as plain JSON. SegmentFallbacks (alternate
+        //     message IDs for duplicate-numbered segments) have no SQL-column destination on
+        //     infinidysk's DavNzbFiles table (only Id/SegmentIds are EF-mapped there), so they
+        //     are archived rather than silently dropped - this is real retry data, not a
+        //     re-derivable optimization. ---
+        var targetDavNzbFiles = new List<TargetDavNzbFile>();
+        var archivedNzbFallbacks = new List<ArchivedNzbFileFallback>();
+        foreach (var f in source.DavNzbFiles)
+        {
+            targetDavNzbFiles.Add(new TargetDavNzbFile(f.Id, JsonSerializer.Serialize(f.SegmentIds, (JsonSerializerOptions?)null)));
 
-        // --- DavNzbFiles: SegmentIds carry over as plain JSON; SegmentFallbacks/SegmentSizes
-        //     have no SQL-column destination for this table (infinidysk keeps them only in its
-        //     external blob store, reached via NzbBlobId - left null so infinidysk lazily
-        //     migrates/re-probes on first access). ---
-        var targetDavNzbFiles = source.DavNzbFiles
-            .Select(f => new TargetDavNzbFile(f.Id, JsonSerializer.Serialize(f.SegmentIds, (JsonSerializerOptions?)null)))
-            .ToList();
-        counts["DavNzbFiles"] = new TableCounts(targetDavNzbFiles.Count, 0, 0);
+            var aligned = SegmentFallbackMapper.ToAlignedArray(f.SegmentFallbacks, f.SegmentIds.Length);
+            if (aligned != null)
+                archivedNzbFallbacks.Add(new ArchivedNzbFileFallback(f.Id, f.SegmentIds, aligned));
+        }
+        counts["DavNzbFiles"] = new TableCounts(targetDavNzbFiles.Count, 0, archivedNzbFallbacks.Count);
 
         // --- DavMultipartFiles (+ legacy DavRarFiles merged in): obfuscation-key rows flagged
-        //     and skipped rather than silently imported with broken playback. ---
+        //     and skipped rather than silently imported with broken playback. nzbdav2 provides
+        //     no DB-observable signal distinguishing a RAR-derived multipart row from any other
+        //     (RarAggregator, MultipartMkvProcessor, and SevenZipProcessor all produce
+        //     structurally identical FileParts shapes), and RarDeobfuscationStream wraps every
+        //     DavMultipartFile read unconditionally regardless of origin - so every row with a
+        //     null ObfuscationKey is conservatively treated the same way, not just rows reached
+        //     via the legacy DavRarFiles table. ---
         var targetDavMultipartFiles = new List<TargetDavMultipartFile>();
-        var skippedObfuscated = new List<string>();
+        var skippedMultipartIds = new HashSet<Guid>();
+        var archivedObfuscated = new List<ArchivedObfuscatedFile>();
         foreach (var mp in source.DavMultipartFiles)
-            MapMultipart(mp, wasRarSourced: false, targetDavMultipartFiles, skippedObfuscated);
+            MapMultipart(mp, wasRarSourced: true, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
         foreach (var rar in source.DavRarFiles)
-            MapMultipart(MultipartFileMapper.FromRarFile(rar), wasRarSourced: true, targetDavMultipartFiles, skippedObfuscated);
-        counts["DavMultipartFiles"] = new TableCounts(
-            targetDavMultipartFiles.Count, skippedObfuscated.Count, 0);
-        warnings.AddRange(skippedObfuscated);
+            MapMultipart(MultipartFileMapper.FromRarFile(rar), wasRarSourced: true, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
+        counts["DavMultipartFiles"] = new TableCounts(targetDavMultipartFiles.Count, skippedMultipartIds.Count, archivedObfuscated.Count);
+
+        // --- DavItems: Type/SubType mapping, fixed-root merge by ID. A DavItem whose backing
+        //     DavMultipartFiles payload was skipped above (obfuscation-key) is skipped too - an
+        //     entry with no backing file metadata would otherwise appear in the target library
+        //     with nothing playable behind it. See MIGRATING_TO_INFINIDYSK.md. ---
+        var targetDavItems = source.DavItems
+            .Where(i => !skippedMultipartIds.Contains(i.Id))
+            .Select(MapDavItem)
+            .ToList();
+        counts["DavItems"] = new TableCounts(targetDavItems.Count, skippedMultipartIds.Count, 0);
 
         // --- QueueItems: SortOrder backfilled per infinidysk's own formula. ---
         var sortOrders = QueueSortOrderCalculator.Backfill(
@@ -126,7 +145,7 @@ public static class Migrator
         var archive = new ArchivePayload(
             source.LocalLinks, source.AnalysisHistoryItems, source.BandwidthSamples, source.MissingArticleEvents,
             source.MissingArticleSummaries, source.NzbProviderStats, source.ProviderBenchmarkResults,
-            archivedHistoryFields, archivedHealthCheckOps, configResult.Skip, skippedObfuscated);
+            archivedHistoryFields, archivedHealthCheckOps, configResult.Skip, archivedObfuscated, archivedNzbFallbacks);
 
         return new MigrationResult(
             Success: true, Errors: errors, Warnings: warnings, Counts: counts,
@@ -147,12 +166,19 @@ public static class Migrator
 
     private static void MapMultipart(
         SourceDavMultipartFile mp, bool wasRarSourced,
-        List<TargetDavMultipartFile> targetRows, List<string> skippedReasons)
+        List<TargetDavMultipartFile> targetRows, HashSet<Guid> skippedIds,
+        List<ArchivedObfuscatedFile> archivedObfuscated, List<string> warnings)
     {
         var mapped = MultipartFileMapper.Map(mp, wasRarSourced);
         if (mapped.IsUnmigratable)
         {
-            skippedReasons.Add(mapped.SkipReason!);
+            skippedIds.Add(mp.Id);
+            warnings.Add(mapped.SkipReason!);
+            archivedObfuscated.Add(new ArchivedObfuscatedFile(
+                DavItemId: mp.Id,
+                Reason: mapped.SkipReason!,
+                ObfuscationKeyBase64: mp.ObfuscationKey == null ? null : Convert.ToBase64String(mp.ObfuscationKey),
+                SourceMetadataJson: JsonSerializer.Serialize(mp, (JsonSerializerOptions?)null)));
             return;
         }
 

@@ -39,10 +39,14 @@ public class EndToEndMigrationTests : IDisposable
         {
             InsertSourceDavItem(source, rootId, null, "/", "/", 1);
             InsertSourceDavItem(source, contentFolderId, rootId, "content", "/content", 1);
-            InsertSourceDavItem(source, movieItemId, contentFolderId, "movie.mkv", "/content/movie.mkv", 6);
+            InsertSourceDavItem(source, movieItemId, contentFolderId, "movie.mkv", "/content/movie.mkv", 3);
             InsertSourceDavItem(source, obfuscatedItemId, contentFolderId, "obfuscated.mkv", "/content/obfuscated.mkv", 6);
 
-            InsertSourceDavMultipartFile(source, movieItemId, obfuscationKeyHex: null);
+            // A plain DavNzbFile with fallback ids - the "ordinary, successfully migrates"
+            // example, and exercises the SegmentFallbacks archival at the same time.
+            InsertSourceDavNzbFile(source, movieItemId, ["seg-1", "seg-2"], "{\"1\":[\"fallback-for-seg-2\"]}");
+            // A DavMultipartFiles row with an explicit obfuscation key - infinidysk has no field
+            // for it, so this (and its DavItems row) must be skipped, not silently imported.
             InsertSourceDavMultipartFile(source, obfuscatedItemId, obfuscationKeyHex: "B041C2CE");
 
             InsertSourceQueueItem(source, queueIdA, "a.mkv", priority: 0, createdAtUnix: 1700000000);
@@ -64,11 +68,19 @@ public class EndToEndMigrationTests : IDisposable
             var sourceMigrationCheck = SchemaGuard.CheckSource(SqliteSourceReader.ReadMigrationHistory(sourceConn));
             Assert.True(sourceMigrationCheck.IsValid, sourceMigrationCheck.ErrorMessage);
 
+            var targetSchemaCheck = SchemaGuard.CheckTargetSchema(target);
+            Assert.True(targetSchemaCheck.IsValid, targetSchemaCheck.ErrorMessage);
+
             var snapshot = SqliteSourceReader.Read(sourceConn);
             var result = Migrator.Run(snapshot, new MigrationOptions(RequestedAdminUsername: "bob"));
 
             Assert.True(result.Success, string.Join("; ", result.Errors));
-            Assert.Single(result.Archive.SkippedObfuscatedRows);
+            Assert.Single(result.Archive.SkippedObfuscatedFiles);
+            Assert.Equal(obfuscatedItemId, result.Archive.SkippedObfuscatedFiles[0].DavItemId);
+
+            var archivedFallback = Assert.Single(result.Archive.DavNzbFileFallbackIds);
+            Assert.Equal(movieItemId, archivedFallback.DavNzbFileId);
+            Assert.Equal(["fallback-for-seg-2"], archivedFallback.SegmentFallbackIds[1]);
 
             SqliteTargetWriter.Apply(target, result);
         }
@@ -79,14 +91,24 @@ public class EndToEndMigrationTests : IDisposable
         AssertScalar(target, "SELECT COUNT(*) FROM Accounts", 2L);
 
         AssertScalar(target, $"SELECT Type FROM DavItems WHERE Id = '{movieItemId}'", 2L);
-        AssertScalar(target, $"SELECT SubType FROM DavItems WHERE Id = '{movieItemId}'", 203L);
+        AssertScalar(target, $"SELECT SubType FROM DavItems WHERE Id = '{movieItemId}'", 201L);
         AssertScalar(target, $"SELECT SubType FROM DavItems WHERE Id = '{contentFolderId}'", 104L);
 
-        AssertScalar(target, $"SELECT COUNT(*) FROM DavMultipartFiles WHERE Id = '{movieItemId}'", 1L);
+        AssertScalar(target, $"SELECT COUNT(*) FROM DavNzbFiles WHERE Id = '{movieItemId}'", 1L);
         AssertScalar(target, $"SELECT COUNT(*) FROM DavMultipartFiles WHERE Id = '{obfuscatedItemId}'", 0L);
+        // The obfuscated file's DavItems row is skipped too - it must not appear in the target
+        // library with no backing metadata behind it.
+        AssertScalar(target, $"SELECT COUNT(*) FROM DavItems WHERE Id = '{obfuscatedItemId}'", 0L);
 
         AssertScalar(target, $"SELECT SortOrder FROM QueueItems WHERE Id = '{queueIdA}'", 1024L);
         AssertScalar(target, $"SELECT SortOrder FROM QueueItems WHERE Id = '{queueIdB}'", 2048L);
+
+        // CreatedAt must be stored as a real date, not a raw Unix-seconds integer - infinidysk
+        // has no HasConversion for this column, so EF's Sqlite provider expects DateTime-shaped
+        // TEXT. Reading it back with GetDateTime (not GetInt64/GetValue) is the point of this
+        // assertion: it would throw or silently misparse if the column held a bare integer.
+        AssertDateTime(target, $"SELECT CreatedAt FROM QueueItems WHERE Id = '{queueIdA}'", DateTimeOffset.FromUnixTimeSeconds(1700000000).UtcDateTime);
+        AssertDateTime(target, $"SELECT CreatedAt FROM DavItems WHERE Id = '{movieItemId}'", new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
 
         AssertScalar(target, "SELECT COUNT(*) FROM ConfigItems WHERE ConfigName = 'api.key'", 1L);
         AssertScalar(target, "SELECT COUNT(*) FROM ConfigItems WHERE ConfigName = 'usenet.host'", 0L);
@@ -121,6 +143,16 @@ public class EndToEndMigrationTests : IDisposable
         cmd.CommandText = sql;
         var actual = cmd.ExecuteScalar();
         Assert.Equal(expected, actual);
+    }
+
+    private static void AssertDateTime(SqliteConnection conn, string sql, DateTime expectedUtc)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql;
+        using var reader = cmd.ExecuteReader();
+        Assert.True(reader.Read());
+        var actual = reader.GetDateTime(0);
+        Assert.Equal(expectedUtc, actual, TimeSpan.FromSeconds(1));
     }
 
     private SqliteConnection CreateSourceFixture()
@@ -174,30 +206,30 @@ public class EndToEndMigrationTests : IDisposable
             INSERT INTO __EFMigrationsHistory VALUES ('20260817160000_Add-QueueItem-SortOrder', '10.0.11');
 
             CREATE TABLE DavItems (
-                Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt INTEGER NOT NULL, ParentId TEXT,
+                Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,
                 Name TEXT NOT NULL, FileSize INTEGER, Type INTEGER NOT NULL, SubType INTEGER NOT NULL DEFAULT 0,
                 Path TEXT NOT NULL, ReleaseDate INTEGER, LastHealthCheck INTEGER, NextHealthCheck INTEGER,
                 HealthRepairPending INTEGER NOT NULL DEFAULT 0, FileBlobId TEXT, HistoryItemId TEXT, NzbBlobId TEXT,
                 ArrDownloadId TEXT, GeneratedStrmOutputRoot TEXT, GeneratedStrmPath TEXT, GeneratedStrmTarget TEXT,
                 GeneratedSymlinkOutputRoot TEXT, GeneratedSymlinkPath TEXT, GeneratedSymlinkTarget TEXT);
             INSERT INTO DavItems (Id, IdPrefix, CreatedAt, ParentId, Name, Type, SubType, Path)
-                VALUES ('00000000-0000-0000-0000-000000000000', '00000', 0, NULL, '/', 1, 102, '/');
+                VALUES ('00000000-0000-0000-0000-000000000000', '00000', '2026-01-01 00:00:00.000', NULL, '/', 1, 102, '/');
             INSERT INTO DavItems (Id, IdPrefix, CreatedAt, ParentId, Name, Type, SubType, Path)
-                VALUES ('00000000-0000-0000-0000-000000000002', '00000', 0, '00000000-0000-0000-0000-000000000000', 'content', 1, 104, '/content');
+                VALUES ('00000000-0000-0000-0000-000000000002', '00000', '2026-01-01 00:00:00.000', '00000000-0000-0000-0000-000000000000', 'content', 1, 104, '/content');
 
             CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
             CREATE TABLE DavMultipartFiles (Id TEXT PRIMARY KEY, Metadata TEXT NOT NULL);
             CREATE TABLE DavRarFiles (Id TEXT PRIMARY KEY, RarParts TEXT NOT NULL);
 
             CREATE TABLE QueueItems (
-                Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, SortOrder INTEGER NOT NULL DEFAULT 0,
+                Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, SortOrder INTEGER NOT NULL DEFAULT 0,
                 FileName TEXT NOT NULL, JobName TEXT NOT NULL, NzbFileSize INTEGER NOT NULL,
                 TotalSegmentBytes INTEGER NOT NULL, Category TEXT NOT NULL, Priority INTEGER NOT NULL,
-                PostProcessing INTEGER NOT NULL, PauseUntil INTEGER, ArrDownloadId TEXT, ContentGroupKey TEXT, IndexerName TEXT);
+                PostProcessing INTEGER NOT NULL, PauseUntil TEXT, ArrDownloadId TEXT, ContentGroupKey TEXT, IndexerName TEXT);
             CREATE TABLE QueueNzbContents (Id TEXT PRIMARY KEY, NzbContents TEXT NOT NULL);
 
             CREATE TABLE HistoryItems (
-                Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL,
+                Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL,
                 DownloadTimeSeconds INTEGER NOT NULL, FailMessage TEXT, FileName TEXT NOT NULL, JobName TEXT NOT NULL,
                 TotalSegmentBytes INTEGER NOT NULL, DownloadDirId TEXT, ArrDownloadId TEXT, ContentGroupKey TEXT,
                 IndexerName TEXT, LastPlayedAt INTEGER, NzbBlobId TEXT);
@@ -232,6 +264,16 @@ public class EndToEndMigrationTests : IDisposable
         cmd.Parameters.AddWithValue("$Name", name);
         cmd.Parameters.AddWithValue("$Type", type);
         cmd.Parameters.AddWithValue("$Path", path);
+        cmd.ExecuteNonQuery();
+    }
+
+    private static void InsertSourceDavNzbFile(SqliteConnection conn, Guid id, string[] segmentIds, string? segmentFallbacksJson)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO DavNzbFiles (Id, SegmentIds, SegmentFallbacks) VALUES ($Id, $SegmentIds, $SegmentFallbacks)";
+        cmd.Parameters.AddWithValue("$Id", id.ToString());
+        cmd.Parameters.AddWithValue("$SegmentIds", System.Text.Json.JsonSerializer.Serialize(segmentIds));
+        cmd.Parameters.AddWithValue("$SegmentFallbacks", (object?)segmentFallbacksJson ?? DBNull.Value);
         cmd.ExecuteNonQuery();
     }
 

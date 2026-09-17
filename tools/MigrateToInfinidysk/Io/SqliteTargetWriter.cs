@@ -29,7 +29,7 @@ public static class SqliteTargetWriter
                 ON CONFLICT(Id) DO UPDATE SET
                     Type = excluded.Type, SubType = excluded.SubType
                 """,
-                ("$Id", item.Id.ToString()), ("$IdPrefix", item.IdPrefix), ("$CreatedAt", item.CreatedAtUnixSeconds),
+                ("$Id", item.Id.ToString()), ("$IdPrefix", item.IdPrefix), ("$CreatedAt", ToSqliteDateTime(item.CreatedAtUnixSeconds)),
                 ("$ParentId", (object?)item.ParentId?.ToString() ?? DBNull.Value), ("$Name", item.Name),
                 ("$FileSize", (object?)item.FileSize ?? DBNull.Value), ("$Type", item.Type), ("$SubType", item.SubType),
                 ("$Path", item.Path), ("$ReleaseDate", (object?)item.ReleaseDateUnixSeconds ?? DBNull.Value),
@@ -61,10 +61,11 @@ public static class SqliteTargetWriter
                     ($Id, $CreatedAt, $SortOrder, $FileName, $JobName, $NzbFileSize, $TotalSegmentBytes,
                      $Category, $Priority, $PostProcessing, $PauseUntil)
                 """,
-                ("$Id", q.Id.ToString()), ("$CreatedAt", q.CreatedAtUnixSeconds), ("$SortOrder", q.SortOrder),
+                ("$Id", q.Id.ToString()), ("$CreatedAt", ToSqliteDateTime(q.CreatedAtUnixSeconds)), ("$SortOrder", q.SortOrder),
                 ("$FileName", q.FileName), ("$JobName", q.JobName), ("$NzbFileSize", q.NzbFileSize),
                 ("$TotalSegmentBytes", q.TotalSegmentBytes), ("$Category", q.Category), ("$Priority", q.Priority),
-                ("$PostProcessing", q.PostProcessing), ("$PauseUntil", (object?)q.PauseUntilUnixSeconds ?? DBNull.Value));
+                ("$PostProcessing", q.PostProcessing),
+                ("$PauseUntil", q.PauseUntilUnixSeconds.HasValue ? ToSqliteDateTime(q.PauseUntilUnixSeconds.Value) : DBNull.Value));
         }
 
         foreach (var q in result.QueueNzbContents)
@@ -83,7 +84,7 @@ public static class SqliteTargetWriter
                     ($Id, $CreatedAt, $Category, $DownloadStatus, $DownloadTimeSeconds, $FailMessage,
                      $FileName, $JobName, $TotalSegmentBytes, $DownloadDirId)
                 """,
-                ("$Id", h.Id.ToString()), ("$CreatedAt", h.CreatedAtUnixSeconds), ("$Category", h.Category),
+                ("$Id", h.Id.ToString()), ("$CreatedAt", ToSqliteDateTime(h.CreatedAtUnixSeconds)), ("$Category", h.Category),
                 ("$DownloadStatus", h.DownloadStatusValue), ("$DownloadTimeSeconds", h.DownloadTimeSeconds),
                 ("$FailMessage", (object?)h.FailMessage ?? DBNull.Value), ("$FileName", h.FileName),
                 ("$JobName", h.JobName), ("$TotalSegmentBytes", h.TotalSegmentBytes),
@@ -131,6 +132,18 @@ public static class SqliteTargetWriter
 
         tx.Commit();
     }
+
+    /// <summary>
+    /// DavItems.CreatedAt, QueueItems.CreatedAt/PauseUntil, and HistoryItems.CreatedAt have no
+    /// HasConversion in infinidysk's DbContext, so EF's Sqlite provider stores them as plain
+    /// DateTime-formatted TEXT (not Unix-seconds INTEGER, unlike ReleaseDate/LastHealthCheck/
+    /// NextHealthCheck and the HealthCheck* tables, which infinidysk DOES convert to Unix
+    /// seconds explicitly - those stay as raw longs below). Binding a real DateTime through
+    /// SqliteParameter (rather than hand-formatting a string) lets Microsoft.Data.Sqlite apply
+    /// its own native TEXT representation, matching what EF Core's reads/writes expect.
+    /// </summary>
+    private static DateTime ToSqliteDateTime(long unixSeconds) =>
+        DateTimeOffset.FromUnixTimeSeconds(unixSeconds).UtcDateTime;
 
     private static void Execute(SqliteConnection conn, SqliteTransaction tx, string sql, params (string Name, object Value)[] parameters)
     {

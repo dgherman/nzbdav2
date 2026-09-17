@@ -25,7 +25,8 @@ public static class JsonArchiveWriter
             archive.HistoryItemDroppedFields,
             archive.HealthCheckDroppedOperations,
             SkippedConfigItems = archive.SkippedConfigItems.Select(c => new { c.ConfigName, c.ConfigValue }),
-            archive.SkippedObfuscatedRows,
+            archive.SkippedObfuscatedFiles,
+            archive.DavNzbFileFallbackIds,
         };
 
         File.WriteAllText(path, JsonSerializer.Serialize(doc, Options));
