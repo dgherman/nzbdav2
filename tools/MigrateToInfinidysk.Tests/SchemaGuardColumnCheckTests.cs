@@ -143,6 +143,58 @@ public class SchemaGuardColumnCheckTests : IDisposable
         Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
     }
 
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexPredicateWithExtraAlwaysFalseCondition_IsRejectedBeforeAnyWrite()
+    {
+        // Round-5 repro: round 4's predicate check used a substring/regex search, which
+        // `Type = 1 AND 0` satisfies (it contains the right substring) while actually indexing
+        // zero rows - a unique index over an empty set enforces nothing.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 1 AND 0;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexPredicateWithExtraAlwaysTrueCondition_IsRejectedBeforeAnyWrite()
+    {
+        // A different extra-condition shape: `OR 1=1` makes the predicate match every row
+        // (equivalent to no WHERE clause at all), not just Admin rows - still contains the
+        // right substring, still must be rejected by an exact-match check.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 1 OR 1=1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Theory]
+    [InlineData("Type=1")]
+    [InlineData("  Type   =   1  ")]
+    [InlineData("\"Type\" = 1")]
+    [InlineData("[Type] = 1")]
+    [InlineData("type = 1")]
+    public void CheckTargetSchema_SingleAdminIndexEquivalentPredicateSpellings_AreAccepted(string predicate)
+    {
+        // The exact-match fix must still accept legitimate equivalent spellings SQLite itself
+        // (or a hand-written migration) might produce - only extra tokens/conditions must be
+        // rejected, not whitespace/quoting variance.
+        Execute(BaseSchemaSql() + $"""
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE {predicate};
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.True(result.IsValid, result.ErrorMessage);
+    }
+
     private static string BaseSchemaSql() => """
         CREATE TABLE DavItems (
             Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,

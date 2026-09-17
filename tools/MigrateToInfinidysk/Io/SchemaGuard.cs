@@ -163,17 +163,45 @@ public static class SchemaGuard
         return null;
     }
 
-    // Account.AccountType.Admin = 1 (backend/Database/Models/Account.cs, both projects). Accepts
-    // any quoting/whitespace SQLite might echo back in sqlite_master.sql for `"Type" = 1`,
-    // `[Type]=1`, `Type = 1`, etc.
+    // Account.AccountType.Admin = 1 (backend/Database/Models/Account.cs, both projects).
+    //
+    // Round 4 used Regex.IsMatch (a substring search) against the WHERE clause text, which a
+    // crafted predicate like `Type = 1 AND 0` satisfies while indexing zero rows - the extra
+    // `AND 0` is never checked for, so anything containing the right substring passes regardless
+    // of what else is in the expression. Fixed properly rather than patching that one instance:
+    // the extracted predicate must now EXACT-MATCH the single canonical expression after
+    // normalizing only identifier quoting (`"Type"`/`[Type]`/`` `Type` `` -> `Type`, which
+    // SQLite may round-trip differently than what infinidysk's migration literally wrote) and
+    // whitespace (collapsed, and spacing forced around `=` so `Type=1` and `Type = 1` compare
+    // equal) - no other leniency. Any extra token, condition, operator, or reordering makes the
+    // normalized string differ from the canonical one and is rejected, closing the whole class
+    // of "predicate contains the right substring plus something else" bypasses, not just the
+    // one reported.
+    private const string CanonicalAdminOnlyPredicate = "Type = 1";
+
     private static bool HasAdminOnlyPredicate(string createIndexSql)
     {
-        if (!createIndexSql.Contains("where", StringComparison.OrdinalIgnoreCase))
+        var whereIndex = createIndexSql.IndexOf("where", StringComparison.OrdinalIgnoreCase);
+        if (whereIndex < 0)
             return false; // not a partial index at all
 
-        var whereClause = createIndexSql[
-            (createIndexSql.IndexOf("where", StringComparison.OrdinalIgnoreCase) + "where".Length)..];
-        return Regex.IsMatch(whereClause, """["'\[\]]*Type["'\]]*\s*=\s*1\b""", RegexOptions.IgnoreCase);
+        var rawPredicate = createIndexSql[(whereIndex + "where".Length)..];
+        var normalized = NormalizePredicate(rawPredicate);
+        return string.Equals(normalized, CanonicalAdminOnlyPredicate, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string NormalizePredicate(string predicate)
+    {
+        // Strip identifier-quoting characters only. There are no string literals in this
+        // predicate (the only literal is the bare numeral 1), so this can't accidentally eat
+        // part of a value the way it would if the predicate could contain quoted strings.
+        var noQuotes = predicate.Replace("\"", "").Replace("'", "").Replace("[", "")
+            .Replace("]", "").Replace("`", "");
+
+        // Force consistent spacing around '=' so `Type=1` and `Type = 1` normalize identically,
+        // then collapse all remaining whitespace runs (including newlines) to a single space.
+        var spacedEquals = Regex.Replace(noQuotes, @"\s*=\s*", " = ");
+        return Regex.Replace(spacedEquals, @"\s+", " ").Trim();
     }
 
     private static bool TryGetIndexUniqueness(SqliteConnection conn, string indexName, out bool isUnique)
