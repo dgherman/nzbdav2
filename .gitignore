@@ -26,6 +26,7 @@ nuget
 !UPSTREAM_ANALYSIS.md
 !OPTIMIZATIONS.md
 !DATABASE_OPTIMIZATION.md
+!PLAYBACK_STALL_FIXES.md
 !CLAUDE.md
 !docs/upstream-sync-*.md
 !docs/superpowers/specs/*.md
