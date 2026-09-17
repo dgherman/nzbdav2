@@ -66,7 +66,7 @@ public static class SchemaGuard
         ["DavItems"] =
         [
             "Id", "IdPrefix", "CreatedAt", "ParentId", "Name", "FileSize", "Type", "SubType", "Path",
-            "ReleaseDate", "LastHealthCheck", "NextHealthCheck", "HealthRepairPending", "FileBlobId", "HistoryItemId",
+            "ReleaseDate", "LastHealthCheck", "NextHealthCheck", "HealthRepairPending", "FileBlobId", "NzbBlobId", "HistoryItemId",
         ],
         ["DavNzbFiles"] = ["Id", "SegmentIds"],
         ["DavMultipartFiles"] = ["Id", "Metadata"],
@@ -105,6 +105,14 @@ public static class SchemaGuard
                 problems.Add($"table '{table}' is missing column(s): {string.Join(", ", missingColumns)}");
         }
 
+        // The multi-admin conflict check (AdminSelector) relies on infinidysk's own
+        // IX_Accounts_SingleAdmin unique filtered index actually being present and enforced by
+        // the target DB - without it, a race or a bug in this tool could write two admin rows
+        // with nothing to stop it. Verify the index exists by name (matching infinidysk's
+        // Add-SingleAdmin-UniqueIndex migration) and is actually UNIQUE.
+        if (!HasSingleAdminUniqueIndex(conn))
+            problems.Add("Accounts table is missing the 'IX_Accounts_SingleAdmin' unique index");
+
         if (problems.Count > 0)
         {
             return Result.Invalid(
@@ -115,6 +123,26 @@ public static class SchemaGuard
         }
 
         return Result.Valid();
+    }
+
+    private static bool HasSingleAdminUniqueIndex(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA index_list(\"Accounts\")";
+        using var reader = cmd.ExecuteReader();
+        var nameOrdinal = -1;
+        var uniqueOrdinal = -1;
+        while (reader.Read())
+        {
+            if (nameOrdinal < 0) nameOrdinal = reader.GetOrdinal("name");
+            if (uniqueOrdinal < 0) uniqueOrdinal = reader.GetOrdinal("unique");
+
+            var name = reader.GetString(nameOrdinal);
+            var isUnique = reader.GetInt64(uniqueOrdinal) != 0;
+            if (isUnique && string.Equals(name, "IX_Accounts_SingleAdmin", StringComparison.Ordinal))
+                return true;
+        }
+        return false;
     }
 
     private static HashSet<string>? ReadColumnNames(SqliteConnection conn, string table)

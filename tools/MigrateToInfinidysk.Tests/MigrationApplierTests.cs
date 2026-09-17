@@ -34,6 +34,35 @@ public class MigrationApplierTests : IDisposable
     }
 
     [Fact]
+    public void Apply_ArchivePathIsExistingDirectory_RejectsBeforeAnyWrite()
+    {
+        // Exact round-3 review repro: --archive-path pointed at an existing directory. The temp
+        // file (a sibling path, not inside that directory) would otherwise write fine and let
+        // the DB transaction commit - only the final File.Move would fail, after commit.
+        using var conn = CreateFixture();
+        var result = OneAccountResult();
+
+        var archiveDir = Directory.CreateTempSubdirectory().FullName;
+        try
+        {
+            var archivePath = archiveDir; // the directory itself, not a file inside it
+
+            Assert.Throws<IOException>(() => MigrationApplier.Apply(conn, result, archivePath));
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM Accounts";
+            Assert.Equal(0L, cmd.ExecuteScalar());
+            // the directory itself must be untouched (not deleted, no stray temp files inside)
+            Assert.True(Directory.Exists(archiveDir));
+            Assert.Empty(Directory.GetFileSystemEntries(archiveDir));
+        }
+        finally
+        {
+            Directory.Delete(archiveDir, recursive: true);
+        }
+    }
+
+    [Fact]
     public void Apply_Success_WritesDbAndFinalArchiveAtomically()
     {
         using var conn = CreateFixture();

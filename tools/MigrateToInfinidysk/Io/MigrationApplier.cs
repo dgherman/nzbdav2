@@ -15,6 +15,14 @@ public static class MigrationApplier
 {
     public static void Apply(SqliteConnection targetConn, MigrationResult result, string archivePath)
     {
+        // Step 0: validate the FINAL destination is actually renameable to, before touching
+        // anything. Reproduced bug: --archive-path pointed at an existing directory wrote fine
+        // to the temp path (a sibling file, not inside that directory) and the DB transaction
+        // committed successfully - only the final File.Move failed, after the point of no
+        // return. Catching this up front means a bad --archive-path can never leave a
+        // committed-DB/missing-archive partial state.
+        ValidateFinalDestination(archivePath);
+
         var tempArchivePath = archivePath + $".tmp-{Guid.NewGuid():N}";
 
         // Step 1: archive to a temp file. If this throws, nothing else has happened yet - the
@@ -36,6 +44,26 @@ public static class MigrationApplier
 
         // Step 3: only now, with the DB transaction already committed, finalize the archive.
         File.Move(tempArchivePath, archivePath, overwrite: true);
+    }
+
+    private static void ValidateFinalDestination(string archivePath)
+    {
+        var full = Path.GetFullPath(archivePath);
+
+        if (Directory.Exists(full))
+        {
+            throw new IOException(
+                $"--archive-path '{archivePath}' is an existing directory, not a file. Refusing to apply - " +
+                "nothing was written. Choose a file path for --archive-path.");
+        }
+
+        var parent = Path.GetDirectoryName(full);
+        if (!string.IsNullOrEmpty(parent) && !Directory.Exists(parent))
+        {
+            throw new DirectoryNotFoundException(
+                $"--archive-path's parent directory does not exist: {parent}. Refusing to apply - " +
+                "nothing was written.");
+        }
     }
 
     private static void TryDelete(string path)
