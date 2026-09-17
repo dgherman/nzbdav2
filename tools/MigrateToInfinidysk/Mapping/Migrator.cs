@@ -36,47 +36,98 @@ public static class Migrator
         if (errors.Count > 0)
             return MigrationResult.Failed(errors.ToArray());
 
-        // --- DavNzbFiles: SegmentIds carry over as plain JSON. SegmentFallbacks (alternate
-        //     message IDs for duplicate-numbered segments) have no SQL-column destination on
-        //     infinidysk's DavNzbFiles table (only Id/SegmentIds are EF-mapped there), so they
-        //     are archived rather than silently dropped - this is real retry data, not a
-        //     re-derivable optimization. ---
-        var targetDavNzbFiles = new List<TargetDavNzbFile>();
-        var archivedNzbFallbacks = new List<ArchivedNzbFileFallback>();
-        foreach (var f in source.DavNzbFiles)
-        {
-            targetDavNzbFiles.Add(new TargetDavNzbFile(f.Id, JsonSerializer.Serialize(f.SegmentIds, (JsonSerializerOptions?)null)));
-
-            var aligned = SegmentFallbackMapper.ToAlignedArray(f.SegmentFallbacks, f.SegmentIds.Length);
-            if (aligned != null)
-                archivedNzbFallbacks.Add(new ArchivedNzbFileFallback(f.Id, f.SegmentIds, aligned));
-        }
-        counts["DavNzbFiles"] = new TableCounts(targetDavNzbFiles.Count, 0, archivedNzbFallbacks.Count);
+        var davItemsById = source.DavItems.ToDictionary(i => i.Id);
 
         // --- DavMultipartFiles (+ legacy DavRarFiles merged in): obfuscation-key rows flagged
-        //     and skipped rather than silently imported with broken playback. nzbdav2 provides
-        //     no DB-observable signal distinguishing a RAR-derived multipart row from any other
-        //     (RarAggregator, MultipartMkvProcessor, and SevenZipProcessor all produce
-        //     structurally identical FileParts shapes), and RarDeobfuscationStream wraps every
-        //     DavMultipartFile read unconditionally regardless of origin - so every row with a
-        //     null ObfuscationKey is conservatively treated the same way, not just rows reached
-        //     via the legacy DavRarFiles table. ---
+        //     and skipped rather than silently imported with broken playback.
+        //
+        //     Native DavMultipartFiles rows (wasRarSourced: false) and legacy DavRarFiles rows
+        //     (wasRarSourced: true) are treated differently here, not identically as earlier
+        //     rounds did: a native row's null ObfuscationKey is a normal, common case (most
+        //     multipart files never went through RAR at all - MultipartMkvProcessor and
+        //     SevenZipProcessor both produce multipart rows too, and neither ever sets an
+        //     obfuscation key), so it maps through normally. A RAR-converted row is different:
+        //     nzbdav2 detects RAR obfuscation by content-sniffing at read time
+        //     (RarDeobfuscationStream), not from a stored flag, so a null key on a RAR-converted
+        //     row is NOT proof the bytes are unobfuscated - it only means no key was captured.
+        //     Those rows keep going through the conservative skip-and-archive path below
+        //     regardless of key-nullness. This is a permanent limitation, not a gap to close:
+        //     infinidysk has no XOR-deobfuscation support to hand such content to even if this
+        //     tool could prove it needed one. See MIGRATING_TO_INFINIDYSK.md.
         var targetDavMultipartFiles = new List<TargetDavMultipartFile>();
         var skippedMultipartIds = new HashSet<Guid>();
         var archivedObfuscated = new List<ArchivedObfuscatedFile>();
         foreach (var mp in source.DavMultipartFiles)
-            MapMultipart(mp, wasRarSourced: true, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
+            MapMultipart(mp, wasRarSourced: false, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
         foreach (var rar in source.DavRarFiles)
             MapMultipart(MultipartFileMapper.FromRarFile(rar), wasRarSourced: true, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
+
+        // --- DavNzbFiles: SegmentIds carry over as plain JSON... but SegmentFallbacks
+        //     (alternate message IDs for duplicate-numbered segments - a real retry path used
+        //     when the primary article is missing, not a re-derivable optimization) have no SQL
+        //     column on infinidysk's DavNzbFiles table (only Id/SegmentIds are EF-mapped there).
+        //     So instead of writing a DavNzbFiles row and archiving the fallback IDs where
+        //     nothing at playback time will ever read them, wrap the file as a single-part
+        //     DavMultipartFiles row instead - fallback IDs live on FileParts[].SegmentFallbackIds
+        //     there and are read at playback. This needs the source DavItems row's FileSize to
+        //     build the single FilePart's byte range; when that's missing or non-positive (no
+        //     matching DavItems row, or FileSize null/<=0), there's nothing safe to wrap around,
+        //     so this falls back to the previous archive-only behavior with a warning instead of
+        //     inventing a fake size. ---
+        var targetDavNzbFiles = new List<TargetDavNzbFile>();
+        var archivedNzbFallbacks = new List<ArchivedNzbFileFallback>();
+        var nzbWrappedAsMultipartIds = new HashSet<Guid>();
+        foreach (var f in source.DavNzbFiles)
+        {
+            davItemsById.TryGetValue(f.Id, out var davItem);
+            var fileSize = davItem?.FileSize;
+
+            if (fileSize is > 0)
+            {
+                var aligned = SegmentFallbackMapper.ToAlignedArray(f.SegmentFallbacks, f.SegmentIds.Length);
+                var filePart = new TargetFilePart(
+                    SegmentIds: f.SegmentIds,
+                    SegmentIdByteRange: new TargetLongRange(0, fileSize.Value),
+                    FilePartByteRange: new TargetLongRange(0, fileSize.Value),
+                    SegmentByteRanges: null,
+                    SegmentFallbackIds: aligned,
+                    IsSplitAfter: null,
+                    SegmentByteRangesTrusted: null);
+                var meta = new TargetMultipartMeta(
+                    AesParams: null, FileParts: [filePart], IsLazy: false, PathInArchive: null,
+                    ArchivePassword: null, PendingParts: [], ExpectedFileSize: null);
+
+                targetDavMultipartFiles.Add(new TargetDavMultipartFile(f.Id, JsonSerializer.Serialize(meta, (JsonSerializerOptions?)null)));
+                nzbWrappedAsMultipartIds.Add(f.Id);
+            }
+            else
+            {
+                targetDavNzbFiles.Add(new TargetDavNzbFile(f.Id, JsonSerializer.Serialize(f.SegmentIds, (JsonSerializerOptions?)null)));
+
+                var aligned = SegmentFallbackMapper.ToAlignedArray(f.SegmentFallbacks, f.SegmentIds.Length);
+                if (aligned != null)
+                {
+                    archivedNzbFallbacks.Add(new ArchivedNzbFileFallback(f.Id, f.SegmentIds, aligned));
+                    warnings.Add(
+                        $"DavNzbFiles.Id={f.Id}: has SegmentFallbacks but no valid source FileSize (DavItems " +
+                        "row missing, or FileSize null/non-positive) - can't wrap into a playable multipart " +
+                        "row with a real byte range, so the fallback IDs are archived only, not written to a " +
+                        "row infinidysk will actually read at playback.");
+                }
+            }
+        }
+        counts["DavNzbFiles"] = new TableCounts(targetDavNzbFiles.Count, 0, archivedNzbFallbacks.Count);
         counts["DavMultipartFiles"] = new TableCounts(targetDavMultipartFiles.Count, skippedMultipartIds.Count, archivedObfuscated.Count);
 
         // --- DavItems: Type/SubType mapping, fixed-root merge by ID. A DavItem whose backing
         //     DavMultipartFiles payload was skipped above (obfuscation-key) is skipped too - an
         //     entry with no backing file metadata would otherwise appear in the target library
-        //     with nothing playable behind it. See MIGRATING_TO_INFINIDYSK.md. ---
+        //     with nothing playable behind it. A DavItem wrapped into DavMultipartFiles above
+        //     (NZB-with-fallbacks case) needs SubType 203, not the NzbFile default of 201,
+        //     matching where its data actually ended up. See MIGRATING_TO_INFINIDYSK.md. ---
         var targetDavItems = source.DavItems
             .Where(i => !skippedMultipartIds.Contains(i.Id))
-            .Select(MapDavItem)
+            .Select(i => MapDavItem(i, nzbWrappedAsMultipartIds.Contains(i.Id)))
             .ToList();
         counts["DavItems"] = new TableCounts(targetDavItems.Count, skippedMultipartIds.Count, 0);
 
@@ -155,9 +206,11 @@ public static class Migrator
             HealthCheckStats: targetHealthCheckStats, Archive: archive);
     }
 
-    private static TargetDavItem MapDavItem(SourceDavItem item)
+    private static TargetDavItem MapDavItem(SourceDavItem item, bool wrappedAsMultipart)
     {
         var (type, subType) = DavItemTypeMapper.Map(item.Id, (DavItemTypeMapper.LegacyType)item.Type);
+        if (wrappedAsMultipart)
+            (type, subType) = (2, 203); // MultipartFile - matches where the data actually lives, see caller
         return new TargetDavItem(
             item.Id, item.IdPrefix, item.CreatedAtUnixSeconds, item.ParentId, item.Name, item.FileSize,
             type, subType, item.Path, item.ReleaseDateUnixSeconds, item.LastHealthCheckUnixSeconds,

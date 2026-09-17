@@ -8,7 +8,10 @@ public class DavItemTypeMapperTests
     [InlineData(DavItemTypeMapper.LegacyType.Directory, 1, 101)]
     [InlineData(DavItemTypeMapper.LegacyType.SymlinkRoot, 1, 105)]
     [InlineData(DavItemTypeMapper.LegacyType.NzbFile, 2, 201)]
-    [InlineData(DavItemTypeMapper.LegacyType.RarFile, 2, 202)]
+    // 203 (MultipartFile), not 202 (RAR reader): every legacy DavRarFile row is converted into
+    // a DavMultipartFiles target row (see MultipartFileMapper.FromRarFile) - infinidysk's
+    // DavRarFiles table is never written to by this tool.
+    [InlineData(DavItemTypeMapper.LegacyType.RarFile, 2, 203)]
     [InlineData(DavItemTypeMapper.LegacyType.IdsRoot, 1, 106)]
     [InlineData(DavItemTypeMapper.LegacyType.MultipartFile, 2, 203)]
     public void Map_OrdinaryRows_UsesEnumMapping(DavItemTypeMapper.LegacyType legacyType, int expectedType, int expectedSubType)

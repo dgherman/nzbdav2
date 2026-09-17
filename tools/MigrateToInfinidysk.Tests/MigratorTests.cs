@@ -206,15 +206,18 @@ public class MigratorTests
     }
 
     [Fact]
-    public void Run_NativeDavMultipartFileRow_WithNullObfuscationKey_IsFlaggedNotSilentlyImported()
+    public void Run_NativeDavMultipartFileRow_WithNullObfuscationKey_MigratesNormally()
     {
-        // Reproduces the review finding: a row that lives directly in nzbdav2's
-        // DavMultipartFiles table (never went through the legacy DavRarFiles table) with a null
-        // ObfuscationKey must still be conservatively flagged, since nzbdav2 provides no
-        // DB-observable signal proving this particular row's bytes are safe.
+        // A row that lives directly in nzbdav2's DavMultipartFiles table (never went through the
+        // legacy DavRarFiles table) with a null ObfuscationKey is the common case - most
+        // multipart files never went through RAR at all (MultipartMkvProcessor and
+        // SevenZipProcessor both produce multipart rows too, and neither sets an obfuscation
+        // key). Unlike a RAR-converted row, nzbdav2 has no content-sniffed-obfuscation risk for
+        // these, so it must migrate normally, not be conservatively skipped.
         var mpId = Guid.NewGuid();
         var snapshot = EmptySnapshot() with
         {
+            DavItems = [new SourceDavItem(mpId, "abcde", 0, null, "movie.mkv", 1000, 6, "/content/movie.mkv", null, null, null, null, false, null, null)],
             DavMultipartFiles =
             [
                 new SourceDavMultipartFile(
@@ -226,8 +229,127 @@ public class MigratorTests
         var result = Migrator.Run(snapshot, new MigrationOptions(null));
 
         Assert.True(result.Success);
+        Assert.Single(result.DavMultipartFiles);
+        Assert.Equal(0, result.Counts["DavMultipartFiles"].Skipped);
+        Assert.Empty(result.Archive.SkippedObfuscatedFiles);
+        Assert.Single(result.DavItems);
+    }
+
+    [Fact]
+    public void Run_RarConvertedRow_WithNullObfuscationKey_StillSkippedAndArchived()
+    {
+        // Unlike a native DavMultipartFiles row, a legacy DavRarFiles row's null ObfuscationKey
+        // is NOT proof the content is unobfuscated - nzbdav2 detects RAR obfuscation by
+        // content-sniffing at read time (RarDeobfuscationStream), not from a stored flag. This
+        // must keep going through the conservative skip-and-archive path regardless of
+        // key-nullness - a permanent limitation (infinidysk has no XOR-deobfuscation support),
+        // not something this round fixes.
+        var rarId = Guid.NewGuid();
+        var snapshot = EmptySnapshot() with
+        {
+            DavItems = [new SourceDavItem(rarId, "abcde", 0, null, "movie.mkv", 1000, 4 /* legacy RarFile */, "/content/movie.mkv", null, null, null, null, false, null, null)],
+            DavRarFiles =
+            [
+                new SourceDavRarFile(rarId,
+                    [new SourceDavRarPart(["seg-1"], PartSize: 100, Offset: 0, ByteCount: 100, ObfuscationKey: null)])
+            ]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        Assert.True(result.Success);
         Assert.Empty(result.DavMultipartFiles);
         Assert.Equal(1, result.Counts["DavMultipartFiles"].Skipped);
         Assert.Single(result.Archive.SkippedObfuscatedFiles);
+        Assert.Empty(result.DavItems);
+    }
+
+    [Fact]
+    public void Run_DavNzbFileWithFallbacksAndValidFileSize_WrapsAsPlayableMultipartRow()
+    {
+        // Fixes the "fallback IDs unreachable at playback" gap: instead of writing a DavNzbFiles
+        // row and archiving the fallback IDs where nothing at playback time ever reads them, the
+        // file is wrapped as a single-part DavMultipartFiles row - infinidysk's
+        // FilePart.SegmentFallbackIds is read at playback, unlike anything on DavNzbFiles.
+        var nzbId = Guid.NewGuid();
+        var snapshot = EmptySnapshot() with
+        {
+            DavItems = [new SourceDavItem(nzbId, "abcde", 0, null, "movie.mkv", 5000, 3 /* NzbFile */, "/content/movie.mkv", null, null, null, null, false, null, null)],
+            DavNzbFiles =
+            [
+                new SourceDavNzbFile(
+                    nzbId,
+                    SegmentIds: ["seg-1", "seg-2", "seg-3"],
+                    SegmentFallbacks: new Dictionary<int, string[]> { [1] = ["fallback-for-seg-2"] })
+            ]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        Assert.True(result.Success);
+        // no DavNzbFiles row at all - and nothing archived-only either, since it's now playable
+        Assert.Empty(result.DavNzbFiles);
+        Assert.Empty(result.Archive.DavNzbFileFallbackIds);
+
+        var wrapped = Assert.Single(result.DavMultipartFiles);
+        Assert.Equal(nzbId, wrapped.Id);
+        Assert.Contains("seg-1", wrapped.MetadataJson);
+        Assert.Contains("fallback-for-seg-2", wrapped.MetadataJson);
+        // byte range must cover the full source FileSize
+        Assert.Contains("\"EndExclusive\":5000", wrapped.MetadataJson);
+
+        var davItem = Assert.Single(result.DavItems);
+        Assert.Equal(2, davItem.Type);
+        Assert.Equal(203, davItem.SubType);
+    }
+
+    [Fact]
+    public void Run_DavNzbFileWithFallbacksButNoValidFileSize_FallsBackToArchiveOnlyWithWarning()
+    {
+        // No matching DavItems row (or a null/non-positive FileSize on one) means there's no
+        // real byte range to wrap around - falls back to the previous archive-only behavior
+        // rather than inventing a fake size, and says so in a warning.
+        var nzbId = Guid.NewGuid();
+        var snapshot = EmptySnapshot() with
+        {
+            DavItems = [new SourceDavItem(nzbId, "abcde", 0, null, "movie.mkv", null /* no FileSize */, 3, "/content/movie.mkv", null, null, null, null, false, null, null)],
+            DavNzbFiles =
+            [
+                new SourceDavNzbFile(
+                    nzbId, SegmentIds: ["seg-1", "seg-2"],
+                    SegmentFallbacks: new Dictionary<int, string[]> { [0] = ["fallback-for-seg-1"] })
+            ]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        Assert.True(result.Success);
+        Assert.Single(result.DavNzbFiles);
+        Assert.Empty(result.DavMultipartFiles);
+        Assert.Single(result.Archive.DavNzbFileFallbackIds);
+        Assert.Contains(result.Warnings, w => w.Contains(nzbId.ToString()) && w.Contains("FileSize"));
+
+        var davItem = Assert.Single(result.DavItems);
+        Assert.Equal(201, davItem.SubType); // unwrapped NzbFile default, not 203
+    }
+
+    [Fact]
+    public void Run_DavNzbFileWithoutFallbacksButValidFileSize_StillWrapsAsMultipartRow()
+    {
+        // The wrap applies to every NZB file with a valid FileSize, not only ones with fallback
+        // data to preserve - a row with no fallbacks just gets a null SegmentFallbackIds.
+        var nzbId = Guid.NewGuid();
+        var snapshot = EmptySnapshot() with
+        {
+            DavItems = [new SourceDavItem(nzbId, "abcde", 0, null, "movie.mkv", 2000, 3, "/content/movie.mkv", null, null, null, null, false, null, null)],
+            DavNzbFiles = [new SourceDavNzbFile(nzbId, SegmentIds: ["seg-1"], SegmentFallbacks: null)]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        Assert.True(result.Success);
+        Assert.Empty(result.DavNzbFiles);
+        Assert.Single(result.DavMultipartFiles);
+        Assert.Equal(203, result.DavItems.Single().SubType);
     }
 }

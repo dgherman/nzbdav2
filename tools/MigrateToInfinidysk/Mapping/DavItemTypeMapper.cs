@@ -35,7 +35,11 @@ public static class DavItemTypeMapper
             LegacyType.Directory => new TargetType(1, 101),
             LegacyType.SymlinkRoot => new TargetType(1, 105),
             LegacyType.NzbFile => new TargetType(2, 201),
-            LegacyType.RarFile => new TargetType(2, 202),
+            // SubType 203 (MultipartFile), not 202 (RAR reader): this tool always converts
+            // legacy DavRarFile rows into DavMultipartFiles target rows (see
+            // MultipartFileMapper.FromRarFile) - it never writes infinidysk's DavRarFiles table
+            // at all. 202 would point a DavItems row at a table nothing was ever written to.
+            LegacyType.RarFile => new TargetType(2, 203),
             LegacyType.IdsRoot => new TargetType(1, 106),
             LegacyType.MultipartFile => new TargetType(2, 203),
             _ => throw new ArgumentOutOfRangeException(nameof(legacyType), legacyType, "Unknown legacy DavItem type"),
