@@ -192,10 +192,17 @@ public static class SchemaGuard
 
     private static string NormalizePredicate(string predicate)
     {
-        // Strip identifier-quoting characters only. There are no string literals in this
-        // predicate (the only literal is the bare numeral 1), so this can't accidentally eat
-        // part of a value the way it would if the predicate could contain quoted strings.
-        var noQuotes = predicate.Replace("\"", "").Replace("'", "").Replace("[", "")
+        // Strip SQL identifier-quoting characters only: double quotes, backticks, and square
+        // brackets are all valid ways to quote an identifier in SQLite ("Type", `Type`, [Type]),
+        // so those are stripped before comparison. Single quotes are NOT identifier syntax -
+        // they're SQL string-literal syntax, and 'Type' is a string value, not a reference to
+        // the Type column. Round 5 stripped single quotes here too, which meant a predicate like
+        // WHERE 'Type' = 1 (always false - it compares the constant string "Type" against 1,
+        // never the column - so the index would be built over zero rows and enforce nothing)
+        // normalized down to "Type = 1" and was wrongly accepted. Leaving single quotes alone
+        // means such a predicate normalizes to "'Type' = 1", which correctly fails to match the
+        // canonical "Type = 1" and gets rejected.
+        var noQuotes = predicate.Replace("\"", "").Replace("[", "")
             .Replace("]", "").Replace("`", "");
 
         // Force consistent spacing around '=' so `Type=1` and `Type = 1` normalize identically,

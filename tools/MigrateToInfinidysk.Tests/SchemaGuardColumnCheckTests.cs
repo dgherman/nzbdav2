@@ -175,6 +175,24 @@ public class SchemaGuardColumnCheckTests : IDisposable
         Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
     }
 
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexPredicateComparesStringLiteralNotColumn_IsRejectedBeforeAnyWrite()
+    {
+        // Round-6 repro: round 5's normalization stripped single quotes the same as identifier
+        // quoting (", [], `), which turns the SQL string literal 'Type' into the bare identifier
+        // Type. WHERE 'Type' = 1 compares the constant string "Type" against 1 - always false,
+        // never touches the actual Type column - so the resulting index is built over zero rows
+        // and stops nothing. It must NOT normalize down to "Type = 1" and pass.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE 'Type' = 1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
     [Theory]
     [InlineData("Type=1")]
     [InlineData("  Type   =   1  ")]
