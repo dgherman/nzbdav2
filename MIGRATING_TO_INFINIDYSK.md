@@ -27,6 +27,14 @@ rows into an already-initialized infinidysk `db.sqlite`, following the compatibi
 below. It is **read-only against the nzbdav2 source** and only ever writes to the infinidysk
 target database (plus a JSON sidecar archive for data that has no infinidysk equivalent).
 
+It's published as a standalone Docker image, `ghcr.io/dgherman/nzbdav2-migrate-infinidysk` (same
+tagging scheme as the main nzbdav2 image - `latest`, `MAJOR.MINOR.PATCH`, `MAJOR.MINOR.x`,
+`MAJOR.x` on `main`, or the branch name otherwise), built by
+`.github/workflows/docker-publish.yml`. **No .NET SDK or local checkout is required** - it's a
+self-contained image you `docker run` the same way you already run nzbdav2 and infinidysk
+themselves. Building from source is covered in the appendix at the end of this doc, for anyone
+who'd rather do that.
+
 ## Before you start: back up
 
 **Tar the entire nzbdav2 `/config` volume before doing anything else.** This tool never
@@ -50,23 +58,33 @@ then.
    docker stop nzbdav2
    ```
 
-2. **Start infinidysk fresh against a new, empty config volume** so it runs its own startup
+2. **Start infinidysk fresh against a new, empty config directory** so it runs its own startup
    migrations and creates a fully-migrated `db.sqlite`. Do **not** point it at the nzbdav2
-   volume yet.
+   volume yet. Use a plain bind-mounted host directory for this, the same way you'll pass it to
+   the migration tool below (a Docker *named* volume like `infinidysk-config` works fine for
+   running infinidysk day-to-day, but its data lives under Docker's internal storage path, not
+   a path you can hand to `--source`/`--target` directly - a bind mount to an ordinary host
+   directory sidesteps having to look that path up):
    ```bash
-   docker run --rm -v infinidysk-config:/config ghcr.io/<infinidysk-image> # let it finish startup, then stop it
-   docker stop <that container>
+   mkdir -p /path/to/infinidysk-config
+   docker run --rm -v /path/to/infinidysk-config:/config ghcr.io/infinidysk/infinidysk:latest
+   # let it finish its startup migration (watch the logs for the migration-complete message,
+   # or check that /path/to/infinidysk-config/db.sqlite exists and has grown past a few KB),
+   # then Ctrl-C or `docker stop` the container.
    ```
 
-3. **Stop infinidysk** once its startup migration has finished (check its logs for the
-   migration-complete message, or that `db.sqlite` exists and has grown past a few KB).
+3. **Stop infinidysk** once its startup migration has finished.
 
 4. **Run the migration tool in `--dry-run` first** (this is the default - it refuses to write
-   anything until you pass `--apply`):
+   anything until you pass `--apply`). Bind-mount the nzbdav2 config directory read-only as
+   `/source` and the infinidysk config directory (read-write, since `--apply` will write into it
+   later) as `/target`, and point `--source`/`--target` at those in-container paths:
    ```bash
-   dotnet run --project tools/MigrateToInfinidysk -- \
-     --source /path/to/nzbdav2/config \
-     --target /path/to/infinidysk-config
+   docker run --rm \
+     -v /path/to/nzbdav2/config:/source:ro \
+     -v /path/to/infinidysk-config:/target \
+     ghcr.io/dgherman/nzbdav2-migrate-infinidysk:latest \
+     --source /source --target /target
    ```
    Read the per-table report carefully. It shows exactly what will be copied, mapped, or
    skipped, with row counts, and flags:
@@ -85,19 +103,22 @@ then.
      `Type = Admin` (infinidysk allows only one; re-run with `--admin-username <name>` to
      choose which one to keep).
 
-5. **Apply it** once the dry-run report looks right:
+5. **Apply it** once the dry-run report looks right - same command, `--apply` added:
    ```bash
-   dotnet run --project tools/MigrateToInfinidysk -- \
-     --source /path/to/nzbdav2/config \
-     --target /path/to/infinidysk-config \
-     --apply
+   docker run --rm \
+     -v /path/to/nzbdav2/config:/source:ro \
+     -v /path/to/infinidysk-config:/target \
+     ghcr.io/dgherman/nzbdav2-migrate-infinidysk:latest \
+     --source /source --target /target --apply
    ```
    This writes into the infinidysk database only, and writes a
-   `nzbdav2-migration-archive.json` sidecar (next to infinidysk's `db.sqlite` by default,
-   override with `--archive-path`) containing everything that has no infinidysk equivalent -
-   see "What is NOT preserved" below.
+   `nzbdav2-migration-archive.json` sidecar into `/path/to/infinidysk-config` on the host (next
+   to infinidysk's `db.sqlite` by default, override with `--archive-path <in-container-path>`)
+   containing everything that has no infinidysk equivalent - see "What is NOT preserved" below.
 
-6. **Start infinidysk against the now-populated config volume.**
+6. **Start infinidysk against the now-populated config directory**, the same
+   `/path/to/infinidysk-config` bind mount used above (via `docker run` directly, or your usual
+   `docker-compose.yml`/Container Manager setup pointed at that same host path).
 
 7. **Trigger `RecreateStrmFilesTask`** to regenerate `.strm` files. This is required: nzbdav2
    and infinidysk compute the `.strm` download-key authentication token differently
@@ -199,3 +220,35 @@ sidecar (not silently dropped, but not imported into infinidysk's working databa
 | `Accounts` | Mapped, with conflict check | infinidysk allows only one Admin account; multiple require `--admin-username` |
 | `HealthCheckStats` | Compatible | Copied unchanged |
 | `HealthCheckResults` | Mapped | `Operation` field archived; rest copied |
+
+## Appendix: building and running from source
+
+You shouldn't need this - the Docker image in the Procedure section above is self-contained and
+needs neither a .NET SDK nor a checkout of this repo. This is here for anyone who'd rather build
+and run the tool directly instead of pulling the published image (e.g. to test an unreleased
+change on this branch).
+
+Requires the [.NET 10 SDK](https://dotnet.microsoft.com/download) and a checkout of this repo.
+
+```bash
+dotnet run --project tools/MigrateToInfinidysk -- \
+  --source /path/to/nzbdav2/config \
+  --target /path/to/infinidysk-config
+  # add --apply once the dry-run report looks right
+```
+
+`--source`/`--target` take plain host paths here (no bind-mount indirection needed, since the
+tool isn't running inside a container), otherwise this is identical to the Docker-based
+procedure above - same flags, same dry-run-by-default behavior, same archive sidecar.
+
+You can also build the same image yourself instead of pulling it from GHCR:
+
+```bash
+docker build -f tools/MigrateToInfinidysk/Dockerfile -t nzbdav2-migrate-infinidysk:local \
+  tools/MigrateToInfinidysk
+docker run --rm \
+  -v /path/to/nzbdav2/config:/source:ro \
+  -v /path/to/infinidysk-config:/target \
+  nzbdav2-migrate-infinidysk:local \
+  --source /source --target /target
+```

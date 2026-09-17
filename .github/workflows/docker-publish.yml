@@ -91,3 +91,66 @@ jobs:
           build-args: |
             NZBDAV_VERSION=${{ steps.set_vars.outputs.NZBDAV_VERSION }}
             CACHE_BUST=${{ github.sha }}
+
+  build-and-push-migrate-tool:
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set tags
+        id: set_vars
+        run: |
+          # Same tagging scheme as the main image job above, applied to the migration tool's own
+          # image name (ghcr.io/<owner>/nzbdav2-migrate-infinidysk) so the two stay consistent.
+          VERSION=$(tr -d '[:space:]' < VERSION)
+          if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::VERSION file must contain MAJOR.MINOR.PATCH, got '$VERSION'"
+            exit 1
+          fi
+          MAJOR="${VERSION%%.*}"
+          MINOR="$(echo "$VERSION" | cut -d. -f2)"
+          PATCH="${VERSION##*.}"
+
+          SAFE_REF=$(echo "${{ github.ref_name }}" | tr '/' '-')
+
+          GHCR_REPO="ghcr.io/${{ github.repository }}-migrate-infinidysk"
+          if [[ "${{ github.ref_name }}" == "main" ]]; then
+            {
+              echo "TAGS<<EOF"
+              echo "${GHCR_REPO}:latest"
+              echo "${GHCR_REPO}:${MAJOR}.${MINOR}.${PATCH}"
+              echo "${GHCR_REPO}:${MAJOR}.${MINOR}.x"
+              echo "${GHCR_REPO}:${MAJOR}.x"
+              echo "EOF"
+            } >> $GITHUB_OUTPUT
+          else
+            echo "TAGS=${GHCR_REPO}:${SAFE_REF}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push migration tool image (amd64 + arm64)
+        uses: docker/build-push-action@v7
+        with:
+          context: tools/MigrateToInfinidysk
+          file: tools/MigrateToInfinidysk/Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.set_vars.outputs.TAGS }}

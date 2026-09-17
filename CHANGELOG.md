@@ -16,3 +16,9 @@
   (`tools/MigrateToInfinidysk.Tests`), including an end-to-end test against real fixture SQLite
   databases exercising the tool's real constraints (obfuscation-key detection, multi-admin
   conflict resolution, `QueueItem.SortOrder` backfill).
+- `tools/MigrateToInfinidysk/Dockerfile`: standalone self-contained image for the migration tool
+  above, published to `ghcr.io/dgherman/nzbdav2-migrate-infinidysk` by
+  `.github/workflows/docker-publish.yml` (same tagging scheme as the main nzbdav2 image). No
+  .NET SDK or repo checkout needed to run it - `docker run` it the same way you already run
+  nzbdav2/infinidysk, bind-mounting the source/target config directories. See
+  `MIGRATING_TO_INFINIDYSK.md`.
