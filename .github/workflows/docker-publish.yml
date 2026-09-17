@@ -146,6 +146,62 @@ jobs:
             echo "TAGS=${GHCR_REPO}:${SAFE_REF}" >> $GITHUB_OUTPUT
           fi
 
+      # Build each target platform separately (not pushed yet) and --load it into the local
+      # Docker daemon so it can actually be run and checked, not just built. Catches the class of
+      # bug where a BUILDPLATFORM-pinned build stage picks the wrong per-platform RID (e.g. via
+      # `uname -m`, which reports the native build host's arch regardless of which platform is
+      # being built) and silently bakes the wrong architecture's binary into one of the images -
+      # `docker buildx build --platform ...` alone doesn't catch that, since the build succeeds
+      # either way; only actually running the result under its target platform does.
+      - name: Build amd64 image for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: tools/MigrateToInfinidysk
+          file: tools/MigrateToInfinidysk/Dockerfile
+          load: true
+          platforms: linux/amd64
+          tags: nzbdav2-migrate-infinidysk:smoke-amd64
+
+      - name: Build arm64 image for smoke test
+        uses: docker/build-push-action@v7
+        with:
+          context: tools/MigrateToInfinidysk
+          file: tools/MigrateToInfinidysk/Dockerfile
+          load: true
+          platforms: linux/arm64
+          tags: nzbdav2-migrate-infinidysk:smoke-arm64
+
+      - name: Smoke test both architecture images
+        run: |
+          set -eux
+          for arch in amd64 arm64; do
+            image="nzbdav2-migrate-infinidysk:smoke-${arch}"
+
+            # ELF e_machine sanity check: 0x3e = EM_X86_64, 0xb7 = EM_AARCH64. Confirms the
+            # binary actually copied into this platform's image is for that platform, not just
+            # that the build step didn't error.
+            machine=$(docker run --rm --platform "linux/${arch}" --entrypoint sh "$image" \
+              -c "od -An -tx1 -j 18 -N 2 ./MigrateToInfinidysk | tr -d ' '")
+            case "$arch" in
+              amd64) expected="3e00" ;;
+              arm64) expected="b700" ;;
+            esac
+            if [[ "$machine" != "$expected" ]]; then
+              echo "::error::${image}: expected ELF machine ${expected} for ${arch}, got ${machine}"
+              exit 1
+            fi
+
+            # Actually run it under its target platform (QEMU-emulated for the non-native arch
+            # on this runner) and confirm it starts and produces the expected usage output,
+            # rather than a loader failure (exit 255) from a wrong-arch binary.
+            output=$(docker run --rm --platform "linux/${arch}" "$image" 2>&1) && exit_code=0 || exit_code=$?
+            if [[ "$exit_code" != "2" ]] || [[ "$output" != *"Usage: MigrateToInfinidysk"* ]]; then
+              echo "::error::${image}: expected exit code 2 with usage text, got exit ${exit_code}: ${output}"
+              exit 1
+            fi
+            echo "${image}: OK (arch=${machine}, exit=${exit_code})"
+          done
+
       - name: Build and push migration tool image (amd64 + arm64)
         uses: docker/build-push-action@v7
         with:
