@@ -1,3 +1,5 @@
+using Microsoft.Data.Sqlite;
+
 namespace NzbWebDAV.MigrateToInfinidysk.Io;
 
 /// <summary>
@@ -51,4 +53,82 @@ public static class SchemaGuard
 
         return Result.Valid();
     }
+
+    // Every column SqliteTargetWriter's INSERT statements actually touch, plus DavItems.FileBlobId
+    // (written by nothing here, but its presence is required proof the target really is on
+    // infinidysk's current schema - see UsenetFileToBlobstoreMigrationService, which is what
+    // lazily converts the legacy rows this tool writes). Checking __EFMigrationsHistory alone
+    // (CheckTarget above) is a cheap pre-check, not authoritative: a hand-built or tampered
+    // fixture/database can have matching migration rows without the columns actually existing.
+    // This is the check that decides whether --apply's INSERTs will actually succeed.
+    private static readonly IReadOnlyDictionary<string, string[]> RequiredTargetColumns = new Dictionary<string, string[]>
+    {
+        ["DavItems"] =
+        [
+            "Id", "IdPrefix", "CreatedAt", "ParentId", "Name", "FileSize", "Type", "SubType", "Path",
+            "ReleaseDate", "LastHealthCheck", "NextHealthCheck", "HealthRepairPending", "FileBlobId", "HistoryItemId",
+        ],
+        ["DavNzbFiles"] = ["Id", "SegmentIds"],
+        ["DavMultipartFiles"] = ["Id", "Metadata"],
+        ["QueueItems"] =
+        [
+            "Id", "CreatedAt", "SortOrder", "FileName", "JobName", "NzbFileSize", "TotalSegmentBytes",
+            "Category", "Priority", "PostProcessing", "PauseUntil",
+        ],
+        ["QueueNzbContents"] = ["Id", "NzbContents"],
+        ["HistoryItems"] =
+        [
+            "Id", "CreatedAt", "Category", "DownloadStatus", "DownloadTimeSeconds", "FailMessage",
+            "FileName", "JobName", "TotalSegmentBytes", "DownloadDirId",
+        ],
+        ["ConfigItems"] = ["ConfigName", "ConfigValue"],
+        ["Accounts"] = ["Type", "Username", "PasswordHash", "RandomSalt"],
+        ["HealthCheckResults"] = ["Id", "CreatedAt", "DavItemId", "Path", "Result", "RepairStatus", "Message"],
+        ["HealthCheckStats"] = ["DateStartInclusive", "DateEndExclusive", "Result", "RepairStatus", "Count"],
+    };
+
+    public static Result CheckTargetSchema(SqliteConnection conn)
+    {
+        var problems = new List<string>();
+
+        foreach (var (table, columns) in RequiredTargetColumns)
+        {
+            var actualColumns = ReadColumnNames(conn, table);
+            if (actualColumns == null)
+            {
+                problems.Add($"table '{table}' is missing entirely");
+                continue;
+            }
+
+            var missingColumns = columns.Where(c => !actualColumns.Contains(c)).ToList();
+            if (missingColumns.Count > 0)
+                problems.Add($"table '{table}' is missing column(s): {string.Join(", ", missingColumns)}");
+        }
+
+        if (problems.Count > 0)
+        {
+            return Result.Invalid(
+                "Target database does not have infinidysk's full current schema - refusing to write " +
+                "anything. Problems found:\n  - " + string.Join("\n  - ", problems) +
+                "\nStart infinidysk once against this config volume and let it finish its own startup " +
+                "migration before running this tool with --apply.");
+        }
+
+        return Result.Valid();
+    }
+
+    private static HashSet<string>? ReadColumnNames(SqliteConnection conn, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(" + QuoteIdentifier(table) + ")";
+        using var reader = cmd.ExecuteReader();
+        var columns = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+            columns.Add(reader.GetString(reader.GetOrdinal("name")));
+        return columns.Count == 0 ? null : columns;
+    }
+
+    // PRAGMA statements don't accept bound parameters; the table names here come only from our
+    // own fixed RequiredTargetColumns dictionary above, never from user input.
+    private static string QuoteIdentifier(string identifier) => "\"" + identifier.Replace("\"", "\"\"") + "\"";
 }

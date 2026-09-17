@@ -58,10 +58,30 @@ public static class Program
             return 1;
         }
 
+        // Canonicalize + validate before opening anything, so a bad --archive-path (e.g.
+        // accidentally pointed at the source or target db.sqlite) is rejected before any
+        // connection is even opened, let alone any write attempted.
+        var archivePathCheck = ArchivePathGuard.Check(archivePath, sourceDbPath, targetDbPath);
+        if (!archivePathCheck.IsValid)
+        {
+            Console.Error.WriteLine(archivePathCheck.ErrorMessage);
+            return 1;
+        }
+
         // Source is opened read-only: this tool must never modify the nzbdav2 database.
-        using var sourceConn = new SqliteConnection($"Data Source={sourceDbPath};Mode=ReadOnly");
+        // SqliteConnectionStringBuilder (rather than string interpolation) so a data source
+        // path containing ';' or '"' can't alter connection-string parsing.
+        using var sourceConn = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = sourceDbPath,
+            Mode = SqliteOpenMode.ReadOnly,
+        }.ToString());
         sourceConn.Open();
-        using var targetConn = new SqliteConnection($"Data Source={targetDbPath};Mode={(apply ? "ReadWrite" : "ReadOnly")}");
+        using var targetConn = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = targetDbPath,
+            Mode = apply ? SqliteOpenMode.ReadWrite : SqliteOpenMode.ReadOnly,
+        }.ToString());
         targetConn.Open();
 
         var sourceMigrations = SqliteSourceReader.ReadMigrationHistory(sourceConn);
@@ -73,10 +93,19 @@ public static class Program
         }
 
         var targetMigrations = ReadTargetMigrationHistory(targetConn);
-        var targetCheck = SchemaGuard.CheckTarget(targetMigrations);
-        if (!targetCheck.IsValid)
+        var targetMigrationCheck = SchemaGuard.CheckTarget(targetMigrations);
+        if (!targetMigrationCheck.IsValid)
         {
-            Console.Error.WriteLine(targetCheck.ErrorMessage);
+            Console.Error.WriteLine(targetMigrationCheck.ErrorMessage);
+            return 1;
+        }
+
+        // Authoritative check: actual column introspection, not just migration-history rows
+        // (which a hand-built or tampered database could satisfy without the real schema).
+        var targetSchemaCheck = SchemaGuard.CheckTargetSchema(targetConn);
+        if (!targetSchemaCheck.IsValid)
+        {
+            Console.Error.WriteLine(targetSchemaCheck.ErrorMessage);
             return 1;
         }
 
@@ -94,8 +123,10 @@ public static class Program
             return 0;
         }
 
-        SqliteTargetWriter.Apply(targetConn, result);
-        JsonArchiveWriter.Write(archivePath, result.Archive);
+        // Archive-then-DB-then-finalize as a unit: MigrationApplier leaves the target DB
+        // untouched if the archive can't be written, and leaves no partial archive behind if
+        // the DB write fails.
+        MigrationApplier.Apply(targetConn, result, archivePath);
         Console.WriteLine($"\nApplied. Archive written to: {archivePath}");
         return 0;
     }
