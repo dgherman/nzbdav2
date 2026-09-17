@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
@@ -165,19 +166,31 @@ public static class SchemaGuard
 
     // Account.AccountType.Admin = 1 (backend/Database/Models/Account.cs, both projects).
     //
-    // Round 4 used Regex.IsMatch (a substring search) against the WHERE clause text, which a
-    // crafted predicate like `Type = 1 AND 0` satisfies while indexing zero rows - the extra
-    // `AND 0` is never checked for, so anything containing the right substring passes regardless
-    // of what else is in the expression. Fixed properly rather than patching that one instance:
-    // the extracted predicate must now EXACT-MATCH the single canonical expression after
-    // normalizing only identifier quoting (`"Type"`/`[Type]`/`` `Type` `` -> `Type`, which
-    // SQLite may round-trip differently than what infinidysk's migration literally wrote) and
-    // whitespace (collapsed, and spacing forced around `=` so `Type=1` and `Type = 1` compare
-    // equal) - no other leniency. Any extra token, condition, operator, or reordering makes the
-    // normalized string differ from the canonical one and is rejected, closing the whole class
-    // of "predicate contains the right substring plus something else" bypasses, not just the
-    // one reported.
-    private const string CanonicalAdminOnlyPredicate = "Type = 1";
+    // Rounds 4-6 tried progressively stricter transform-then-compare approaches (substring
+    // search, then exact-match against a normalized form, then a normalization step that itself
+    // had a quoting bug). Each fix closed the specific bypass found, but the class of bug was
+    // "some transformation is applied before comparing, and that transformation itself might be
+    // exploitable" - e.g. SQLite's double-quoted-identifier fallback: `"[Type]"` doesn't name an
+    // actual column, so SQLite treats it as a string literal for backward compatibility, and a
+    // normalization step that strips quote/bracket characters wherever they appear (not just
+    // matched pairs) turns `"[Type]" = 1` into `Type = 1` and wrongly accepts an always-false
+    // predicate.
+    //
+    // Replaced entirely with a fixed, finite allowlist and plain string equality - no
+    // transformation step left to exploit. Only whitespace is collapsed to single spaces (SQLite
+    // itself may insert varying whitespace when echoing the CREATE INDEX text back through
+    // sqlite_master.sql); no characters are ever stripped, and the comparison is case-sensitive,
+    // matching exactly how infinidysk's own Add-SingleAdmin-UniqueIndex migration writes it
+    // (`"Type" = 1`) plus the other syntactically-equivalent ways SQLite accepts writing the same
+    // identifier. Anything not byte-for-byte one of these four (after whitespace collapse) is
+    // rejected, full stop.
+    private static readonly string[] AcceptedAdminOnlyPredicates =
+    [
+        "Type = 1",
+        "\"Type\" = 1",
+        "[Type] = 1",
+        "`Type` = 1",
+    ];
 
     private static bool HasAdminOnlyPredicate(string createIndexSql)
     {
@@ -186,29 +199,8 @@ public static class SchemaGuard
             return false; // not a partial index at all
 
         var rawPredicate = createIndexSql[(whereIndex + "where".Length)..];
-        var normalized = NormalizePredicate(rawPredicate);
-        return string.Equals(normalized, CanonicalAdminOnlyPredicate, StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string NormalizePredicate(string predicate)
-    {
-        // Strip SQL identifier-quoting characters only: double quotes, backticks, and square
-        // brackets are all valid ways to quote an identifier in SQLite ("Type", `Type`, [Type]),
-        // so those are stripped before comparison. Single quotes are NOT identifier syntax -
-        // they're SQL string-literal syntax, and 'Type' is a string value, not a reference to
-        // the Type column. Round 5 stripped single quotes here too, which meant a predicate like
-        // WHERE 'Type' = 1 (always false - it compares the constant string "Type" against 1,
-        // never the column - so the index would be built over zero rows and enforce nothing)
-        // normalized down to "Type = 1" and was wrongly accepted. Leaving single quotes alone
-        // means such a predicate normalizes to "'Type' = 1", which correctly fails to match the
-        // canonical "Type = 1" and gets rejected.
-        var noQuotes = predicate.Replace("\"", "").Replace("[", "")
-            .Replace("]", "").Replace("`", "");
-
-        // Force consistent spacing around '=' so `Type=1` and `Type = 1` normalize identically,
-        // then collapse all remaining whitespace runs (including newlines) to a single space.
-        var spacedEquals = Regex.Replace(noQuotes, @"\s*=\s*", " = ");
-        return Regex.Replace(spacedEquals, @"\s+", " ").Trim();
+        var collapsedWhitespace = Regex.Replace(rawPredicate, @"\s+", " ").Trim();
+        return AcceptedAdminOnlyPredicates.Contains(collapsedWhitespace, StringComparer.Ordinal);
     }
 
     private static bool TryGetIndexUniqueness(SqliteConnection conn, string indexName, out bool isUnique)

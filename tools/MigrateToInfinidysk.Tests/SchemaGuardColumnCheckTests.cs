@@ -178,11 +178,10 @@ public class SchemaGuardColumnCheckTests : IDisposable
     [Fact]
     public void CheckTargetSchema_SingleAdminIndexPredicateComparesStringLiteralNotColumn_IsRejectedBeforeAnyWrite()
     {
-        // Round-6 repro: round 5's normalization stripped single quotes the same as identifier
-        // quoting (", [], `), which turns the SQL string literal 'Type' into the bare identifier
-        // Type. WHERE 'Type' = 1 compares the constant string "Type" against 1 - always false,
-        // never touches the actual Type column - so the resulting index is built over zero rows
-        // and stops nothing. It must NOT normalize down to "Type = 1" and pass.
+        // WHERE 'Type' = 1 compares the constant string "Type" against 1 - always false, never
+        // touches the actual Type column - so the resulting index is built over zero rows and
+        // stops nothing. 'Type' = 1 is not one of the four allowlisted forms and must be
+        // rejected.
         Execute(BaseSchemaSql() + """
             CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE 'Type' = 1;
             """);
@@ -193,17 +192,35 @@ public class SchemaGuardColumnCheckTests : IDisposable
         Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
     }
 
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexDoubleQuotedBracketedIdentifier_IsRejectedBeforeAnyWrite()
+    {
+        // Round-7 repro: SQLite's double-quoted-identifier fallback. "[Type]" doesn't name an
+        // actual column (the real column is Type, not [Type]), so SQLite treats the double-quoted
+        // token as a string literal for backward compatibility - same always-false, zero-row
+        // defect as 'Type' = 1 above, just spelled differently. A transform-then-compare check
+        // that strips quote/bracket characters wherever they appear (not just matched pairs)
+        // turns this into "Type = 1" and wrongly accepts it; the fixed allowlist-based check has
+        // no stripping step to exploit; "\"[Type]\" = 1" is not byte-for-byte any of the four
+        // allowlisted forms and is rejected outright.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE "[Type]" = 1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
     [Theory]
-    [InlineData("Type=1")]
-    [InlineData("  Type   =   1  ")]
+    [InlineData("Type = 1")]
     [InlineData("\"Type\" = 1")]
     [InlineData("[Type] = 1")]
-    [InlineData("type = 1")]
-    public void CheckTargetSchema_SingleAdminIndexEquivalentPredicateSpellings_AreAccepted(string predicate)
+    [InlineData("`Type` = 1")]
+    [InlineData("  Type   =   1  ")] // whitespace collapse is the only transformation applied
+    public void CheckTargetSchema_SingleAdminIndexAllowlistedPredicateForms_AreAccepted(string predicate)
     {
-        // The exact-match fix must still accept legitimate equivalent spellings SQLite itself
-        // (or a hand-written migration) might produce - only extra tokens/conditions must be
-        // rejected, not whitespace/quoting variance.
         Execute(BaseSchemaSql() + $"""
             CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE {predicate};
             """);
@@ -211,6 +228,23 @@ public class SchemaGuardColumnCheckTests : IDisposable
         var result = SchemaGuard.CheckTargetSchema(_conn);
 
         Assert.True(result.IsValid, result.ErrorMessage);
+    }
+
+    [Theory]
+    [InlineData("Type=1")] // no whitespace around '=' - not byte-for-byte the allowlisted form
+    [InlineData("type = 1")] // wrong case - the check is case-sensitive
+    [InlineData("TYPE = 1")]
+    [InlineData("Type = 10")] // extra digit - not the same value
+    public void CheckTargetSchema_SingleAdminIndexNonAllowlistedPredicateForms_AreRejected(string predicate)
+    {
+        Execute(BaseSchemaSql() + $"""
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE {predicate};
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
     }
 
     private static string BaseSchemaSql() => """
