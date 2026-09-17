@@ -70,12 +70,12 @@ then.
    ```
    Read the per-table report carefully. It shows exactly what will be copied, mapped, or
    skipped, with row counts, and flags:
-   - any `DavMultipartFiles` row with a recorded obfuscation key, or any RAR-derived row at all
-     (nzbdav2 gives no reliable way to prove a RAR-derived row's content definitely isn't
-     obfuscated, even with no recorded key - see "What is NOT preserved" below), that will be
-     excluded entirely - both the file's metadata and its `DavItems` entry, so it simply won't
-     appear in the target library. A native (non-RAR) `DavMultipartFiles` row with no recorded
-     key is not affected by this - it migrates normally,
+   - any `DavMultipartFiles` row with a recorded obfuscation key, or with no recorded key at all
+     (nzbdav2 gives no reliable way to prove any given row's content definitely isn't obfuscated
+     - not even by table membership, since RAR-extracted content can land directly in
+     `DavMultipartFiles` with no distinguishing marker; see "What is NOT preserved" below), that
+     will be excluded entirely - both the file's metadata and its `DavItems` entry, so it simply
+     won't appear in the target library,
    - any `ConfigItems` keys infinidysk doesn't recognize (notably nzbdav2's discrete
      `usenet.host`/`port`/`use-ssl`/`connections`/`user`/`pass` keys - infinidysk consolidates
      usenet provider configuration into a single `usenet.providers` key with a different shape,
@@ -130,26 +130,25 @@ volume - keep the backup from step 0 until then regardless.
 The following nzbdav2 data has **no destination in infinidysk** and is archived to the JSON
 sidecar (not silently dropped, but not imported into infinidysk's working database either):
 
-- **Obfuscated media from RAR archives - a permanent limitation, not a gap this tool closes.**
-  infinidysk's `DavMultipartFile.Meta` has no field for RAR obfuscation keys, and has no
-  XOR-deobfuscation support at all, so there is nowhere for this content to go even if this tool
-  could prove a given file needed it. Every row that came from a RAR archive (via nzbdav2's
-  legacy `DavRarFiles` table, always converted into a `DavMultipartFiles` row the same way
-  nzbdav2 itself converts them) is skipped regardless of whether nzbdav2 recorded an obfuscation
-  key: a *non-null* key obviously has nowhere to go, but even a *null* key is not proof the
-  content is safe - nzbdav2 detects RAR obfuscation by content-sniffing at read time
-  (`RarDeobfuscationStream`, which falls back to content-sniffed default-key detection whenever
-  no key was recorded), not from a stored flag, so this tool cannot tell a genuinely-unobfuscated
-  RAR-derived file from one nzbdav2 would have needed to sniff at playback. **The affected file's
-  entire entry - both its metadata and its place in the file listing - is left out of the target
-  library**, not just its playback data; it will not appear at all until you manually re-download
-  or re-process it under infinidysk. Every skipped file's ID, recorded key (if any), and full
-  source metadata are written to the JSON archive so you can identify and recover them.
-
-  This does **not** apply to ordinary (non-RAR) multipart files. A row native to nzbdav2's
-  `DavMultipartFiles` table (produced by `MultipartMkvProcessor` or `SevenZipProcessor`, not RAR
-  extraction) with no recorded obfuscation key migrates normally - a null key there is the common
-  case, not a risk signal, since those code paths never obfuscate content or set a key.
+- **Any `DavMultipartFiles` row with no recorded obfuscation key - a permanent limitation, not a
+  gap this tool closes.** infinidysk's `DavMultipartFile.Meta` has no field for RAR obfuscation
+  keys, and has no XOR-deobfuscation support at all, so there is nowhere for RAR-obfuscated
+  content to go even if this tool could prove a given file needed it. A *non-null* key obviously
+  has nowhere to go and is always skipped. A *null* key is **not** proof the content is safe
+  either, and this applies to every `DavMultipartFiles` row, not just ones reached through the
+  legacy `DavRarFiles` table: nzbdav2's `RarAggregator` writes RAR-extracted content directly
+  into `DavMultipartFiles`, with the exact same `Meta` shape (`AesParams`/`ObfuscationKey`/
+  `FileParts`, nothing else) as a row produced by `MultipartMkvProcessor` or `SevenZipProcessor` -
+  there is no source-type/provenance column anywhere in nzbdav2's schema, so table membership
+  alone cannot prove a row is safe. nzbdav2 detects RAR obfuscation by content-sniffing at read
+  time (`RarDeobfuscationStream`, which falls back to content-sniffed default-key detection
+  whenever no key was recorded), not from a stored flag, so this tool cannot tell a
+  genuinely-unobfuscated file from one nzbdav2 would have needed to sniff at playback - every
+  null-key row is conservatively treated the same way. **The affected file's entire entry - both
+  its metadata and its place in the file listing - is left out of the target library**, not just
+  its playback data; it will not appear at all until you manually re-download or re-process it
+  under infinidysk. Every skipped file's ID, recorded key (if any), and full source metadata are
+  written to the JSON archive so you can identify and recover them.
 - **Bandwidth/provider diagnostics history**: `BandwidthSamples`, `NzbProviderStats`,
   `ProviderBenchmarkResults`. infinidysk has no equivalent tables; this is historical telemetry
   only and does not affect functionality going forward.
@@ -189,8 +188,8 @@ sidecar (not silently dropped, but not imported into infinidysk's working databa
 |---|---|---|
 | `DavItems` | Mapped | Legacy `Type` enum split into `Type`+`SubType`; fixed root IDs merged by ID, not duplicated |
 | `DavNzbFiles` | Mapped | Wrapped as a single-part `DavMultipartFiles` row (SubType 203) when the source `DavItems` row has a valid `FileSize`, so `SegmentFallbacks` land in a column infinidysk actually reads at playback; falls back to a plain `DavNzbFiles` row (SubType 201) with fallback IDs archived-only when there's no valid `FileSize` to wrap around |
-| `DavMultipartFiles` | Mapped, with skips | A native row (not RAR-derived) with no recorded obfuscation key migrates normally - a null key there is the common case, not a risk signal. A row with a *non-null* key is skipped along with its `DavItems` row and archived with full recoverable payload, since infinidysk has no field for the key |
-| `DavRarFiles` | Mapped, always skipped (permanent limitation) | Always converted into the same `DavMultipartFiles` shape nzbdav2 itself converts them to (SubType 203, matching `DavItemTypeMapper`), but always skipped and archived regardless of key-nullness - nzbdav2 detects RAR obfuscation by content-sniffing at read time, not from a stored flag, so a null key here is not proof of safety the way it is for a native `DavMultipartFiles` row. infinidysk has no XOR-deobfuscation support to hand such content to even if this tool could prove it needed one |
+| `DavMultipartFiles` | Mapped, always skipped when key is null-or-set (permanent limitation) | Skipped and archived with full recoverable payload for *any* recorded obfuscation key, and for *no* recorded key too - table membership alone can't prove a row is RAR-free (`RarAggregator` writes RAR-extracted content directly into this table with no distinguishing field), so a null key is never treated as proof of safety |
+| `DavRarFiles` | Mapped, always skipped (permanent limitation) | Always converted into the same `DavMultipartFiles` shape nzbdav2 itself converts them to (SubType 203, matching `DavItemTypeMapper`), but always skipped and archived regardless of key-nullness, for the same reason as `DavMultipartFiles` above. infinidysk has no XOR-deobfuscation support to hand such content to even if this tool could prove it needed one |
 | `LocalLinks` | **Incompatible** | Archived to JSON sidecar only |
 | `QueueItems` | Mapped | `SortOrder` backfilled with infinidysk's own `ROW_NUMBER() OVER (PARTITION BY Priority ORDER BY CreatedAt, Id) * 1024` formula |
 | `QueueNzbContents` | Compatible | Copied unchanged |

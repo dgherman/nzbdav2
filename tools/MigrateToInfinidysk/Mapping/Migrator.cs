@@ -41,24 +41,33 @@ public static class Migrator
         // --- DavMultipartFiles (+ legacy DavRarFiles merged in): obfuscation-key rows flagged
         //     and skipped rather than silently imported with broken playback.
         //
-        //     Native DavMultipartFiles rows (wasRarSourced: false) and legacy DavRarFiles rows
-        //     (wasRarSourced: true) are treated differently here, not identically as earlier
-        //     rounds did: a native row's null ObfuscationKey is a normal, common case (most
-        //     multipart files never went through RAR at all - MultipartMkvProcessor and
-        //     SevenZipProcessor both produce multipart rows too, and neither ever sets an
-        //     obfuscation key), so it maps through normally. A RAR-converted row is different:
-        //     nzbdav2 detects RAR obfuscation by content-sniffing at read time
-        //     (RarDeobfuscationStream), not from a stored flag, so a null key on a RAR-converted
-        //     row is NOT proof the bytes are unobfuscated - it only means no key was captured.
-        //     Those rows keep going through the conservative skip-and-archive path below
-        //     regardless of key-nullness. This is a permanent limitation, not a gap to close:
-        //     infinidysk has no XOR-deobfuscation support to hand such content to even if this
+        //     Round 8 tried to treat native DavMultipartFiles rows (table membership, not the
+        //     legacy DavRarFiles table) as provably non-RAR and let null-key rows there migrate
+        //     normally. That was wrong: RAR-derived content can land directly in
+        //     DavMultipartFiles too, without ever touching DavRarFiles at all - RarAggregator.cs
+        //     writes RAR-extracted files straight into DavMultipartFiles (see ProcessArchive,
+        //     which builds a DavMultipartFile.Meta the same way MultipartMkvProcessor and
+        //     SevenZipProcessor do, with no distinguishing field), and LegacyRarFileMigration.cs
+        //     converts old DavRarFiles rows into DavMultipartFiles and deletes the originals -
+        //     so by the time this tool reads a live nzbdav2 database, DavRarFiles is normally
+        //     already empty and RAR-derived content is indistinguishable from native content by
+        //     table membership alone. Confirmed by inspecting nzbdav2's actual source
+        //     (DavMultipartFile.Meta has only AesParams/ObfuscationKey/FileParts - no
+        //     source-type/provenance field, and its migration history never added one): there is
+        //     no DB-observable signal anywhere that proves a given DavMultipartFiles row is
+        //     non-RAR. So every row with a null ObfuscationKey - regardless of which loop below
+        //     produced it - is conservatively treated as ambiguous and routed through the same
+        //     skip-and-archive path, matching how DavRarFiles-derived rows are already handled.
+        //     This is a permanent limitation, not a gap to close: nzbdav2 detects RAR
+        //     obfuscation by content-sniffing at read time (RarDeobfuscationStream), not from a
+        //     stored flag, so a null key is never proof of safety, and infinidysk has no
+        //     XOR-deobfuscation support to hand genuinely-obfuscated content to even if this
         //     tool could prove it needed one. See MIGRATING_TO_INFINIDYSK.md.
         var targetDavMultipartFiles = new List<TargetDavMultipartFile>();
         var skippedMultipartIds = new HashSet<Guid>();
         var archivedObfuscated = new List<ArchivedObfuscatedFile>();
         foreach (var mp in source.DavMultipartFiles)
-            MapMultipart(mp, wasRarSourced: false, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
+            MapMultipart(mp, wasRarSourced: true, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
         foreach (var rar in source.DavRarFiles)
             MapMultipart(MultipartFileMapper.FromRarFile(rar), wasRarSourced: true, targetDavMultipartFiles, skippedMultipartIds, archivedObfuscated, warnings);
 

@@ -206,14 +206,18 @@ public class MigratorTests
     }
 
     [Fact]
-    public void Run_NativeDavMultipartFileRow_WithNullObfuscationKey_MigratesNormally()
+    public void Run_NativeDavMultipartFileRow_WithNullObfuscationKey_IsSkippedAndArchived()
     {
-        // A row that lives directly in nzbdav2's DavMultipartFiles table (never went through the
-        // legacy DavRarFiles table) with a null ObfuscationKey is the common case - most
-        // multipart files never went through RAR at all (MultipartMkvProcessor and
-        // SevenZipProcessor both produce multipart rows too, and neither sets an obfuscation
-        // key). Unlike a RAR-converted row, nzbdav2 has no content-sniffed-obfuscation risk for
-        // these, so it must migrate normally, not be conservatively skipped.
+        // Round-9 revert of round 8's "native rows are provably non-RAR" assumption. Verified
+        // against nzbdav2's actual source: RarAggregator.cs writes RAR-extracted content
+        // directly into DavMultipartFiles (never touching the legacy DavRarFiles table at all),
+        // and LegacyRarFileMigration.cs converts old DavRarFiles rows into DavMultipartFiles and
+        // deletes the originals - so by the time this tool reads a live database, RAR-derived
+        // and native rows are indistinguishable by table membership. DavMultipartFile.Meta
+        // itself has no source-type/provenance field (only AesParams/ObfuscationKey/FileParts),
+        // and its migration history never added one. With no real signal to rely on, a null key
+        // on ANY DavMultipartFiles row - not just ones reached via DavRarFiles - must be treated
+        // as ambiguous and conservatively skipped, same as an explicit key.
         var mpId = Guid.NewGuid();
         var snapshot = EmptySnapshot() with
         {
@@ -229,10 +233,10 @@ public class MigratorTests
         var result = Migrator.Run(snapshot, new MigrationOptions(null));
 
         Assert.True(result.Success);
-        Assert.Single(result.DavMultipartFiles);
-        Assert.Equal(0, result.Counts["DavMultipartFiles"].Skipped);
-        Assert.Empty(result.Archive.SkippedObfuscatedFiles);
-        Assert.Single(result.DavItems);
+        Assert.Empty(result.DavMultipartFiles);
+        Assert.Equal(1, result.Counts["DavMultipartFiles"].Skipped);
+        Assert.Single(result.Archive.SkippedObfuscatedFiles);
+        Assert.Empty(result.DavItems);
     }
 
     [Fact]
