@@ -99,6 +99,68 @@ public class SchemaGuardColumnCheckTests : IDisposable
     }
 
     [Fact]
+    public void CheckTargetSchema_SingleAdminIndexOnWrongColumn_IsRejectedBeforeAnyWrite()
+    {
+        // Round-4 repro: an index named/unique correctly, but indexing the wrong column, must
+        // still be rejected - name and uniqueness alone don't prove it protects the right thing.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Username) WHERE Type = 1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexMissingPartialPredicate_IsRejectedBeforeAnyWrite()
+    {
+        // Right name, right column, right uniqueness, but not a PARTIAL index (no WHERE clause)
+        // - this would make Username collide across WebDav accounts too, not just Admins.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type);
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexWrongPredicate_IsRejectedBeforeAnyWrite()
+    {
+        // Right name/column/uniqueness, but the predicate doesn't actually mean "Type = Admin
+        // (1)" - e.g. it was defined against the wrong enum value.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 2;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    private static string BaseSchemaSql() => """
+        CREATE TABLE DavItems (
+            Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,
+            Name TEXT NOT NULL, FileSize INTEGER, Type INTEGER NOT NULL, SubType INTEGER NOT NULL,
+            Path TEXT NOT NULL, ReleaseDate INTEGER, LastHealthCheck INTEGER, NextHealthCheck INTEGER,
+            HealthRepairPending INTEGER NOT NULL, FileBlobId TEXT, NzbBlobId TEXT, HistoryItemId TEXT);
+        CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
+        CREATE TABLE DavMultipartFiles (Id TEXT PRIMARY KEY, Metadata TEXT NOT NULL);
+        CREATE TABLE QueueItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, SortOrder INTEGER NOT NULL, FileName TEXT NOT NULL, JobName TEXT NOT NULL, NzbFileSize INTEGER NOT NULL, TotalSegmentBytes INTEGER NOT NULL, Category TEXT NOT NULL, Priority INTEGER NOT NULL, PostProcessing INTEGER NOT NULL, PauseUntil TEXT);
+        CREATE TABLE QueueNzbContents (Id TEXT PRIMARY KEY, NzbContents TEXT NOT NULL);
+        CREATE TABLE HistoryItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL, DownloadTimeSeconds INTEGER NOT NULL, FailMessage TEXT, FileName TEXT NOT NULL, JobName TEXT NOT NULL, TotalSegmentBytes INTEGER NOT NULL, DownloadDirId TEXT);
+        CREATE TABLE ConfigItems (ConfigName TEXT PRIMARY KEY, ConfigValue TEXT NOT NULL);
+        CREATE TABLE Accounts (Type INTEGER NOT NULL, Username TEXT NOT NULL, PasswordHash TEXT NOT NULL, RandomSalt TEXT NOT NULL, PRIMARY KEY (Type, Username));
+        CREATE TABLE HealthCheckResults (Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, DavItemId TEXT NOT NULL, Path TEXT NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Message TEXT);
+        CREATE TABLE HealthCheckStats (DateStartInclusive INTEGER NOT NULL, DateEndExclusive INTEGER NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Count INTEGER NOT NULL);
+        """;
+
+    [Fact]
     public void CheckTargetSchema_MissingWholeTable_IsRejectedWithTableNamed()
     {
         Execute("CREATE TABLE DavItems (Id TEXT PRIMARY KEY);");

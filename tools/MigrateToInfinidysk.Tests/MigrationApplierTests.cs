@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Microsoft.Data.Sqlite;
 using NzbWebDAV.MigrateToInfinidysk.Io;
 using NzbWebDAV.MigrateToInfinidysk.Model;
@@ -59,6 +60,86 @@ public class MigrationApplierTests : IDisposable
         finally
         {
             Directory.Delete(archiveDir, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void Apply_ArchivePublishFails_LeavesTargetCompletelyUnchanged()
+    {
+        // Round-4 repro: the final archive publish (rename onto --archive-path) can fail for
+        // reasons ValidateFinalDestination's cheap up-front checks don't catch (permissions,
+        // an immutable/read-only destination file, disk full mid-rename, etc). Simulates this
+        // with a macOS/BSD `chflags uchg` immutable file at the exact destination path - rename
+        // onto it fails regardless of directory write permission, which plain chmod would not
+        // reliably reproduce (POSIX rename only cares about directory permissions, not the
+        // target file's own mode bits). Publishing now happens BEFORE the DB transaction opens
+        // at all, so this must fail with zero DB rows written - there's nothing to roll back
+        // because nothing was ever started.
+        using var conn = CreateFixture();
+        var result = OneAccountResult();
+        var archivePath = Path.Combine(Path.GetTempPath(), $"archive-{Guid.NewGuid()}.json");
+        File.WriteAllText(archivePath, "{}");
+
+        if (!TryMakeImmutable(archivePath))
+        {
+            // Not macOS/BSD, or chflags unavailable/blocked in this sandbox - skip gracefully
+            // rather than fail on an environment that can't reproduce the exact condition.
+            File.Delete(archivePath);
+            return;
+        }
+
+        try
+        {
+            Assert.ThrowsAny<Exception>(() => MigrationApplier.Apply(conn, result, archivePath));
+
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT COUNT(*) FROM Accounts";
+            Assert.Equal(0L, cmd.ExecuteScalar());
+            // no leftover temp file - it's cleaned up when the publish move fails
+            Assert.Empty(Directory.GetFiles(Path.GetTempPath(), $"{Path.GetFileName(archivePath)}.tmp-*"));
+        }
+        finally
+        {
+            ClearImmutable(archivePath);
+            File.Delete(archivePath);
+        }
+    }
+
+    private static bool TryMakeImmutable(string path)
+    {
+        try
+        {
+            using var proc = Process.Start(new ProcessStartInfo("chflags", $"uchg \"{path}\"")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            });
+            if (proc == null) return false;
+            proc.WaitForExit(2000);
+            return proc.ExitCode == 0;
+        }
+        catch (Exception ex) when (ex is System.ComponentModel.Win32Exception or PlatformNotSupportedException)
+        {
+            return false;
+        }
+    }
+
+    private static void ClearImmutable(string path)
+    {
+        try
+        {
+            using var proc = Process.Start(new ProcessStartInfo("chflags", $"nouchg \"{path}\"")
+            {
+                UseShellExecute = false,
+                RedirectStandardError = true,
+                RedirectStandardOutput = true,
+            });
+            proc?.WaitForExit(2000);
+        }
+        catch
+        {
+            // best-effort cleanup only
         }
     }
 

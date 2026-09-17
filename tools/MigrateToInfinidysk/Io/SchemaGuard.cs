@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
 
 namespace NzbWebDAV.MigrateToInfinidysk.Io;
@@ -108,10 +109,14 @@ public static class SchemaGuard
         // The multi-admin conflict check (AdminSelector) relies on infinidysk's own
         // IX_Accounts_SingleAdmin unique filtered index actually being present and enforced by
         // the target DB - without it, a race or a bug in this tool could write two admin rows
-        // with nothing to stop it. Verify the index exists by name (matching infinidysk's
-        // Add-SingleAdmin-UniqueIndex migration) and is actually UNIQUE.
-        if (!HasSingleAdminUniqueIndex(conn))
-            problems.Add("Accounts table is missing the 'IX_Accounts_SingleAdmin' unique index");
+        // with nothing to stop it. Verify not just that an index by that name exists and is
+        // UNIQUE, but that it indexes the right column and carries the right partial-index
+        // predicate - a same-named unique index on the wrong column, or without the WHERE
+        // Type = 1 filter (so it'd also collide across WebDav accounts), gives no real
+        // protection even though the name/uniqueness check alone would pass it.
+        var indexProblem = ValidateSingleAdminUniqueIndex(conn);
+        if (indexProblem != null)
+            problems.Add(indexProblem);
 
         if (problems.Count > 0)
         {
@@ -125,7 +130,53 @@ public static class SchemaGuard
         return Result.Valid();
     }
 
-    private static bool HasSingleAdminUniqueIndex(SqliteConnection conn)
+    private const string SingleAdminIndexName = "IX_Accounts_SingleAdmin";
+
+    /// <summary>
+    /// Returns null when a valid IX_Accounts_SingleAdmin index is present (correct name,
+    /// UNIQUE, indexes exactly the Type column, and carries a partial-index predicate that
+    /// means "Type = 1 (Admin)"), or a problem description otherwise.
+    /// </summary>
+    private static string? ValidateSingleAdminUniqueIndex(SqliteConnection conn)
+    {
+        if (!TryGetIndexUniqueness(conn, SingleAdminIndexName, out var isUnique))
+            return $"Accounts table is missing the '{SingleAdminIndexName}' unique index";
+
+        if (!isUnique)
+            return $"Accounts.{SingleAdminIndexName} exists but is not a UNIQUE index";
+
+        var indexedColumns = GetIndexedColumns(conn, SingleAdminIndexName);
+        if (indexedColumns is not ["Type"])
+        {
+            return $"Accounts.{SingleAdminIndexName} exists but indexes column(s) " +
+                   $"[{string.Join(", ", indexedColumns)}] instead of Type";
+        }
+
+        var createSql = GetIndexCreateSql(conn, SingleAdminIndexName);
+        if (createSql == null || !HasAdminOnlyPredicate(createSql))
+        {
+            return $"Accounts.{SingleAdminIndexName} exists on the right column but its partial-index " +
+                   "predicate doesn't restrict it to Type = 1 (Admin) - as defined, it wouldn't stop " +
+                   "multiple admin accounts, or would incorrectly restrict other account types too";
+        }
+
+        return null;
+    }
+
+    // Account.AccountType.Admin = 1 (backend/Database/Models/Account.cs, both projects). Accepts
+    // any quoting/whitespace SQLite might echo back in sqlite_master.sql for `"Type" = 1`,
+    // `[Type]=1`, `Type = 1`, etc.
+    private static bool HasAdminOnlyPredicate(string createIndexSql)
+    {
+        if (!createIndexSql.Contains("where", StringComparison.OrdinalIgnoreCase))
+            return false; // not a partial index at all
+
+        var whereClause = createIndexSql[
+            (createIndexSql.IndexOf("where", StringComparison.OrdinalIgnoreCase) + "where".Length)..];
+        return Regex.IsMatch(whereClause, """["'\[\]]*Type["'\]]*\s*=\s*1\b""", RegexOptions.IgnoreCase);
+    }
+
+    private static bool TryGetIndexUniqueness(SqliteConnection conn, string indexName, out bool isUnique)
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "PRAGMA index_list(\"Accounts\")";
@@ -137,12 +188,37 @@ public static class SchemaGuard
             if (nameOrdinal < 0) nameOrdinal = reader.GetOrdinal("name");
             if (uniqueOrdinal < 0) uniqueOrdinal = reader.GetOrdinal("unique");
 
-            var name = reader.GetString(nameOrdinal);
-            var isUnique = reader.GetInt64(uniqueOrdinal) != 0;
-            if (isUnique && string.Equals(name, "IX_Accounts_SingleAdmin", StringComparison.Ordinal))
+            if (string.Equals(reader.GetString(nameOrdinal), indexName, StringComparison.Ordinal))
+            {
+                isUnique = reader.GetInt64(uniqueOrdinal) != 0;
                 return true;
+            }
         }
+        isUnique = false;
         return false;
+    }
+
+    private static IReadOnlyList<string> GetIndexedColumns(SqliteConnection conn, string indexName)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA index_info(" + QuoteIdentifier(indexName) + ")";
+        using var reader = cmd.ExecuteReader();
+        var columns = new List<string>();
+        var nameOrdinal = -1;
+        while (reader.Read())
+        {
+            if (nameOrdinal < 0) nameOrdinal = reader.GetOrdinal("name");
+            columns.Add(reader.GetString(nameOrdinal));
+        }
+        return columns;
+    }
+
+    private static string? GetIndexCreateSql(SqliteConnection conn, string indexName)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = $name";
+        cmd.Parameters.AddWithValue("$name", indexName);
+        return cmd.ExecuteScalar() as string;
     }
 
     private static HashSet<string>? ReadColumnNames(SqliteConnection conn, string table)
