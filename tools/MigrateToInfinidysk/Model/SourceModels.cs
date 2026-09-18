@@ -37,7 +37,16 @@ public record SourceDavMultipartFile(
     Guid Id,
     SourceAesParams? AesParams,
     byte[]? ObfuscationKey,
-    SourceSegmentFilePart[] FileParts);
+    SourceSegmentFilePart[] FileParts,
+    // Raw (decompressed) Metadata JSON text exactly as stored in the source DavMultipartFiles
+    // row, when known. Lets MapMultipart reuse it verbatim for a skipped row's archive entry
+    // instead of re-serializing FileParts/AesParams/ObfuscationKey back into JSON - avoids
+    // building a second, duplicate JSON representation of data already sitting in a string.
+    // Null for rows synthesized in-memory rather than read from a DavMultipartFiles row (namely
+    // MultipartFileMapper.FromRarFile, converting a legacy DavRarFiles row - there is no
+    // "already stored as this shape" text for those, since the source RarParts JSON has a
+    // different structure, so MapMultipart falls back to re-serializing for that case).
+    string? RawMetadataJson = null);
 
 public record SourceDavRarPart(
     string[] SegmentIds,

@@ -109,8 +109,15 @@ public static class Program
             return 1;
         }
 
-        var snapshot = SqliteSourceReader.Read(sourceConn);
-        var result = Migrator.Run(snapshot, new MigrationOptions(adminUsername));
+        // StreamingMigrator (not the fixture-oriented Migrator.Run - see its class doc comment)
+        // streams every large table row by row instead of materializing the whole source
+        // database, the whole mapped target, and the whole archive simultaneously - fixes an OOM
+        // reported on real-world databases (thousands of AnalysisHistoryItems/BandwidthSamples
+        // rows, hundreds of QueueNzbContents rows carrying full NZB XML text) that could crash
+        // --apply even under an 8GB container memory limit. It also drives the archive-then-
+        // commit ordering directly (same atomicity guarantee MigrationApplier provided), so
+        // --apply no longer goes through a separate MigrationApplier.Apply call.
+        var result = StreamingMigrator.Run(sourceConn, apply ? targetConn : null, apply ? archivePath : null, new MigrationOptions(adminUsername));
 
         DryRunReport.Print(result, apply);
 
@@ -123,10 +130,6 @@ public static class Program
             return 0;
         }
 
-        // Archive-then-DB-then-finalize as a unit: MigrationApplier leaves the target DB
-        // untouched if the archive can't be written, and leaves no partial archive behind if
-        // the DB write fails.
-        MigrationApplier.Apply(targetConn, result, archivePath);
         Console.WriteLine($"\nApplied. Archive written to: {archivePath}");
         return 0;
     }

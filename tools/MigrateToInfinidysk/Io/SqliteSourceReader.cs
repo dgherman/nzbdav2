@@ -142,9 +142,153 @@ public static class SqliteSourceReader
                 id,
                 meta.AesParams == null ? null : new SourceAesParams(meta.AesParams.DecodedSize, meta.AesParams.Iv ?? [], meta.AesParams.Key ?? []),
                 meta.ObfuscationKey,
-                fileParts));
+                fileParts,
+                RawMetadataJson: json));
         }
         return result;
+    }
+
+    /// <summary>
+    /// Streaming twin of <see cref="ReadDavMultipartFiles"/>: yields one row at a time instead
+    /// of building the full list, for callers (StreamingMigrator) that process and discard each
+    /// row immediately rather than needing random access to the whole table. Real-world source
+    /// databases can carry thousands of these rows with non-trivial per-row JSON, so holding the
+    /// full table in memory alongside everything else in the pipeline is what causes the OOM this
+    /// streaming path exists to avoid.
+    /// </summary>
+    public static IEnumerable<SourceDavMultipartFile> StreamDavMultipartFiles(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, Metadata FROM DavMultipartFiles";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var id = reader.GetGuid(0);
+            var json = SourceBlobCodec.Decode(reader.GetString(1));
+            var meta = JsonSerializer.Deserialize<SourceMultipartMetaDto>(json)
+                       ?? throw new InvalidOperationException($"DavMultipartFiles.Id={id}: could not parse Metadata JSON.");
+
+            var fileParts = (meta.FileParts ?? []).Select(fp => new SourceSegmentFilePart(
+                fp.SegmentIds ?? [],
+                fp.SegmentIdByteRange?.StartInclusive ?? 0,
+                fp.SegmentIdByteRange?.EndExclusive ?? 0,
+                fp.FilePartByteRange?.StartInclusive ?? 0,
+                fp.FilePartByteRange?.EndExclusive ?? 0,
+                fp.SegmentFallbacks)).ToArray();
+
+            yield return new SourceDavMultipartFile(
+                id,
+                meta.AesParams == null ? null : new SourceAesParams(meta.AesParams.DecodedSize, meta.AesParams.Iv ?? [], meta.AesParams.Key ?? []),
+                meta.ObfuscationKey,
+                fileParts,
+                RawMetadataJson: json);
+        }
+    }
+
+    /// <summary>Streaming twin of <see cref="ReadDavRarFiles"/> - see StreamDavMultipartFiles.</summary>
+    public static IEnumerable<SourceDavRarFile> StreamDavRarFiles(SqliteConnection conn)
+    {
+        if (!TableExists(conn, "DavRarFiles")) yield break;
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, RarParts FROM DavRarFiles";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var id = reader.GetGuid(0);
+            var json = SourceBlobCodec.Decode(reader.GetString(1));
+            var parts = JsonSerializer.Deserialize<SourceRarPartDto[]>(json) ?? [];
+            var rarParts = parts.Select(p => new SourceDavRarPart(
+                p.SegmentIds ?? [], p.PartSize, p.Offset, p.ByteCount, p.ObfuscationKey)).ToArray();
+            yield return new SourceDavRarFile(id, rarParts);
+        }
+    }
+
+    /// <summary>Streaming twin of <see cref="ReadDavNzbFiles"/> - see StreamDavMultipartFiles.</summary>
+    public static IEnumerable<SourceDavNzbFile> StreamDavNzbFiles(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, SegmentIds, SegmentFallbacks FROM DavNzbFiles";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var segmentIdsJson = SourceBlobCodec.Decode(reader.GetString(1));
+            var segmentIds = JsonSerializer.Deserialize<string[]>(segmentIdsJson) ?? [];
+            Dictionary<int, string[]>? fallbacks = null;
+            if (!reader.IsDBNull(2))
+            {
+                var fallbacksJson = SourceBlobCodec.Decode(reader.GetString(2));
+                fallbacks = JsonSerializer.Deserialize<Dictionary<int, string[]>>(fallbacksJson);
+            }
+            yield return new SourceDavNzbFile(reader.GetGuid(0), segmentIds, fallbacks);
+        }
+    }
+
+    /// <summary>Streaming twin of <see cref="ReadQueueNzbContents"/> - see StreamDavMultipartFiles.</summary>
+    public static IEnumerable<SourceQueueNzbContents> StreamQueueNzbContents(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT Id, NzbContents FROM QueueNzbContents";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            yield return new SourceQueueNzbContents(reader.GetGuid(0), SourceBlobCodec.Decode(reader.GetString(1)));
+    }
+
+    /// <summary>Streaming twin of <see cref="ReadHistoryItems"/> - see StreamDavMultipartFiles.</summary>
+    public static IEnumerable<SourceHistoryItem> StreamHistoryItems(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = """
+            SELECT Id, CreatedAt, CompletedAt, FileName, JobName, Category, DownloadStatus,
+                   TotalSegmentBytes, DownloadTimeSeconds, FailMessage, DownloadDirId, IsHidden,
+                   HiddenAt, NzbContents, FailureReason, IsImported, IsArchived, ArchivedAt
+            FROM HistoryItems
+            """;
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            yield return new SourceHistoryItem(
+                Id: reader.GetGuid(0),
+                CreatedAtUnixSeconds: ToUnixSeconds(reader, 1),
+                CompletedAtUnixSeconds: ToUnixSeconds(reader, 2),
+                FileName: reader.GetString(3),
+                JobName: reader.GetString(4),
+                Category: reader.GetString(5),
+                DownloadStatus: reader.GetInt32(6),
+                TotalSegmentBytes: reader.GetInt64(7),
+                DownloadTimeSeconds: reader.GetInt32(8),
+                FailMessage: reader.IsDBNull(9) ? null : reader.GetString(9),
+                DownloadDirId: reader.IsDBNull(10) ? null : reader.GetGuid(10),
+                IsHidden: !reader.IsDBNull(11) && reader.GetBoolean(11),
+                HiddenAtUnixSeconds: reader.IsDBNull(12) ? null : ToUnixSecondsValue(reader.GetDateTime(12)),
+                NzbContents: reader.IsDBNull(13) ? null : SourceBlobCodec.Decode(reader.GetString(13)),
+                FailureReason: reader.IsDBNull(14) ? null : reader.GetString(14),
+                IsImported: !reader.IsDBNull(15) && reader.GetBoolean(15),
+                IsArchived: !reader.IsDBNull(16) && reader.GetBoolean(16),
+                ArchivedAtUnixSeconds: reader.IsDBNull(17) ? null : ToUnixSecondsValue(reader.GetDateTime(17)));
+        }
+    }
+
+    /// <summary>
+    /// Streaming twin of <see cref="ReadGenericTable"/> - yields one row at a time instead of
+    /// building the full list. Used for the wholly-incompatible tables (AnalysisHistoryItems,
+    /// BandwidthSamples, etc.) that only ever get archived, never written to the target DB - real
+    /// databases can carry many thousands of these rows.
+    /// </summary>
+    public static IEnumerable<IncompatibleTableRow> StreamGenericTable(SqliteConnection conn, string tableName)
+    {
+        if (!TableExists(conn, tableName)) yield break;
+
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = $"SELECT * FROM \"{tableName}\"";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var columns = new Dictionary<string, object?>();
+            for (var i = 0; i < reader.FieldCount; i++)
+                columns[reader.GetName(i)] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            yield return new IncompatibleTableRow(columns);
+        }
     }
 
     private static IReadOnlyList<SourceDavRarFile> ReadDavRarFiles(SqliteConnection conn)

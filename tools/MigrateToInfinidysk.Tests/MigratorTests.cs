@@ -356,4 +356,54 @@ public class MigratorTests
         Assert.Single(result.DavMultipartFiles);
         Assert.Equal(203, result.DavItems.Single().SubType);
     }
+
+    [Fact]
+    public void Run_SkippedNativeMultipartRow_ReusesRawMetadataJsonInsteadOfReSerializing()
+    {
+        // Round-12 fix: MapMultipart must reuse the raw Metadata JSON text already read from the
+        // DavMultipartFiles row for a skipped row's archive entry, instead of re-serializing
+        // FileParts/AesParams/ObfuscationKey into a second, duplicate JSON representation of data
+        // already sitting in a string. Proven here by asserting the archived JSON is the exact
+        // same string instance as the raw text supplied on the source row, not merely
+        // content-equal (a re-serialization would produce an equal-looking but different string).
+        var mpId = Guid.NewGuid();
+        const string rawJson = """{"AesParams":null,"ObfuscationKey":null,"FileParts":[]}""";
+        var snapshot = EmptySnapshot() with
+        {
+            DavItems = [new SourceDavItem(mpId, "abcde", 0, null, "movie.mkv", 1000, 6, "/content/movie.mkv", null, null, null, null, false, null, null)],
+            DavMultipartFiles =
+            [
+                new SourceDavMultipartFile(mpId, AesParams: null, ObfuscationKey: null, FileParts: [], RawMetadataJson: rawJson)
+            ]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        var archived = Assert.Single(result.Archive.SkippedObfuscatedFiles);
+        Assert.Same(rawJson, archived.SourceMetadataJson);
+    }
+
+    [Fact]
+    public void Run_SkippedRarConvertedRow_FallsBackToReSerializing_SinceNoRawTextExists()
+    {
+        // RAR-converted rows (via MultipartFileMapper.FromRarFile) have no "already stored as
+        // this shape" JSON text - the source DavRarFiles.RarParts JSON has a different structure
+        // entirely - so re-serializing is the only way to produce a DavMultipartFiles-shaped
+        // archive entry for them. Confirms the archived JSON still contains the real segment IDs
+        // (the fallback path must still work, not merely avoid crashing) even without raw text.
+        var rarId = Guid.NewGuid();
+        var snapshot = EmptySnapshot() with
+        {
+            DavItems = [new SourceDavItem(rarId, "abcde", 0, null, "movie.mkv", 1000, 4, "/content/movie.mkv", null, null, null, null, false, null, null)],
+            DavRarFiles =
+            [
+                new SourceDavRarFile(rarId, [new SourceDavRarPart(["seg-raw-1"], PartSize: 100, Offset: 0, ByteCount: 100, ObfuscationKey: null)])
+            ]
+        };
+
+        var result = Migrator.Run(snapshot, new MigrationOptions(null));
+
+        var archived = Assert.Single(result.Archive.SkippedObfuscatedFiles);
+        Assert.Contains("seg-raw-1", archived.SourceMetadataJson);
+    }
 }

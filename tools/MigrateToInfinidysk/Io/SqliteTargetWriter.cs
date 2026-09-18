@@ -154,4 +154,213 @@ public static class SqliteTargetWriter
             cmd.Parameters.AddWithValue(name, value);
         cmd.ExecuteNonQuery();
     }
+
+    /// <summary>
+    /// Streaming counterpart to <see cref="Apply"/>: instead of taking a fully-materialized
+    /// MigrationResult and writing every row inside one method call, opens a transaction up front
+    /// and exposes one Insert method per table that a caller (StreamingMigrator) calls row by
+    /// row as it streams the source database, without needing to hold a full list of target rows
+    /// for any table. Each Insert method reuses one prepared SqliteCommand across every row for
+    /// that table (rather than the one-command-per-row pattern <see cref="Execute"/> above uses)
+    /// so a table with thousands of rows doesn't also allocate thousands of SqliteCommand/
+    /// SqliteParameter objects. Same INSERT statements as <see cref="Apply"/>, same "one
+    /// transaction, commit only at the very end" atomicity - see MigrationApplier for why the
+    /// commit happens only after the archive is durably published.
+    /// </summary>
+    public sealed class TargetWriteSession : IDisposable
+    {
+        private readonly SqliteConnection _conn;
+        private readonly SqliteTransaction _tx;
+        private readonly Dictionary<string, SqliteCommand> _commands = new();
+        private bool _committed;
+
+        public TargetWriteSession(SqliteConnection conn)
+        {
+            _conn = conn;
+            _tx = conn.BeginTransaction();
+        }
+
+        public void Commit()
+        {
+            _tx.Commit();
+            _committed = true;
+        }
+
+        public void Dispose()
+        {
+            foreach (var cmd in _commands.Values) cmd.Dispose();
+            if (!_committed) _tx.Dispose(); // dispose-without-commit = rollback
+            else _tx.Dispose();
+        }
+
+        private SqliteCommand GetCommand(string key, string sql)
+        {
+            if (_commands.TryGetValue(key, out var existing)) return existing;
+            var cmd = _conn.CreateCommand();
+            cmd.Transaction = _tx;
+            cmd.CommandText = sql;
+            _commands[key] = cmd;
+            return cmd;
+        }
+
+        private static void SetParam(SqliteCommand cmd, string name, object value)
+        {
+            if (cmd.Parameters.Contains(name)) cmd.Parameters[name].Value = value;
+            else cmd.Parameters.AddWithValue(name, value);
+        }
+
+        public void InsertDavItem(TargetDavItem item)
+        {
+            var cmd = GetCommand("DavItem", """
+                INSERT INTO DavItems
+                    (Id, IdPrefix, CreatedAt, ParentId, Name, FileSize, Type, SubType, Path,
+                     ReleaseDate, LastHealthCheck, NextHealthCheck, HealthRepairPending, HistoryItemId)
+                VALUES
+                    ($Id, $IdPrefix, $CreatedAt, $ParentId, $Name, $FileSize, $Type, $SubType, $Path,
+                     $ReleaseDate, $LastHealthCheck, $NextHealthCheck, $HealthRepairPending, $HistoryItemId)
+                ON CONFLICT(Id) DO UPDATE SET
+                    Type = excluded.Type, SubType = excluded.SubType
+                """);
+            SetParam(cmd, "$Id", item.Id.ToString());
+            SetParam(cmd, "$IdPrefix", item.IdPrefix);
+            SetParam(cmd, "$CreatedAt", ToSqliteDateTime(item.CreatedAtUnixSeconds));
+            SetParam(cmd, "$ParentId", (object?)item.ParentId?.ToString() ?? DBNull.Value);
+            SetParam(cmd, "$Name", item.Name);
+            SetParam(cmd, "$FileSize", (object?)item.FileSize ?? DBNull.Value);
+            SetParam(cmd, "$Type", item.Type);
+            SetParam(cmd, "$SubType", item.SubType);
+            SetParam(cmd, "$Path", item.Path);
+            SetParam(cmd, "$ReleaseDate", (object?)item.ReleaseDateUnixSeconds ?? DBNull.Value);
+            SetParam(cmd, "$LastHealthCheck", (object?)item.LastHealthCheckUnixSeconds ?? DBNull.Value);
+            SetParam(cmd, "$NextHealthCheck", (object?)item.NextHealthCheckUnixSeconds ?? DBNull.Value);
+            SetParam(cmd, "$HealthRepairPending", item.HealthRepairPending ? 1 : 0);
+            SetParam(cmd, "$HistoryItemId", (object?)item.HistoryItemId?.ToString() ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertDavNzbFile(TargetDavNzbFile f)
+        {
+            var cmd = GetCommand("DavNzbFile", "INSERT INTO DavNzbFiles (Id, SegmentIds) VALUES ($Id, $SegmentIds)");
+            SetParam(cmd, "$Id", f.Id.ToString());
+            SetParam(cmd, "$SegmentIds", f.SegmentIdsJson);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertDavMultipartFile(TargetDavMultipartFile f)
+        {
+            var cmd = GetCommand("DavMultipartFile", "INSERT INTO DavMultipartFiles (Id, Metadata) VALUES ($Id, $Metadata)");
+            SetParam(cmd, "$Id", f.Id.ToString());
+            SetParam(cmd, "$Metadata", f.MetadataJson);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertQueueItem(TargetQueueItem q)
+        {
+            var cmd = GetCommand("QueueItem", """
+                INSERT INTO QueueItems
+                    (Id, CreatedAt, SortOrder, FileName, JobName, NzbFileSize, TotalSegmentBytes,
+                     Category, Priority, PostProcessing, PauseUntil)
+                VALUES
+                    ($Id, $CreatedAt, $SortOrder, $FileName, $JobName, $NzbFileSize, $TotalSegmentBytes,
+                     $Category, $Priority, $PostProcessing, $PauseUntil)
+                """);
+            SetParam(cmd, "$Id", q.Id.ToString());
+            SetParam(cmd, "$CreatedAt", ToSqliteDateTime(q.CreatedAtUnixSeconds));
+            SetParam(cmd, "$SortOrder", q.SortOrder);
+            SetParam(cmd, "$FileName", q.FileName);
+            SetParam(cmd, "$JobName", q.JobName);
+            SetParam(cmd, "$NzbFileSize", q.NzbFileSize);
+            SetParam(cmd, "$TotalSegmentBytes", q.TotalSegmentBytes);
+            SetParam(cmd, "$Category", q.Category);
+            SetParam(cmd, "$Priority", q.Priority);
+            SetParam(cmd, "$PostProcessing", q.PostProcessing);
+            SetParam(cmd, "$PauseUntil", q.PauseUntilUnixSeconds.HasValue ? ToSqliteDateTime(q.PauseUntilUnixSeconds.Value) : DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertQueueNzbContents(TargetQueueNzbContents q)
+        {
+            var cmd = GetCommand("QueueNzbContents", "INSERT INTO QueueNzbContents (Id, NzbContents) VALUES ($Id, $NzbContents)");
+            SetParam(cmd, "$Id", q.Id.ToString());
+            SetParam(cmd, "$NzbContents", q.NzbContents);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertHistoryItem(TargetHistoryItem h)
+        {
+            var cmd = GetCommand("HistoryItem", """
+                INSERT INTO HistoryItems
+                    (Id, CreatedAt, Category, DownloadStatus, DownloadTimeSeconds, FailMessage,
+                     FileName, JobName, TotalSegmentBytes, DownloadDirId)
+                VALUES
+                    ($Id, $CreatedAt, $Category, $DownloadStatus, $DownloadTimeSeconds, $FailMessage,
+                     $FileName, $JobName, $TotalSegmentBytes, $DownloadDirId)
+                """);
+            SetParam(cmd, "$Id", h.Id.ToString());
+            SetParam(cmd, "$CreatedAt", ToSqliteDateTime(h.CreatedAtUnixSeconds));
+            SetParam(cmd, "$Category", h.Category);
+            SetParam(cmd, "$DownloadStatus", h.DownloadStatusValue);
+            SetParam(cmd, "$DownloadTimeSeconds", h.DownloadTimeSeconds);
+            SetParam(cmd, "$FailMessage", (object?)h.FailMessage ?? DBNull.Value);
+            SetParam(cmd, "$FileName", h.FileName);
+            SetParam(cmd, "$JobName", h.JobName);
+            SetParam(cmd, "$TotalSegmentBytes", h.TotalSegmentBytes);
+            SetParam(cmd, "$DownloadDirId", (object?)h.DownloadDirId?.ToString() ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertConfigItem(TargetConfigItem c)
+        {
+            var cmd = GetCommand("ConfigItem", """
+                INSERT INTO ConfigItems (ConfigName, ConfigValue) VALUES ($Name, $Value)
+                ON CONFLICT(ConfigName) DO UPDATE SET ConfigValue = excluded.ConfigValue
+                """);
+            SetParam(cmd, "$Name", c.ConfigName);
+            SetParam(cmd, "$Value", c.ConfigValue);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertAccount(TargetAccount a)
+        {
+            var cmd = GetCommand("Account", """
+                INSERT INTO Accounts (Type, Username, PasswordHash, RandomSalt)
+                VALUES ($Type, $Username, $PasswordHash, $RandomSalt)
+                """);
+            SetParam(cmd, "$Type", a.Type);
+            SetParam(cmd, "$Username", a.Username);
+            SetParam(cmd, "$PasswordHash", a.PasswordHash);
+            SetParam(cmd, "$RandomSalt", a.RandomSalt);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertHealthCheckResult(TargetHealthCheckResult h)
+        {
+            var cmd = GetCommand("HealthCheckResult", """
+                INSERT INTO HealthCheckResults (Id, CreatedAt, DavItemId, Path, Result, RepairStatus, Message)
+                VALUES ($Id, $CreatedAt, $DavItemId, $Path, $Result, $RepairStatus, $Message)
+                """);
+            SetParam(cmd, "$Id", h.Id.ToString());
+            SetParam(cmd, "$CreatedAt", h.CreatedAtUnixSeconds);
+            SetParam(cmd, "$DavItemId", h.DavItemId.ToString());
+            SetParam(cmd, "$Path", h.Path);
+            SetParam(cmd, "$Result", h.Result);
+            SetParam(cmd, "$RepairStatus", h.RepairStatus);
+            SetParam(cmd, "$Message", (object?)h.Message ?? DBNull.Value);
+            cmd.ExecuteNonQuery();
+        }
+
+        public void InsertHealthCheckStat(TargetHealthCheckStat h)
+        {
+            var cmd = GetCommand("HealthCheckStat", """
+                INSERT INTO HealthCheckStats (DateStartInclusive, DateEndExclusive, Result, RepairStatus, Count)
+                VALUES ($Start, $End, $Result, $RepairStatus, $Count)
+                """);
+            SetParam(cmd, "$Start", h.DateStartInclusiveUnixSeconds);
+            SetParam(cmd, "$End", h.DateEndExclusiveUnixSeconds);
+            SetParam(cmd, "$Result", h.Result);
+            SetParam(cmd, "$RepairStatus", h.RepairStatus);
+            SetParam(cmd, "$Count", h.Count);
+            cmd.ExecuteNonQuery();
+        }
+    }
 }

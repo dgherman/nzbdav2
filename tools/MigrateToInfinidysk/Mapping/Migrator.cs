@@ -240,7 +240,16 @@ public static class Migrator
                 DavItemId: mp.Id,
                 Reason: mapped.SkipReason!,
                 ObfuscationKeyBase64: mp.ObfuscationKey == null ? null : Convert.ToBase64String(mp.ObfuscationKey),
-                SourceMetadataJson: JsonSerializer.Serialize(mp, (JsonSerializerOptions?)null)));
+                // Reuse the raw Metadata JSON text already read from the DavMultipartFiles row
+                // instead of re-serializing FileParts/AesParams/ObfuscationKey into a second,
+                // duplicate JSON representation of data already sitting in a string - real
+                // databases can have thousands of skipped rows, each with non-trivial FileParts.
+                // RawMetadataJson is null only for rows synthesized from a legacy DavRarFiles row
+                // (MultipartFileMapper.FromRarFile): those have no "already stored as this shape"
+                // text, since DavRarFiles.RarParts is a different JSON structure, so falling back
+                // to re-serializing there is the only way to produce a DavMultipartFiles-shaped
+                // archive entry for them.
+                SourceMetadataJson: mp.RawMetadataJson ?? JsonSerializer.Serialize(mp, (JsonSerializerOptions?)null)));
             return;
         }
 
