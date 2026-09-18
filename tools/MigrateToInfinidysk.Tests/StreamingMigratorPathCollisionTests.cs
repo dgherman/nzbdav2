@@ -133,6 +133,63 @@ public class StreamingMigratorPathCollisionTests : IDisposable
         Assert.Equal(1L, cmd.ExecuteScalar());
     }
 
+    [Fact]
+    public void Run_DryRun_ReportsSameCollisionInfoAsApply_ButWritesNothing()
+    {
+        // Round-17 regression: Program.cs used to pass null instead of a read-only target
+        // connection when --apply was absent, and StreamingMigrator only read the target's
+        // Path->Id index when apply was true - so --dry-run gave no preview of scaffold-root
+        // Info lines, user-content Warnings, or skipped/reparented counts, exactly what a user
+        // needs to see before committing to --apply. Fixed by decoupling "read the target for
+        // collision detection" (canReadTarget = targetConn != null) from "write to the target"
+        // (the explicit apply parameter) - this exercises the same fixture as both earlier tests
+        // combined (scaffold AND genuine user-content collisions) through the new 5-arg
+        // Run(..., apply: false) overload, and asserts the target ends up completely untouched.
+        var movieId = Guid.NewGuid();
+        var existingUncategorizedId = Guid.NewGuid();
+        var sourceUncategorizedId = Guid.NewGuid();
+        var deepFileId = Guid.NewGuid();
+
+        BuildSourceFixtureWithScaffoldRootsAndOneChild(movieId, extraFolder: (sourceUncategorizedId, deepFileId));
+
+        using var target = BuildTargetFixtureWithPreSeededScaffoldRoots(extraUserFolder: existingUncategorizedId);
+        using var sourceConn = new SqliteConnection($"Data Source={_sourceDbPath};Mode=ReadOnly");
+        sourceConn.Open();
+
+        // apply: false - the exact call shape Program.cs now uses for --dry-run: a real,
+        // non-null target connection (opened read-only in Program.cs, matching this test's
+        // ReadWriteCreate-but-otherwise-untouched fixture connection), with writes gated purely
+        // by the explicit flag, not by whether a connection was supplied at all.
+        var result = StreamingMigrator.Run(sourceConn, target, archivePath: null, new MigrationOptions(null), apply: false);
+
+        Assert.True(result.Success, string.Join("; ", result.Errors));
+
+        // Same reporting a real --apply run would produce (see the two tests above) - a dry-run
+        // preview is worthless if it can't show the user what --apply would actually do.
+        Assert.NotNull(result.Infos);
+        Assert.Contains(result.Infos!, i => i.Contains('5') && i.Contains("scaffold"));
+        Assert.Contains(result.Warnings, w => w.Contains("/content/uncategorized", StringComparison.Ordinal));
+        Assert.Equal(2, result.Counts["DavItems"].Copied); // movie.mkv + deep.mkv - the two non-colliding rows
+        Assert.Equal(6, result.Counts["DavItems"].Skipped); // 5 scaffold roots + the uncategorized folder itself
+
+        // But nothing was actually written: every row the target started with is still exactly
+        // what it started with, and nothing new was added.
+        using var cmd = target.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(*) FROM DavItems";
+        Assert.Equal(6L, cmd.ExecuteScalar()); // the 5 pre-seeded scaffold roots + existingUncategorizedId
+
+        cmd.CommandText = "SELECT COUNT(*) FROM DavMultipartFiles";
+        Assert.Equal(0L, cmd.ExecuteScalar());
+
+        AssertRowExists(target, existingUncategorizedId, "/content/uncategorized");
+        AssertRowMissing(target, movieId);
+        AssertRowMissing(target, sourceUncategorizedId);
+        AssertRowMissing(target, deepFileId);
+
+        // No archive written either - dry-run never publishes anything to disk.
+        Assert.False(File.Exists(_archivePath) || File.Exists(_archivePath + ".tmp"));
+    }
+
     private static void AssertRowExists(SqliteConnection conn, Guid id, string expectedPath)
     {
         using var cmd = conn.CreateCommand();

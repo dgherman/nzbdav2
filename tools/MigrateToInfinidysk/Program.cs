@@ -117,7 +117,14 @@ public static class Program
         // --apply even under an 8GB container memory limit. It also drives the archive-then-
         // commit ordering directly (same atomicity guarantee MigrationApplier provided), so
         // --apply no longer goes through a separate MigrationApplier.Apply call.
-        var result = StreamingMigrator.Run(sourceConn, apply ? targetConn : null, apply ? archivePath : null, new MigrationOptions(adminUsername));
+        //
+        // targetConn is passed even in --dry-run (round 17): it was already opened read-only
+        // above regardless of apply, and StreamingMigrator needs to read the target's existing
+        // DavItems Path index to preview Path-collision handling (round 16 - scaffold-root Info
+        // lines, user-content Warnings, skipped-row counts, reparenting) before the user commits
+        // to --apply. The explicit `apply` argument (not targetConn's nullness) is what gates
+        // every actual write - see StreamingMigrator.Run's round-17 doc comment.
+        var result = StreamingMigrator.Run(sourceConn, targetConn, apply ? archivePath : null, new MigrationOptions(adminUsername), apply);
 
         DryRunReport.Print(result, apply);
 

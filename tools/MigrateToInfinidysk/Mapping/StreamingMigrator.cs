@@ -50,20 +50,42 @@ public static class StreamingMigrator
 {
     public static MigrationResult Run(
         SqliteConnection sourceConn, SqliteConnection? targetConn, string? archivePath, MigrationOptions options) =>
-        Run(sourceConn, targetConn, archivePath, options, onBeforeCommit: null);
+        Run(sourceConn, targetConn, archivePath, options, onBeforeCommit: null, applyOverride: null);
+
+    /// <summary>
+    /// Round-17: lets a caller (Program.cs) pass a real, read-only target connection for
+    /// --dry-run too, so dry-run can preview Path-collision detection (round 16: scaffold-root
+    /// Info lines, user-content Warnings, skipped-row counts, reparenting) without writing
+    /// anything - apply is no longer inferred from "was a target connection given at all" but
+    /// from this explicit flag. When apply is false, targetConn is used ONLY for the read-only
+    /// Path-index lookup below; no TargetWriteSession/transaction is ever opened against it (see
+    /// every write below being additionally gated on `apply`, not just targetConn != null).
+    /// </summary>
+    public static MigrationResult Run(
+        SqliteConnection sourceConn, SqliteConnection? targetConn, string? archivePath, MigrationOptions options,
+        bool apply) =>
+        Run(sourceConn, targetConn, archivePath, options, onBeforeCommit: null, applyOverride: apply);
 
     /// <summary>
     /// internal overload exists only so tests can deterministically fault-inject a failure
     /// between the archive publish and the target commit (round-13 regression coverage) -
     /// SqliteTransaction.Commit() itself has no public seam to make it throw on demand.
     /// onBeforeCommit runs immediately before target.Commit() when apply is true, and is null
-    /// (a no-op) on every real call path (the public Run above always passes null).
+    /// (a no-op) on every real call path (the public Run overloads above always pass null).
+    /// applyOverride lets a caller separate "should this run write" from "was a target
+    /// connection given" (round 17) - null falls back to the pre-round-17 behavior (infer apply
+    /// from targetConn's nullness), which is what every existing call site relies on.
     /// </summary>
     internal static MigrationResult Run(
         SqliteConnection sourceConn, SqliteConnection? targetConn, string? archivePath, MigrationOptions options,
-        Action? onBeforeCommit)
+        Action? onBeforeCommit, bool? applyOverride = null)
     {
-        var apply = targetConn != null;
+        var apply = applyOverride ?? (targetConn != null);
+        // Independent of apply: whether a target connection is available to READ from at all,
+        // for the Path-collision preview (round 17). True in both --apply (targetConn opened
+        // read-write) and --dry-run (targetConn opened read-only, but still non-null - see
+        // Program.cs) - only ever false for callers that genuinely have no target DB to look at.
+        var canReadTarget = targetConn != null;
         var errors = new List<string>();
         var warnings = new List<string>();
         var counts = new Dictionary<string, TableCounts>();
@@ -114,7 +136,7 @@ public static class StreamingMigrator
         //     further up than their immediate parent.
         var pathCollisionRemap = new Dictionary<Guid, Guid>();
         var pathCollisionSourceIds = new HashSet<Guid>();
-        if (apply)
+        if (canReadTarget)
         {
             var targetPaths = ReadTargetDavItemPaths(targetConn!);
             foreach (var item in sourceDavItems)
