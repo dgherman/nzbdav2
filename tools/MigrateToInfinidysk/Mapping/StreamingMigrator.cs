@@ -49,7 +49,19 @@ namespace NzbWebDAV.MigrateToInfinidysk.Mapping;
 public static class StreamingMigrator
 {
     public static MigrationResult Run(
-        SqliteConnection sourceConn, SqliteConnection? targetConn, string? archivePath, MigrationOptions options)
+        SqliteConnection sourceConn, SqliteConnection? targetConn, string? archivePath, MigrationOptions options) =>
+        Run(sourceConn, targetConn, archivePath, options, onBeforeCommit: null);
+
+    /// <summary>
+    /// internal overload exists only so tests can deterministically fault-inject a failure
+    /// between the archive publish and the target commit (round-13 regression coverage) -
+    /// SqliteTransaction.Commit() itself has no public seam to make it throw on demand.
+    /// onBeforeCommit runs immediately before target.Commit() when apply is true, and is null
+    /// (a no-op) on every real call path (the public Run above always passes null).
+    /// </summary>
+    internal static MigrationResult Run(
+        SqliteConnection sourceConn, SqliteConnection? targetConn, string? archivePath, MigrationOptions options,
+        Action? onBeforeCommit)
     {
         var apply = targetConn != null;
         var errors = new List<string>();
@@ -80,6 +92,13 @@ public static class StreamingMigrator
         var davItemsById = sourceDavItems.ToDictionary(i => i.Id);
 
         string? tempArchivePath = null;
+        // Set only between a successful archive publish (File.Move onto archivePath) and a
+        // successful target.Commit(). If an exception - most notably from Commit() itself -
+        // unwinds through this method while it's still set, the finally block below deletes the
+        // published archive: otherwise a failed/rolled-back migration would leave a published
+        // archive file on disk claiming migration data exists when the target DB actually has
+        // none (round-13 fix - see PR discussion).
+        string? publishedArchivePath = null;
         JsonArchiveWriter.StreamingSession? archive = null;
         SqliteTargetWriter.TargetWriteSession? target = null;
 
@@ -317,8 +336,11 @@ public static class StreamingMigrator
                 archive = null;
                 File.Move(tempArchivePath!, archivePath!, overwrite: true);
                 tempArchivePath = null;
+                publishedArchivePath = archivePath; // see finally: if Commit() throws below, this gets deleted
 
+                onBeforeCommit?.Invoke();
                 target!.Commit();
+                publishedArchivePath = null; // committed - the published archive is now correct, don't delete it
             }
 
             return new MigrationResult(
@@ -334,6 +356,17 @@ public static class StreamingMigrator
             if (tempArchivePath != null && File.Exists(tempArchivePath))
             {
                 try { File.Delete(tempArchivePath); } catch { /* best-effort cleanup */ }
+            }
+            // publishedArchivePath is only still set here if Commit() (or anything between the
+            // publish and the commit) threw - the DB rolled back but the archive was already
+            // renamed into place. Delete it so a failed run doesn't leave a published archive
+            // claiming migration data exists when the target DB has none, and so the archive
+            // path is clear for a retry (SqliteTargetWriter's insert commands would otherwise be
+            // the only thing failing again identically, but there's nothing left over here to
+            // block a fresh --apply from writing a fresh archive to the same path).
+            if (publishedArchivePath != null && File.Exists(publishedArchivePath))
+            {
+                try { File.Delete(publishedArchivePath); } catch { /* best-effort cleanup */ }
             }
         }
     }
