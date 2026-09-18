@@ -210,9 +210,110 @@ public static class SqliteTargetWriter
 
         public void Commit()
         {
+            // Round 18: a real --apply run threw "FOREIGN KEY constraint failed" at this
+            // Commit() call (the deferred-FK check from round 14 finally running), with rollback
+            // clean but the bare SqliteException giving no table/rowid - no way to tell which
+            // row was dangling. Checking AFTER a failed deferred-commit is useless: SQLite rolls
+            // the whole transaction back the moment the deferred check fails at COMMIT, so by
+            // the time a catch block could run a diagnostic query, the offending rows are gone
+            // (confirmed empirically: inserted one dangling FK row, forced Commit() to throw,
+            // then SELECT COUNT(*) on that table read back 0 - nothing left to inspect). So the
+            // check has to run BEFORE Commit(), still inside the pending transaction, where the
+            // rows are still visible to `PRAGMA foreign_key_check` (confirmed empirically too:
+            // the same setup, queried with the pragma before Commit(), correctly reported
+            // table=Child rowid=1 parent=Parent fkid=0 - the exact table/row/referenced-table a
+            // bare commit-time exception can't give you).
+            var violations = CheckForeignKeyViolations();
+            if (violations.Count > 0)
+            {
+                // Deliberately don't call Commit() at all - throwing here (rather than letting a
+                // real commit attempt fail) means Dispose()'s existing dispose-without-commit
+                // path handles the rollback exactly the same way every other pre-commit failure
+                // in this session already does (see StreamingMigrator's finally block), so this
+                // diagnostic can never itself write partial data or change the safe-rollback
+                // behavior already in place.
+                throw new InvalidOperationException(FormatForeignKeyViolations(violations));
+            }
+
             _tx.Commit();
             _committed = true;
         }
+
+        /// <summary>
+        /// Root cause of the round-18 report is still open pending the actual table/rowid this
+        /// surfaces on the next real-world run - do NOT guess-fix a specific FK gap from this
+        /// alone; this method's only job is enumerating what PRAGMA foreign_key_check reports
+        /// while the pending transaction's rows are still visible to it.
+        /// </summary>
+        private List<ForeignKeyViolation> CheckForeignKeyViolations()
+        {
+            var violations = new List<ForeignKeyViolation>();
+            using var cmd = _conn.CreateCommand();
+            cmd.Transaction = _tx;
+            cmd.CommandText = "PRAGMA foreign_key_check";
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                var table = reader.GetString(0);
+                var rowid = reader.IsDBNull(1) ? (long?)null : reader.GetInt64(1);
+                var parentTable = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var fkid = reader.GetInt64(3);
+                violations.Add(new ForeignKeyViolation(table, rowid, parentTable, fkid));
+            }
+            return violations;
+        }
+
+        private string FormatForeignKeyViolations(IReadOnlyList<ForeignKeyViolation> violations)
+        {
+            var lines = new List<string>
+            {
+                $"Refusing to commit: PRAGMA foreign_key_check found {violations.Count} FOREIGN KEY " +
+                "violation(s) in the pending transaction (checked before commit, so these rows are " +
+                "still readable - a bare commit-time FOREIGN KEY exception cannot tell you this):",
+            };
+            foreach (var v in violations)
+            {
+                // Best-effort: resolve the row's own Id column (every table this tool writes to
+                // has one - see SqliteTargetWriter.Apply's INSERT statements) via its SQLite
+                // rowid, so the violation names an actual DavItems.Id/etc GUID, not just an
+                // opaque internal rowid number. Never lets a resolution failure (e.g. an
+                // unexpected schema) hide the underlying violation - falls back to the raw rowid.
+                var idDescription = v.RowId.HasValue
+                    ? TryResolveRowIdentifier(v.Table, v.RowId.Value) is { } resolved
+                        ? $"Id={resolved} (rowid={v.RowId})"
+                        : $"rowid={v.RowId}"
+                    : "rowid=<unknown>";
+                lines.Add(
+                    $"  - table \"{v.Table}\" {idDescription} has a foreign key (fkid={v.FkId}) " +
+                    $"referencing \"{v.ParentTable ?? "<unknown>"}\" that does not resolve to an " +
+                    "existing row there.");
+            }
+            return string.Join("\n", lines);
+        }
+
+        private string? TryResolveRowIdentifier(string table, long rowid)
+        {
+            try
+            {
+                using var cmd = _conn.CreateCommand();
+                cmd.Transaction = _tx;
+                cmd.CommandText = $"SELECT Id FROM {QuoteIdentifier(table)} WHERE rowid = $rowid";
+                cmd.Parameters.AddWithValue("$rowid", rowid);
+                return cmd.ExecuteScalar() as string;
+            }
+            catch
+            {
+                // No Id column, or some other lookup failure - the raw rowid in the caller's
+                // fallback message is still a real, actionable diagnostic on its own.
+                return null;
+            }
+        }
+
+        // PRAGMA/table-name interpolation above is safe: `table` always comes from
+        // PRAGMA foreign_key_check's own result set (SQLite's catalog), never from user input.
+        private static string QuoteIdentifier(string identifier) => "\"" + identifier.Replace("\"", "\"\"") + "\"";
+
+        private readonly record struct ForeignKeyViolation(string Table, long? RowId, string? ParentTable, long FkId);
 
         public void Dispose()
         {

@@ -72,6 +72,14 @@ public class StreamingMigratorForeignKeyOrderingTests : IDisposable
         // would need to still be rejected at commit; and it proves round-13's "delete the
         // published archive on a failed commit" cleanup fires for a REAL FK failure, not just
         // the injected onBeforeCommit fault round-13's own test used.
+        //
+        // Round 18: TargetWriteSession.Commit() now runs PRAGMA foreign_key_check BEFORE
+        // attempting the real commit, and throws its own diagnostic InvalidOperationException
+        // (naming the table/rowid/referenced-table) instead of letting a bare commit-time
+        // SqliteException fire - a real production failure gave no table/rowid to go on. This
+        // test's exception-type/message assertions were updated for that; the "FK is still
+        // enforced, rollback stays clean, archive cleanup still fires" assertions below are
+        // otherwise unchanged from round 15.
         var danglingNzbId = Guid.NewGuid();
         BuildSourceFixtureWithDanglingNzbFile(danglingNzbId);
 
@@ -79,14 +87,15 @@ public class StreamingMigratorForeignKeyOrderingTests : IDisposable
         using var sourceConn = new SqliteConnection($"Data Source={_sourceDbPath};Mode=ReadOnly");
         sourceConn.Open();
 
-        var thrown = Assert.Throws<SqliteException>(() =>
+        var thrown = Assert.Throws<InvalidOperationException>(() =>
             StreamingMigrator.Run(sourceConn, target, _archivePath, new MigrationOptions(null)));
 
-        // Not just "some exception" - specifically the FK constraint, so this test fails (rather
-        // than passing vacuously) if foreign_keys enforcement were ever accidentally disabled and
-        // something else started throwing instead.
-        Assert.Equal(19, thrown.SqliteErrorCode); // SQLITE_CONSTRAINT
-        Assert.Contains("FOREIGN KEY constraint failed", thrown.Message);
+        // Not just "some exception" - specifically names the offending table/row and the
+        // referenced table, so this test fails (rather than passing vacuously) if the
+        // diagnostic ever regresses back to a bare, unhelpful message.
+        Assert.Contains("DavNzbFiles", thrown.Message);
+        Assert.Contains(danglingNzbId.ToString(), thrown.Message);
+        Assert.Contains("DavItems", thrown.Message);
 
         // Rolled back: nothing from this run persisted.
         using (var cmd = target.CreateCommand())
