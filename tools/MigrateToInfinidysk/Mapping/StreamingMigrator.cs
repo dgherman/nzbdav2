@@ -91,6 +91,42 @@ public static class StreamingMigrator
         var sourceDavItems = ReadDavItems(sourceConn);
         var davItemsById = sourceDavItems.ToDictionary(i => i.Id);
 
+        // --- DavItems.Path collision detection (round 16). infinidysk's DavItems.Path column
+        //     has a UNIQUE index, and infinidysk seeds 5 fixed-GUID scaffold root rows (Root=/,
+        //     NzbFolder=/nzbs, ContentFolder=/content, SymlinkFolder=/completed-symlinks,
+        //     IdsFolder=/.ids) on first startup, at the SAME Paths nzbdav2 uses but with
+        //     DIFFERENT Ids - so a plain INSERT of the source's own root rows collides on Path
+        //     on every real-world run (confirmed via live SSH inspection of a user's target DB:
+        //     "UNIQUE constraint failed: DavItems.Path"). Users can also create real content in
+        //     infinidysk before ever running this tool (also confirmed live: a user-created
+        //     /content/uncategorized folder, timestamped after infinidysk's first boot but before
+        //     migration), so any Path already present in the target is a possible collision, not
+        //     just the 5 known scaffold roots.
+        //
+        //     pathCollisionRemap maps a colliding SOURCE DavItems.Id to the TARGET's existing Id
+        //     at that same Path. It's used two ways: (1) to skip inserting the source row itself
+        //     (never overwrite/delete real target data), and (2) to re-parent any source child
+        //     whose ParentId pointed at the skipped row, so the rest of that subtree merges onto
+        //     the target's existing folder instead of being silently orphaned (requirement 3).
+        //     One level of substitution is sufficient even for multi-level trees: a grandchild
+        //     under a colliding folder has ParentId = the (non-colliding) child's own Id, which
+        //     inserts normally - a colliding ancestor never needs its own children to look
+        //     further up than their immediate parent.
+        var pathCollisionRemap = new Dictionary<Guid, Guid>();
+        var pathCollisionSourceIds = new HashSet<Guid>();
+        if (apply)
+        {
+            var targetPaths = ReadTargetDavItemPaths(targetConn!);
+            foreach (var item in sourceDavItems)
+            {
+                if (targetPaths.TryGetValue(item.Path, out var existingTargetId))
+                {
+                    pathCollisionRemap[item.Id] = existingTargetId;
+                    pathCollisionSourceIds.Add(item.Id);
+                }
+            }
+        }
+
         string? tempArchivePath = null;
         // Set only between a successful archive publish (File.Move onto archivePath) and a
         // successful target.Commit(). If an exception - most notably from Commit() itself -
@@ -125,9 +161,21 @@ public static class StreamingMigrator
             var multipartArchiveCount = 0;
             if (apply) archive!.BeginArray("SkippedObfuscatedFiles");
             foreach (var mp in SqliteSourceReader.StreamDavMultipartFiles(sourceConn))
+            {
+                // Path-collision skip takes priority over obfuscation handling: if this row's
+                // DavItems.Id already collides on Path, its DavItems row will never be inserted
+                // (see the DavItems pass below), so inserting THIS row first would leave a
+                // dangling DavMultipartFiles row with no matching DavItems row - a real FOREIGN
+                // KEY constraint failure at commit (round 14 defers the check, it doesn't waive
+                // it). Skip the insert; skippedMultipartIds already gates the DavItems skip too.
+                if (pathCollisionSourceIds.Contains(mp.Id)) { skippedMultipartIds.Add(mp.Id); continue; }
                 StreamOneMultipart(mp, apply, archive, target, warnings, skippedMultipartIds, ref davMultipartCopied, ref multipartArchiveCount);
+            }
             foreach (var rar in SqliteSourceReader.StreamDavRarFiles(sourceConn))
+            {
+                if (pathCollisionSourceIds.Contains(rar.Id)) { skippedMultipartIds.Add(rar.Id); continue; }
                 StreamOneMultipart(MultipartFileMapper.FromRarFile(rar), apply, archive, target, warnings, skippedMultipartIds, ref davMultipartCopied, ref multipartArchiveCount);
+            }
             if (apply) archive!.EndArray();
 
             // --- DavNzbFiles: wrap as a single-part DavMultipartFiles row when the source
@@ -136,11 +184,18 @@ public static class StreamingMigrator
             //     fallback IDs. See Migrator.Run for the full rationale - identical decision
             //     logic, applied per row as it streams. ---
             var davNzbCopied = 0;
+            var davNzbPathCollisionSkipped = 0;
             var nzbWrappedAsMultipartIds = new HashSet<Guid>();
             var nzbFallbackArchiveCount = 0;
             if (apply) archive!.BeginArray("DavNzbFileFallbackIds");
             foreach (var f in SqliteSourceReader.StreamDavNzbFiles(sourceConn))
             {
+                // Same reasoning as the multipart loop above: this row's DavItems.Id collides on
+                // Path, so its DavItems row is never inserted - don't insert this row either,
+                // whichever table it would have gone to (plain DavNzbFiles, or wrapped into
+                // DavMultipartFiles - see below), or it'd be left dangling at commit.
+                if (pathCollisionSourceIds.Contains(f.Id)) { davNzbPathCollisionSkipped++; continue; }
+
                 davItemsById.TryGetValue(f.Id, out var davItem);
                 var fileSize = davItem?.FileSize;
 
@@ -181,28 +236,82 @@ public static class StreamingMigrator
                 }
             }
             if (apply) archive!.EndArray();
-            counts["DavNzbFiles"] = new TableCounts(davNzbCopied, 0, nzbFallbackArchiveCount);
+            counts["DavNzbFiles"] = new TableCounts(davNzbCopied, davNzbPathCollisionSkipped, nzbFallbackArchiveCount);
             counts["DavMultipartFiles"] = new TableCounts(davMultipartCopied, skippedMultipartIds.Count, multipartArchiveCount);
 
             // --- DavItems: Type/SubType mapping, fixed-root merge, skip rows whose backing
             //     multipart payload was skipped above. ---
             var davItemsCopied = 0;
+            var infos = new List<string>();
             foreach (var item in sourceDavItems)
             {
-                if (skippedMultipartIds.Contains(item.Id)) continue;
+                if (skippedMultipartIds.Contains(item.Id) || pathCollisionSourceIds.Contains(item.Id))
+                    continue;
+
                 var (type, subType) = DavItemTypeMapper.Map(item.Id, (DavItemTypeMapper.LegacyType)item.Type);
                 if (nzbWrappedAsMultipartIds.Contains(item.Id))
                     (type, subType) = (2, 203);
+
+                // Re-parent onto the target's existing row when this item's parent was itself a
+                // Path collision (requirement 3: skipping the colliding parent's own INSERT must
+                // not orphan the rest of the tree that hangs off it).
+                var parentId = item.ParentId;
+                if (parentId.HasValue && pathCollisionRemap.TryGetValue(parentId.Value, out var remappedParentId))
+                    parentId = remappedParentId;
+
                 if (apply)
                 {
                     target!.InsertDavItem(new TargetDavItem(
-                        item.Id, item.IdPrefix, item.CreatedAtUnixSeconds, item.ParentId, item.Name, item.FileSize,
+                        item.Id, item.IdPrefix, item.CreatedAtUnixSeconds, parentId, item.Name, item.FileSize,
                         type, subType, item.Path, item.ReleaseDateUnixSeconds, item.LastHealthCheckUnixSeconds,
                         item.NextHealthCheckUnixSeconds, HealthRepairPending: false, item.HistoryItemId));
                 }
                 davItemsCopied++;
             }
-            counts["DavItems"] = new TableCounts(davItemsCopied, skippedMultipartIds.Count, 0);
+
+            // One message per colliding Path (not per row that got re-parented under it), split
+            // by whether it's one of infinidysk's 5 known scaffold roots (expected on every
+            // real-world run - informational) or a genuine independent Path the user already had
+            // in the target (target's own content may not be what nzbdav2 would have put there -
+            // warning, since the user should know their source-side content under that path
+            // didn't make it across).
+            var scaffoldCollisionCount = 0;
+            foreach (var item in sourceDavItems)
+            {
+                if (!pathCollisionSourceIds.Contains(item.Id)) continue;
+                var existingTargetId = pathCollisionRemap[item.Id];
+
+                if (DavItemTypeMapper.WellKnownRootIds.Contains(item.Id))
+                {
+                    scaffoldCollisionCount++;
+                }
+                else
+                {
+                    warnings.Add(
+                        $"DavItems.Path='{item.Path}' already exists in the target (Id={existingTargetId}) - " +
+                        "this is not one of infinidysk's own scaffold roots, so the target already had " +
+                        "independent content at this path before migration ran. The target's existing row " +
+                        "was kept untouched; the source row for this path was not imported, and any source " +
+                        "content that hung directly off it has been re-parented onto the target's existing " +
+                        "row instead. Check whether that's the content you expected at this path.");
+                }
+            }
+            if (scaffoldCollisionCount > 0)
+            {
+                infos.Add(
+                    $"DavItems: {scaffoldCollisionCount} of infinidysk's 5 well-known scaffold root paths " +
+                    "(/, /nzbs, /content, /completed-symlinks, /.ids) already existed in the target under " +
+                    "different Ids than nzbdav2's - expected on every real-world migration, since infinidysk " +
+                    "seeds these itself on first startup. The target's existing rows were kept untouched, " +
+                    "and source content under those paths has been re-parented onto them.");
+            }
+
+            // Union, not sum: skippedMultipartIds already contains every mp/rar row skipped for a
+            // path collision too (seeded in the multipart/rar loops above), so counting both sets
+            // separately would double-count those rows.
+            var davItemsSkipped = new HashSet<Guid>(skippedMultipartIds);
+            davItemsSkipped.UnionWith(pathCollisionSourceIds);
+            counts["DavItems"] = new TableCounts(davItemsCopied, davItemsSkipped.Count, 0);
 
             // --- QueueItems: needs the full list for SortOrder's window-function backfill - see
             //     class doc comment for why this table is a deliberate, justified exception. ---
@@ -347,7 +456,8 @@ public static class StreamingMigrator
                 Success: true, Errors: errors, Warnings: warnings, Counts: counts,
                 DavItems: [], DavNzbFiles: [], DavMultipartFiles: [], QueueItems: [], QueueNzbContents: [],
                 HistoryItems: [], ConfigItems: [], Accounts: [], HealthCheckResults: [], HealthCheckStats: [],
-                Archive: new ArchivePayload([], [], [], [], [], [], [], [], [], [], [], []));
+                Archive: new ArchivePayload([], [], [], [], [], [], [], [], [], [], [], []),
+                Infos: infos);
         }
         finally
         {
@@ -469,6 +579,23 @@ public static class StreamingMigrator
         if (!TableExists(conn, "HealthCheckStats")) return [];
         return QueryList(conn, "SELECT DateStartInclusive, DateEndExclusive, Result, RepairStatus, Count FROM HealthCheckStats",
             r => new Model.SourceHealthCheckStat(r.GetInt64(0), r.GetInt64(1), r.GetInt32(2), r.GetInt32(3), r.GetInt32(4)));
+    }
+
+    /// <summary>
+    /// Path -> Id for every DavItems row already in the target, used to detect a Path collision
+    /// before any insert is attempted (round 16). A plain SELECT against the target connection,
+    /// same size class as sourceDavItems (a few thousand scalar rows) - not one of the tables
+    /// this file streams to stay memory-bounded.
+    /// </summary>
+    private static Dictionary<string, Guid> ReadTargetDavItemPaths(SqliteConnection targetConn)
+    {
+        var result = new Dictionary<string, Guid>(StringComparer.Ordinal);
+        using var cmd = targetConn.CreateCommand();
+        cmd.CommandText = "SELECT Id, Path FROM DavItems";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+            result[reader.GetString(1)] = Guid.Parse(reader.GetString(0));
+        return result;
     }
 
     private static bool TableExists(SqliteConnection conn, string tableName)

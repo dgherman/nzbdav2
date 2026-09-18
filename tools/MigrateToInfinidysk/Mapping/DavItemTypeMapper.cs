@@ -23,6 +23,19 @@ public static class DavItemTypeMapper
     private static readonly Guid RootId = Guid.Parse("00000000-0000-0000-0000-000000000000");
     private static readonly Guid NzbFolderId = Guid.Parse("00000000-0000-0000-0000-000000000001");
     private static readonly Guid ContentFolderId = Guid.Parse("00000000-0000-0000-0000-000000000002");
+    private static readonly Guid SymlinkFolderId = Guid.Parse("00000000-0000-0000-0000-000000000003");
+    private static readonly Guid IdsFolderId = Guid.Parse("00000000-0000-0000-0000-000000000004");
+
+    /// <summary>
+    /// All 5 fixed-GUID structural root DavItems rows (see nzbdav2's own DavItem.cs static
+    /// instances: Root=/, NzbFolder=/nzbs, ContentFolder=/content, SymlinkFolder=
+    /// /completed-symlinks, IdsFolder=/.ids). infinidysk seeds its own copies of these at the
+    /// SAME Paths but with DIFFERENT Ids on first startup, so every real-world migration
+    /// collides on DavItems.Path for exactly these 5 rows - round-16 fix treats that as expected
+    /// and informational, not a warning, distinct from a genuine user-data Path collision.
+    /// </summary>
+    public static readonly IReadOnlyCollection<Guid> WellKnownRootIds =
+        new HashSet<Guid> { RootId, NzbFolderId, ContentFolderId, SymlinkFolderId, IdsFolderId };
 
     public static TargetType Map(Guid davItemId, LegacyType legacyType)
     {

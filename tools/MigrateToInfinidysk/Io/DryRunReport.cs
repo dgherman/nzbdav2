@@ -20,6 +20,13 @@ public static class DryRunReport
         foreach (var (table, counts) in result.Counts.OrderBy(kv => kv.Key))
             Console.WriteLine($"  {table,-28} {counts.Copied,6} / {counts.Skipped,6} / {counts.Archived,6}");
 
+        if (result.Infos is { Count: > 0 })
+        {
+            Console.WriteLine("\nInfo:");
+            foreach (var info in result.Infos)
+                Console.WriteLine($"  - {info}");
+        }
+
         if (result.Warnings.Count > 0)
         {
             Console.WriteLine("\nWarnings:");

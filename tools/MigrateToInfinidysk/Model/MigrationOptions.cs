@@ -20,7 +20,13 @@ public record MigrationResult(
     IReadOnlyList<TargetAccount> Accounts,
     IReadOnlyList<TargetHealthCheckResult> HealthCheckResults,
     IReadOnlyList<TargetHealthCheckStat> HealthCheckStats,
-    ArchivePayload Archive)
+    ArchivePayload Archive,
+    // Routine, expected conditions worth telling the user about but not warning-level - e.g.
+    // colliding with one of infinidysk's own well-known scaffold root paths (round 16), which
+    // happens on every real-world migration and isn't a sign anything went wrong. Nullable with
+    // a default so existing MigrationResult construction sites (Migrator.cs, tests) don't need
+    // updating - null is treated as "no infos" everywhere this is read.
+    IReadOnlyList<string>? Infos = null)
 {
     public static MigrationResult Failed(params string[] errors) => new(
         Success: false, Errors: errors, Warnings: [], Counts: new Dictionary<string, TableCounts>(),
