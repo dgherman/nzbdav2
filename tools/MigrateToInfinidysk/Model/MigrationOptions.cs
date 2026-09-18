@@ -81,3 +81,11 @@ public record ArchivedObfuscatedFile(
 /// data into the live target database, so it's preserved here instead of being silently dropped.
 /// </summary>
 public record ArchivedNzbFileFallback(Guid DavNzbFileId, string[] SegmentIds, string[][] SegmentFallbackIds);
+
+/// <summary>
+/// Round 19: a QueueNzbContents row whose Id (infinidysk shares Id as the FK back to QueueItems -
+/// see QueueNzbContents.cs's QueueItem navigation) has no matching QueueItems row anywhere in the
+/// source database. Pre-existing dangling data in the source, not a migrator ordering bug - see
+/// StreamingMigrator.Run's QueueNzbContents loop doc comment.
+/// </summary>
+public record ArchivedOrphanedQueueNzbContents(Guid Id, Guid MissingQueueItemId, string NzbContents);

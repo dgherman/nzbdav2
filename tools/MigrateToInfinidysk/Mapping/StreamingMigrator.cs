@@ -354,14 +354,35 @@ public static class StreamingMigrator
 
             // --- QueueNzbContents: streamed - each row can carry the full NZB XML text of a
             //     release (potentially large), and real-world databases can have hundreds of
-            //     these. No archive contribution, no ordering dependency - pure 1:1 stream. ---
+            //     these. infinidysk shares QueueNzbContents.Id as the FK back to QueueItems.Id
+            //     (see QueueNzbContents.cs's QueueItem navigation) - round 19: real-world source
+            //     databases have been seen with QueueNzbContents rows whose Id has no matching
+            //     QueueItems row at all (pre-existing dangling data in the source, not a migrator
+            //     ordering bug). sourceQueueItems, read in full just above for the SortOrder
+            //     backfill, doubles as the membership check here - inserting one of these would
+            //     hit the same deferred-FK failure round 18 now diagnoses, so they're skipped and
+            //     archived instead, same treatment as every other unsupported/orphaned row. ---
+            var sourceQueueItemIds = sourceQueueItems.Select(q => q.Id).ToHashSet();
             var queueNzbCopied = 0;
+            var queueNzbOrphaned = 0;
+            if (apply) archive!.BeginArray("OrphanedQueueNzbContents");
             foreach (var q in SqliteSourceReader.StreamQueueNzbContents(sourceConn))
             {
+                if (!sourceQueueItemIds.Contains(q.Id))
+                {
+                    warnings.Add(
+                        $"QueueNzbContents.Id={q.Id}: orphaned reference to QueueItems.Id={q.Id} not " +
+                        "present in source database - skipping, archiving row.");
+                    if (apply) archive!.WriteItem(new ArchivedOrphanedQueueNzbContents(q.Id, q.Id, q.NzbContents));
+                    queueNzbOrphaned++;
+                    continue;
+                }
+
                 if (apply) target!.InsertQueueNzbContents(new TargetQueueNzbContents(q.Id, q.NzbContents));
                 queueNzbCopied++;
             }
-            counts["QueueNzbContents"] = new TableCounts(queueNzbCopied, 0, 0);
+            if (apply) archive!.EndArray();
+            counts["QueueNzbContents"] = new TableCounts(queueNzbCopied, queueNzbOrphaned, queueNzbOrphaned);
 
             // --- HistoryItems: streamed - real-world databases can have thousands of these.
             //     Each row can produce both a target row (always) and an archive entry (only
