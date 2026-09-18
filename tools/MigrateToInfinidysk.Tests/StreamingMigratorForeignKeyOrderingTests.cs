@@ -62,6 +62,69 @@ public class StreamingMigratorForeignKeyOrderingTests : IDisposable
         Assert.Equal(1L, cmd.ExecuteScalar());
     }
 
+    [Fact]
+    public void Run_GenuinelyDanglingDavNzbFilesRow_RealCommitFailure_RollsBackAndDeletesPublishedArchive()
+    {
+        // Round-15: round-14 only proved the insert ORDER doesn't matter within a transaction
+        // (a DavItems row that arrives later in the same run). This proves the FK is still
+        // actually enforced for a row whose parent never arrives at all - if defer_foreign_keys
+        // were somehow disabled, or the pragma silently didn't apply, this dangling reference
+        // would need to still be rejected at commit; and it proves round-13's "delete the
+        // published archive on a failed commit" cleanup fires for a REAL FK failure, not just
+        // the injected onBeforeCommit fault round-13's own test used.
+        var danglingNzbId = Guid.NewGuid();
+        BuildSourceFixtureWithDanglingNzbFile(danglingNzbId);
+
+        using var target = BuildTargetFixtureWithForeignKeys();
+        using var sourceConn = new SqliteConnection($"Data Source={_sourceDbPath};Mode=ReadOnly");
+        sourceConn.Open();
+
+        var thrown = Assert.Throws<SqliteException>(() =>
+            StreamingMigrator.Run(sourceConn, target, _archivePath, new MigrationOptions(null)));
+
+        // Not just "some exception" - specifically the FK constraint, so this test fails (rather
+        // than passing vacuously) if foreign_keys enforcement were ever accidentally disabled and
+        // something else started throwing instead.
+        Assert.Equal(19, thrown.SqliteErrorCode); // SQLITE_CONSTRAINT
+        Assert.Contains("FOREIGN KEY constraint failed", thrown.Message);
+
+        // Rolled back: nothing from this run persisted.
+        using (var cmd = target.CreateCommand())
+        {
+            cmd.CommandText = "SELECT COUNT(*) FROM DavNzbFiles";
+            Assert.Equal(0L, cmd.ExecuteScalar());
+            cmd.CommandText = "SELECT COUNT(*) FROM DavItems";
+            Assert.Equal(0L, cmd.ExecuteScalar());
+        }
+
+        // Round-13's cleanup: no published archive left behind by a failed commit, and no
+        // leftover temp archive file either.
+        Assert.False(File.Exists(_archivePath),
+            "archive file was left behind after a real FOREIGN KEY constraint failure at commit - " +
+            "round-13's cleanup should have deleted it");
+        var tempFiles = Directory.GetFiles(Path.GetTempPath(), $"{Path.GetFileName(_archivePath)}.tmp-*");
+        Assert.Empty(tempFiles);
+    }
+
+    private void BuildSourceFixtureWithDanglingNzbFile(Guid danglingNzbId)
+    {
+        BuildSourceFixture(Guid.NewGuid()); // an ordinary, well-formed row alongside the dangling one
+
+        // A DavNzbFiles row whose Id has NO matching DavItems row anywhere in the source - not
+        // "inserted in a later pass", genuinely absent. StreamingMigrator's wrap decision looks
+        // up davItemsById by this Id, finds nothing, so FileSize is treated as null and the row
+        // goes through the unwrapped path: a plain DavNzbFiles target row gets inserted with this
+        // Id, and no DavItems row with that Id is ever inserted in this run - a real dangling
+        // reference, not a same-run-but-later one.
+        using var conn = new SqliteConnection($"Data Source={_sourceDbPath}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "INSERT INTO DavNzbFiles (Id, SegmentIds, SegmentFallbacks) VALUES ($id, $segIds, NULL)";
+        cmd.Parameters.AddWithValue("$id", danglingNzbId.ToString());
+        cmd.Parameters.AddWithValue("$segIds", """["seg-orphan-1"]""");
+        cmd.ExecuteNonQuery();
+    }
+
     private void BuildSourceFixture(Guid nzbId)
     {
         using var conn = new SqliteConnection($"Data Source={_sourceDbPath}");
