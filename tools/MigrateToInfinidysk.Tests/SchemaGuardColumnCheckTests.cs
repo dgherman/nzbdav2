@@ -1,0 +1,310 @@
+using Microsoft.Data.Sqlite;
+using NzbWebDAV.MigrateToInfinidysk.Io;
+
+namespace NzbWebDAV.MigrateToInfinidysk.Tests;
+
+public class SchemaGuardColumnCheckTests : IDisposable
+{
+    private readonly SqliteConnection _conn = new("Data Source=:memory:");
+
+    public SchemaGuardColumnCheckTests() => _conn.Open();
+    public void Dispose() => _conn.Dispose();
+
+    [Fact]
+    public void CheckTargetSchema_MissingFileBlobIdColumn_IsRejectedBeforeAnyWrite()
+    {
+        // Reproduces the review finding: a target fixture missing DavItems.FileBlobId entirely
+        // previously passed CheckTarget (which only looked at __EFMigrationsHistory row ids)
+        // and let --apply proceed.
+        Execute("""
+            CREATE TABLE DavItems (
+                Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,
+                Name TEXT NOT NULL, FileSize INTEGER, Type INTEGER NOT NULL, SubType INTEGER NOT NULL,
+                Path TEXT NOT NULL, ReleaseDate INTEGER, LastHealthCheck INTEGER, NextHealthCheck INTEGER,
+                HealthRepairPending INTEGER NOT NULL, HistoryItemId TEXT);
+            CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
+            CREATE TABLE DavMultipartFiles (Id TEXT PRIMARY KEY, Metadata TEXT NOT NULL);
+            CREATE TABLE QueueItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, SortOrder INTEGER NOT NULL, FileName TEXT NOT NULL, JobName TEXT NOT NULL, NzbFileSize INTEGER NOT NULL, TotalSegmentBytes INTEGER NOT NULL, Category TEXT NOT NULL, Priority INTEGER NOT NULL, PostProcessing INTEGER NOT NULL, PauseUntil TEXT);
+            CREATE TABLE QueueNzbContents (Id TEXT PRIMARY KEY, NzbContents TEXT NOT NULL);
+            CREATE TABLE HistoryItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL, DownloadTimeSeconds INTEGER NOT NULL, FailMessage TEXT, FileName TEXT NOT NULL, JobName TEXT NOT NULL, TotalSegmentBytes INTEGER NOT NULL, DownloadDirId TEXT);
+            CREATE TABLE ConfigItems (ConfigName TEXT PRIMARY KEY, ConfigValue TEXT NOT NULL);
+            CREATE TABLE Accounts (Type INTEGER NOT NULL, Username TEXT NOT NULL, PasswordHash TEXT NOT NULL, RandomSalt TEXT NOT NULL, PRIMARY KEY (Type, Username));
+            CREATE TABLE HealthCheckResults (Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, DavItemId TEXT NOT NULL, Path TEXT NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Message TEXT);
+            CREATE TABLE HealthCheckStats (DateStartInclusive INTEGER NOT NULL, DateEndExclusive INTEGER NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Count INTEGER NOT NULL);
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("FileBlobId", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_MissingNzbBlobIdColumn_IsRejectedBeforeAnyWrite()
+    {
+        // Reviewer's round-3 repro: a fixture missing DavItems.NzbBlobId (distinct from
+        // FileBlobId, checked separately above) previously passed and let --apply commit.
+        Execute("""
+            CREATE TABLE DavItems (
+                Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,
+                Name TEXT NOT NULL, FileSize INTEGER, Type INTEGER NOT NULL, SubType INTEGER NOT NULL,
+                Path TEXT NOT NULL, ReleaseDate INTEGER, LastHealthCheck INTEGER, NextHealthCheck INTEGER,
+                HealthRepairPending INTEGER NOT NULL, FileBlobId TEXT, HistoryItemId TEXT);
+            CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
+            CREATE TABLE DavMultipartFiles (Id TEXT PRIMARY KEY, Metadata TEXT NOT NULL);
+            CREATE TABLE QueueItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, SortOrder INTEGER NOT NULL, FileName TEXT NOT NULL, JobName TEXT NOT NULL, NzbFileSize INTEGER NOT NULL, TotalSegmentBytes INTEGER NOT NULL, Category TEXT NOT NULL, Priority INTEGER NOT NULL, PostProcessing INTEGER NOT NULL, PauseUntil TEXT);
+            CREATE TABLE QueueNzbContents (Id TEXT PRIMARY KEY, NzbContents TEXT NOT NULL);
+            CREATE TABLE HistoryItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL, DownloadTimeSeconds INTEGER NOT NULL, FailMessage TEXT, FileName TEXT NOT NULL, JobName TEXT NOT NULL, TotalSegmentBytes INTEGER NOT NULL, DownloadDirId TEXT);
+            CREATE TABLE ConfigItems (ConfigName TEXT PRIMARY KEY, ConfigValue TEXT NOT NULL);
+            CREATE TABLE Accounts (Type INTEGER NOT NULL, Username TEXT NOT NULL, PasswordHash TEXT NOT NULL, RandomSalt TEXT NOT NULL, PRIMARY KEY (Type, Username));
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 1;
+            CREATE TABLE HealthCheckResults (Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, DavItemId TEXT NOT NULL, Path TEXT NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Message TEXT);
+            CREATE TABLE HealthCheckStats (DateStartInclusive INTEGER NOT NULL, DateEndExclusive INTEGER NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Count INTEGER NOT NULL);
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("NzbBlobId", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_MissingSingleAdminUniqueIndex_IsRejectedBeforeAnyWrite()
+    {
+        // Reviewer's round-3 repro: a fixture missing the IX_Accounts_SingleAdmin unique index
+        // previously passed. Without that index, the tool's multi-admin safety check (which
+        // relies on this constraint actually being enforced by the target DB) silently doesn't
+        // protect anything.
+        Execute("""
+            CREATE TABLE DavItems (
+                Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,
+                Name TEXT NOT NULL, FileSize INTEGER, Type INTEGER NOT NULL, SubType INTEGER NOT NULL,
+                Path TEXT NOT NULL, ReleaseDate INTEGER, LastHealthCheck INTEGER, NextHealthCheck INTEGER,
+                HealthRepairPending INTEGER NOT NULL, FileBlobId TEXT, NzbBlobId TEXT, HistoryItemId TEXT);
+            CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
+            CREATE TABLE DavMultipartFiles (Id TEXT PRIMARY KEY, Metadata TEXT NOT NULL);
+            CREATE TABLE QueueItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, SortOrder INTEGER NOT NULL, FileName TEXT NOT NULL, JobName TEXT NOT NULL, NzbFileSize INTEGER NOT NULL, TotalSegmentBytes INTEGER NOT NULL, Category TEXT NOT NULL, Priority INTEGER NOT NULL, PostProcessing INTEGER NOT NULL, PauseUntil TEXT);
+            CREATE TABLE QueueNzbContents (Id TEXT PRIMARY KEY, NzbContents TEXT NOT NULL);
+            CREATE TABLE HistoryItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL, DownloadTimeSeconds INTEGER NOT NULL, FailMessage TEXT, FileName TEXT NOT NULL, JobName TEXT NOT NULL, TotalSegmentBytes INTEGER NOT NULL, DownloadDirId TEXT);
+            CREATE TABLE ConfigItems (ConfigName TEXT PRIMARY KEY, ConfigValue TEXT NOT NULL);
+            CREATE TABLE Accounts (Type INTEGER NOT NULL, Username TEXT NOT NULL, PasswordHash TEXT NOT NULL, RandomSalt TEXT NOT NULL, PRIMARY KEY (Type, Username));
+            CREATE TABLE HealthCheckResults (Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, DavItemId TEXT NOT NULL, Path TEXT NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Message TEXT);
+            CREATE TABLE HealthCheckStats (DateStartInclusive INTEGER NOT NULL, DateEndExclusive INTEGER NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Count INTEGER NOT NULL);
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexOnWrongColumn_IsRejectedBeforeAnyWrite()
+    {
+        // Round-4 repro: an index named/unique correctly, but indexing the wrong column, must
+        // still be rejected - name and uniqueness alone don't prove it protects the right thing.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Username) WHERE Type = 1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexMissingPartialPredicate_IsRejectedBeforeAnyWrite()
+    {
+        // Right name, right column, right uniqueness, but not a PARTIAL index (no WHERE clause)
+        // - this would make Username collide across WebDav accounts too, not just Admins.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type);
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexWrongPredicate_IsRejectedBeforeAnyWrite()
+    {
+        // Right name/column/uniqueness, but the predicate doesn't actually mean "Type = Admin
+        // (1)" - e.g. it was defined against the wrong enum value.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 2;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexPredicateWithExtraAlwaysFalseCondition_IsRejectedBeforeAnyWrite()
+    {
+        // Round-5 repro: round 4's predicate check used a substring/regex search, which
+        // `Type = 1 AND 0` satisfies (it contains the right substring) while actually indexing
+        // zero rows - a unique index over an empty set enforces nothing.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 1 AND 0;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexPredicateWithExtraAlwaysTrueCondition_IsRejectedBeforeAnyWrite()
+    {
+        // A different extra-condition shape: `OR 1=1` makes the predicate match every row
+        // (equivalent to no WHERE clause at all), not just Admin rows - still contains the
+        // right substring, still must be rejected by an exact-match check.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 1 OR 1=1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexPredicateComparesStringLiteralNotColumn_IsRejectedBeforeAnyWrite()
+    {
+        // WHERE 'Type' = 1 compares the constant string "Type" against 1 - always false, never
+        // touches the actual Type column - so the resulting index is built over zero rows and
+        // stops nothing. 'Type' = 1 is not one of the four allowlisted forms and must be
+        // rejected.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE 'Type' = 1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_SingleAdminIndexDoubleQuotedBracketedIdentifier_IsRejectedBeforeAnyWrite()
+    {
+        // Round-7 repro: SQLite's double-quoted-identifier fallback. "[Type]" doesn't name an
+        // actual column (the real column is Type, not [Type]), so SQLite treats the double-quoted
+        // token as a string literal for backward compatibility - same always-false, zero-row
+        // defect as 'Type' = 1 above, just spelled differently. A transform-then-compare check
+        // that strips quote/bracket characters wherever they appear (not just matched pairs)
+        // turns this into "Type = 1" and wrongly accepts it; the fixed allowlist-based check has
+        // no stripping step to exploit; "\"[Type]\" = 1" is not byte-for-byte any of the four
+        // allowlisted forms and is rejected outright.
+        Execute(BaseSchemaSql() + """
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE "[Type]" = 1;
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    [Theory]
+    [InlineData("Type = 1")]
+    [InlineData("\"Type\" = 1")]
+    [InlineData("[Type] = 1")]
+    [InlineData("`Type` = 1")]
+    [InlineData("  Type   =   1  ")] // whitespace collapse is the only transformation applied
+    public void CheckTargetSchema_SingleAdminIndexAllowlistedPredicateForms_AreAccepted(string predicate)
+    {
+        Execute(BaseSchemaSql() + $"""
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE {predicate};
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.True(result.IsValid, result.ErrorMessage);
+    }
+
+    [Theory]
+    [InlineData("Type=1")] // no whitespace around '=' - not byte-for-byte the allowlisted form
+    [InlineData("type = 1")] // wrong case - the check is case-sensitive
+    [InlineData("TYPE = 1")]
+    [InlineData("Type = 10")] // extra digit - not the same value
+    public void CheckTargetSchema_SingleAdminIndexNonAllowlistedPredicateForms_AreRejected(string predicate)
+    {
+        Execute(BaseSchemaSql() + $"""
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE {predicate};
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("IX_Accounts_SingleAdmin", result.ErrorMessage);
+    }
+
+    private static string BaseSchemaSql() => """
+        CREATE TABLE DavItems (
+            Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,
+            Name TEXT NOT NULL, FileSize INTEGER, Type INTEGER NOT NULL, SubType INTEGER NOT NULL,
+            Path TEXT NOT NULL, ReleaseDate INTEGER, LastHealthCheck INTEGER, NextHealthCheck INTEGER,
+            HealthRepairPending INTEGER NOT NULL, FileBlobId TEXT, NzbBlobId TEXT, HistoryItemId TEXT);
+        CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
+        CREATE TABLE DavMultipartFiles (Id TEXT PRIMARY KEY, Metadata TEXT NOT NULL);
+        CREATE TABLE QueueItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, SortOrder INTEGER NOT NULL, FileName TEXT NOT NULL, JobName TEXT NOT NULL, NzbFileSize INTEGER NOT NULL, TotalSegmentBytes INTEGER NOT NULL, Category TEXT NOT NULL, Priority INTEGER NOT NULL, PostProcessing INTEGER NOT NULL, PauseUntil TEXT);
+        CREATE TABLE QueueNzbContents (Id TEXT PRIMARY KEY, NzbContents TEXT NOT NULL);
+        CREATE TABLE HistoryItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL, DownloadTimeSeconds INTEGER NOT NULL, FailMessage TEXT, FileName TEXT NOT NULL, JobName TEXT NOT NULL, TotalSegmentBytes INTEGER NOT NULL, DownloadDirId TEXT);
+        CREATE TABLE ConfigItems (ConfigName TEXT PRIMARY KEY, ConfigValue TEXT NOT NULL);
+        CREATE TABLE Accounts (Type INTEGER NOT NULL, Username TEXT NOT NULL, PasswordHash TEXT NOT NULL, RandomSalt TEXT NOT NULL, PRIMARY KEY (Type, Username));
+        CREATE TABLE HealthCheckResults (Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, DavItemId TEXT NOT NULL, Path TEXT NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Message TEXT);
+        CREATE TABLE HealthCheckStats (DateStartInclusive INTEGER NOT NULL, DateEndExclusive INTEGER NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Count INTEGER NOT NULL);
+        """;
+
+    [Fact]
+    public void CheckTargetSchema_MissingWholeTable_IsRejectedWithTableNamed()
+    {
+        Execute("CREATE TABLE DavItems (Id TEXT PRIMARY KEY);");
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.False(result.IsValid);
+        Assert.Contains("QueueItems", result.ErrorMessage);
+    }
+
+    [Fact]
+    public void CheckTargetSchema_AllRequiredTablesAndColumnsPresent_IsValid()
+    {
+        Execute("""
+            CREATE TABLE DavItems (
+                Id TEXT PRIMARY KEY, IdPrefix TEXT NOT NULL, CreatedAt TEXT NOT NULL, ParentId TEXT,
+                Name TEXT NOT NULL, FileSize INTEGER, Type INTEGER NOT NULL, SubType INTEGER NOT NULL,
+                Path TEXT NOT NULL, ReleaseDate INTEGER, LastHealthCheck INTEGER, NextHealthCheck INTEGER,
+                HealthRepairPending INTEGER NOT NULL, FileBlobId TEXT, NzbBlobId TEXT, HistoryItemId TEXT);
+            CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
+            CREATE TABLE DavMultipartFiles (Id TEXT PRIMARY KEY, Metadata TEXT NOT NULL);
+            CREATE TABLE QueueItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, SortOrder INTEGER NOT NULL, FileName TEXT NOT NULL, JobName TEXT NOT NULL, NzbFileSize INTEGER NOT NULL, TotalSegmentBytes INTEGER NOT NULL, Category TEXT NOT NULL, Priority INTEGER NOT NULL, PostProcessing INTEGER NOT NULL, PauseUntil TEXT);
+            CREATE TABLE QueueNzbContents (Id TEXT PRIMARY KEY, NzbContents TEXT NOT NULL);
+            CREATE TABLE HistoryItems (Id TEXT PRIMARY KEY, CreatedAt TEXT NOT NULL, Category TEXT NOT NULL, DownloadStatus INTEGER NOT NULL, DownloadTimeSeconds INTEGER NOT NULL, FailMessage TEXT, FileName TEXT NOT NULL, JobName TEXT NOT NULL, TotalSegmentBytes INTEGER NOT NULL, DownloadDirId TEXT);
+            CREATE TABLE ConfigItems (ConfigName TEXT PRIMARY KEY, ConfigValue TEXT NOT NULL);
+            CREATE TABLE Accounts (Type INTEGER NOT NULL, Username TEXT NOT NULL, PasswordHash TEXT NOT NULL, RandomSalt TEXT NOT NULL, PRIMARY KEY (Type, Username));
+            CREATE UNIQUE INDEX IX_Accounts_SingleAdmin ON Accounts (Type) WHERE Type = 1;
+            CREATE TABLE HealthCheckResults (Id TEXT PRIMARY KEY, CreatedAt INTEGER NOT NULL, DavItemId TEXT NOT NULL, Path TEXT NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Message TEXT);
+            CREATE TABLE HealthCheckStats (DateStartInclusive INTEGER NOT NULL, DateEndExclusive INTEGER NOT NULL, Result INTEGER NOT NULL, RepairStatus INTEGER NOT NULL, Count INTEGER NOT NULL);
+            """);
+
+        var result = SchemaGuard.CheckTargetSchema(_conn);
+
+        Assert.True(result.IsValid, result.ErrorMessage);
+    }
+
+    private void Execute(string sql)
+    {
+        using var cmd = _conn.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+}

@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <IsPackable>false</IsPackable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Using Include="Xunit" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.11.1" />
+    <PackageReference Include="xunit" Version="2.9.2" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.4" />
+    <PackageReference Include="ZstdSharp.Port" Version="0.8.7" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../MigrateToInfinidysk/MigrateToInfinidysk.csproj" />
+  </ItemGroup>
+  <ItemGroup>
+    <!--
+      Round 17: JsonArchiveWriterTests.Write_LargePayload_DoesNotBufferTheWholeOutputAsOneString
+      (and StreamingMigratorMemoryTests) sample GC.GetTotalMemory while their own code runs, to
+      prove they don't buffer the whole output/table at once. That sample is polluted by
+      concurrent GC pressure from other test classes running in parallel under xunit's default
+      collection parallelization, causing an intermittent, pre-existing flake unrelated to what
+      those tests actually check. parallelizeTestCollections=false (xunit.runner.json below)
+      makes dotnet test run collections sequentially by default, so this flake doesn't require a
+      manual runsettings flag to avoid; the suite is small/fast enough (well under a second)
+      that this costs nothing worth trading reliability for.
+    -->
+    <None Include="xunit.runner.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+</Project>

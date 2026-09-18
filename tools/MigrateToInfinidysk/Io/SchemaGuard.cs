@@ -1,0 +1,265 @@
+using System.Linq;
+using System.Text.RegularExpressions;
+using Microsoft.Data.Sqlite;
+
+namespace NzbWebDAV.MigrateToInfinidysk.Io;
+
+/// <summary>
+/// Refuses to run against a source older than the shared ancestor migration, or a target that
+/// isn't already fully migrated to infinidysk's current schema. Both checks read the
+/// __EFMigrationsHistory table (EF Core's own bookkeeping - never written to by this tool).
+/// </summary>
+public static class SchemaGuard
+{
+    // Last migration nzbdav2 and infinidysk still shared before their histories diverged.
+    public const string SharedAncestorMigration = "20251113081523_Populate-Usenet-Providers-Config";
+
+    // The mapping rules this tool implements depend specifically on these infinidysk
+    // migrations having already run against the target database.
+    public static readonly IReadOnlyList<string> RequiredTargetMigrations =
+    [
+        "20260129182923_Update-DavItems-Type-And-SubType",
+        "20260731171110_Add-SingleAdmin-UniqueIndex",
+        "20260817160000_Add-QueueItem-SortOrder",
+    ];
+
+    public readonly record struct Result(bool IsValid, string? ErrorMessage)
+    {
+        public static Result Valid() => new(true, null);
+        public static Result Invalid(string message) => new(false, message);
+    }
+
+    public static Result CheckSource(IReadOnlyCollection<string> sourceMigrationIds)
+    {
+        if (!sourceMigrationIds.Contains(SharedAncestorMigration))
+        {
+            return Result.Invalid(
+                $"Source database has not run migration '{SharedAncestorMigration}' (the last migration " +
+                "nzbdav2 and infinidysk shared). This tool only supports migrating from a nzbdav2 database " +
+                "at or after that point - start nzbdav2, let it finish migrating, then re-run this tool.");
+        }
+
+        return Result.Valid();
+    }
+
+    public static Result CheckTarget(IReadOnlyCollection<string> targetMigrationIds)
+    {
+        var missing = RequiredTargetMigrations.Where(m => !targetMigrationIds.Contains(m)).ToList();
+        if (missing.Count > 0)
+        {
+            return Result.Invalid(
+                "Target database is not at infinidysk's fully-migrated schema. Missing migrations: " +
+                string.Join(", ", missing) + ". Start infinidysk once against this config volume and let it " +
+                "finish its own startup migration before running this tool with --apply.");
+        }
+
+        return Result.Valid();
+    }
+
+    // Every column SqliteTargetWriter's INSERT statements actually touch, plus DavItems.FileBlobId
+    // (written by nothing here, but its presence is required proof the target really is on
+    // infinidysk's current schema - see UsenetFileToBlobstoreMigrationService, which is what
+    // lazily converts the legacy rows this tool writes). Checking __EFMigrationsHistory alone
+    // (CheckTarget above) is a cheap pre-check, not authoritative: a hand-built or tampered
+    // fixture/database can have matching migration rows without the columns actually existing.
+    // This is the check that decides whether --apply's INSERTs will actually succeed.
+    private static readonly IReadOnlyDictionary<string, string[]> RequiredTargetColumns = new Dictionary<string, string[]>
+    {
+        ["DavItems"] =
+        [
+            "Id", "IdPrefix", "CreatedAt", "ParentId", "Name", "FileSize", "Type", "SubType", "Path",
+            "ReleaseDate", "LastHealthCheck", "NextHealthCheck", "HealthRepairPending", "FileBlobId", "NzbBlobId", "HistoryItemId",
+        ],
+        ["DavNzbFiles"] = ["Id", "SegmentIds"],
+        ["DavMultipartFiles"] = ["Id", "Metadata"],
+        ["QueueItems"] =
+        [
+            "Id", "CreatedAt", "SortOrder", "FileName", "JobName", "NzbFileSize", "TotalSegmentBytes",
+            "Category", "Priority", "PostProcessing", "PauseUntil",
+        ],
+        ["QueueNzbContents"] = ["Id", "NzbContents"],
+        ["HistoryItems"] =
+        [
+            "Id", "CreatedAt", "Category", "DownloadStatus", "DownloadTimeSeconds", "FailMessage",
+            "FileName", "JobName", "TotalSegmentBytes", "DownloadDirId",
+        ],
+        ["ConfigItems"] = ["ConfigName", "ConfigValue"],
+        ["Accounts"] = ["Type", "Username", "PasswordHash", "RandomSalt"],
+        ["HealthCheckResults"] = ["Id", "CreatedAt", "DavItemId", "Path", "Result", "RepairStatus", "Message"],
+        ["HealthCheckStats"] = ["DateStartInclusive", "DateEndExclusive", "Result", "RepairStatus", "Count"],
+    };
+
+    public static Result CheckTargetSchema(SqliteConnection conn)
+    {
+        var problems = new List<string>();
+
+        foreach (var (table, columns) in RequiredTargetColumns)
+        {
+            var actualColumns = ReadColumnNames(conn, table);
+            if (actualColumns == null)
+            {
+                problems.Add($"table '{table}' is missing entirely");
+                continue;
+            }
+
+            var missingColumns = columns.Where(c => !actualColumns.Contains(c)).ToList();
+            if (missingColumns.Count > 0)
+                problems.Add($"table '{table}' is missing column(s): {string.Join(", ", missingColumns)}");
+        }
+
+        // The multi-admin conflict check (AdminSelector) relies on infinidysk's own
+        // IX_Accounts_SingleAdmin unique filtered index actually being present and enforced by
+        // the target DB - without it, a race or a bug in this tool could write two admin rows
+        // with nothing to stop it. Verify not just that an index by that name exists and is
+        // UNIQUE, but that it indexes the right column and carries the right partial-index
+        // predicate - a same-named unique index on the wrong column, or without the WHERE
+        // Type = 1 filter (so it'd also collide across WebDav accounts), gives no real
+        // protection even though the name/uniqueness check alone would pass it.
+        var indexProblem = ValidateSingleAdminUniqueIndex(conn);
+        if (indexProblem != null)
+            problems.Add(indexProblem);
+
+        if (problems.Count > 0)
+        {
+            return Result.Invalid(
+                "Target database does not have infinidysk's full current schema - refusing to write " +
+                "anything. Problems found:\n  - " + string.Join("\n  - ", problems) +
+                "\nStart infinidysk once against this config volume and let it finish its own startup " +
+                "migration before running this tool with --apply.");
+        }
+
+        return Result.Valid();
+    }
+
+    private const string SingleAdminIndexName = "IX_Accounts_SingleAdmin";
+
+    /// <summary>
+    /// Returns null when a valid IX_Accounts_SingleAdmin index is present (correct name,
+    /// UNIQUE, indexes exactly the Type column, and carries a partial-index predicate that
+    /// means "Type = 1 (Admin)"), or a problem description otherwise.
+    /// </summary>
+    private static string? ValidateSingleAdminUniqueIndex(SqliteConnection conn)
+    {
+        if (!TryGetIndexUniqueness(conn, SingleAdminIndexName, out var isUnique))
+            return $"Accounts table is missing the '{SingleAdminIndexName}' unique index";
+
+        if (!isUnique)
+            return $"Accounts.{SingleAdminIndexName} exists but is not a UNIQUE index";
+
+        var indexedColumns = GetIndexedColumns(conn, SingleAdminIndexName);
+        if (indexedColumns is not ["Type"])
+        {
+            return $"Accounts.{SingleAdminIndexName} exists but indexes column(s) " +
+                   $"[{string.Join(", ", indexedColumns)}] instead of Type";
+        }
+
+        var createSql = GetIndexCreateSql(conn, SingleAdminIndexName);
+        if (createSql == null || !HasAdminOnlyPredicate(createSql))
+        {
+            return $"Accounts.{SingleAdminIndexName} exists on the right column but its partial-index " +
+                   "predicate doesn't restrict it to Type = 1 (Admin) - as defined, it wouldn't stop " +
+                   "multiple admin accounts, or would incorrectly restrict other account types too";
+        }
+
+        return null;
+    }
+
+    // Account.AccountType.Admin = 1 (backend/Database/Models/Account.cs, both projects).
+    //
+    // Rounds 4-6 tried progressively stricter transform-then-compare approaches (substring
+    // search, then exact-match against a normalized form, then a normalization step that itself
+    // had a quoting bug). Each fix closed the specific bypass found, but the class of bug was
+    // "some transformation is applied before comparing, and that transformation itself might be
+    // exploitable" - e.g. SQLite's double-quoted-identifier fallback: `"[Type]"` doesn't name an
+    // actual column, so SQLite treats it as a string literal for backward compatibility, and a
+    // normalization step that strips quote/bracket characters wherever they appear (not just
+    // matched pairs) turns `"[Type]" = 1` into `Type = 1` and wrongly accepts an always-false
+    // predicate.
+    //
+    // Replaced entirely with a fixed, finite allowlist and plain string equality - no
+    // transformation step left to exploit. Only whitespace is collapsed to single spaces (SQLite
+    // itself may insert varying whitespace when echoing the CREATE INDEX text back through
+    // sqlite_master.sql); no characters are ever stripped, and the comparison is case-sensitive,
+    // matching exactly how infinidysk's own Add-SingleAdmin-UniqueIndex migration writes it
+    // (`"Type" = 1`) plus the other syntactically-equivalent ways SQLite accepts writing the same
+    // identifier. Anything not byte-for-byte one of these four (after whitespace collapse) is
+    // rejected, full stop.
+    private static readonly string[] AcceptedAdminOnlyPredicates =
+    [
+        "Type = 1",
+        "\"Type\" = 1",
+        "[Type] = 1",
+        "`Type` = 1",
+    ];
+
+    private static bool HasAdminOnlyPredicate(string createIndexSql)
+    {
+        var whereIndex = createIndexSql.IndexOf("where", StringComparison.OrdinalIgnoreCase);
+        if (whereIndex < 0)
+            return false; // not a partial index at all
+
+        var rawPredicate = createIndexSql[(whereIndex + "where".Length)..];
+        var collapsedWhitespace = Regex.Replace(rawPredicate, @"\s+", " ").Trim();
+        return AcceptedAdminOnlyPredicates.Contains(collapsedWhitespace, StringComparer.Ordinal);
+    }
+
+    private static bool TryGetIndexUniqueness(SqliteConnection conn, string indexName, out bool isUnique)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA index_list(\"Accounts\")";
+        using var reader = cmd.ExecuteReader();
+        var nameOrdinal = -1;
+        var uniqueOrdinal = -1;
+        while (reader.Read())
+        {
+            if (nameOrdinal < 0) nameOrdinal = reader.GetOrdinal("name");
+            if (uniqueOrdinal < 0) uniqueOrdinal = reader.GetOrdinal("unique");
+
+            if (string.Equals(reader.GetString(nameOrdinal), indexName, StringComparison.Ordinal))
+            {
+                isUnique = reader.GetInt64(uniqueOrdinal) != 0;
+                return true;
+            }
+        }
+        isUnique = false;
+        return false;
+    }
+
+    private static IReadOnlyList<string> GetIndexedColumns(SqliteConnection conn, string indexName)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA index_info(" + QuoteIdentifier(indexName) + ")";
+        using var reader = cmd.ExecuteReader();
+        var columns = new List<string>();
+        var nameOrdinal = -1;
+        while (reader.Read())
+        {
+            if (nameOrdinal < 0) nameOrdinal = reader.GetOrdinal("name");
+            columns.Add(reader.GetString(nameOrdinal));
+        }
+        return columns;
+    }
+
+    private static string? GetIndexCreateSql(SqliteConnection conn, string indexName)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = $name";
+        cmd.Parameters.AddWithValue("$name", indexName);
+        return cmd.ExecuteScalar() as string;
+    }
+
+    private static HashSet<string>? ReadColumnNames(SqliteConnection conn, string table)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(" + QuoteIdentifier(table) + ")";
+        using var reader = cmd.ExecuteReader();
+        var columns = new HashSet<string>(StringComparer.Ordinal);
+        while (reader.Read())
+            columns.Add(reader.GetString(reader.GetOrdinal("name")));
+        return columns.Count == 0 ? null : columns;
+    }
+
+    // PRAGMA statements don't accept bound parameters; the table names here come only from our
+    // own fixed RequiredTargetColumns dictionary above, never from user input.
+    private static string QuoteIdentifier(string identifier) => "\"" + identifier.Replace("\"", "\"\"") + "\"";
+}

@@ -28,6 +28,8 @@ nuget
 !DATABASE_OPTIMIZATION.md
 !PLAYBACK_STALL_FIXES.md
 !CLAUDE.md
+!CHANGELOG.md
+!MIGRATING_TO_INFINIDYSK.md
 !docs/upstream-sync-*.md
 !docs/superpowers/specs/*.md
 !docs/superpowers/plans/*.md
