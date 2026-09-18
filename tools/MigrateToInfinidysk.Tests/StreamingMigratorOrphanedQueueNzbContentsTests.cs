@@ -60,16 +60,17 @@ public class StreamingMigratorOrphanedQueueNzbContentsTests : IDisposable
         Assert.Contains(result.Warnings, w =>
             w.Contains(orphanedId.ToString()) && w.Contains("QueueNzbContents") && w.Contains("QueueItems"));
 
-        // The well-formed row landed in the target; the orphaned one did not.
+        // The well-formed row landed in the target; the orphaned one did not. Round 20: rows this
+        // tool writes are now uppercase GUID text, so the lookup param has to match that casing.
         using (var cmd = target.CreateCommand())
         {
             cmd.CommandText = "SELECT COUNT(*) FROM QueueNzbContents WHERE Id = $id";
-            cmd.Parameters.AddWithValue("$id", wellFormedId.ToString());
+            cmd.Parameters.AddWithValue("$id", wellFormedId.ToString().ToUpperInvariant());
             Assert.Equal(1L, cmd.ExecuteScalar());
 
             cmd.Parameters.Clear();
             cmd.CommandText = "SELECT COUNT(*) FROM QueueNzbContents WHERE Id = $id";
-            cmd.Parameters.AddWithValue("$id", orphanedId.ToString());
+            cmd.Parameters.AddWithValue("$id", orphanedId.ToString().ToUpperInvariant());
             Assert.Equal(0L, cmd.ExecuteScalar());
         }
 

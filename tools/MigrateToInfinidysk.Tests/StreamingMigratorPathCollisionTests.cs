@@ -83,11 +83,14 @@ public class StreamingMigratorPathCollisionTests : IDisposable
         AssertRowMissing(target, SourceIdsFolderId);
 
         // The child content that hung off the colliding /content root is not orphaned: it must
-        // land re-parented onto the TARGET's existing content folder Id (requirement 3).
+        // land re-parented onto the TARGET's existing content folder Id (requirement 3). Round
+        // 20: rows this tool writes are now uppercase GUID text, matching infinidysk's own
+        // Normalize-Guid-Text-Casing migration - both the lookup param and the expected value
+        // have to match that casing.
         using var cmd = target.CreateCommand();
         cmd.CommandText = "SELECT ParentId FROM DavItems WHERE Id = $id";
-        cmd.Parameters.AddWithValue("$id", movieId.ToString());
-        Assert.Equal(TargetContentFolderId.ToString(), cmd.ExecuteScalar());
+        cmd.Parameters.AddWithValue("$id", movieId.ToString().ToUpperInvariant());
+        Assert.Equal(TargetContentFolderId.ToString().ToUpperInvariant(), cmd.ExecuteScalar());
 
         // And its multipart payload made it across too (movie.mkv's own Path never collided).
         cmd.CommandText = "SELECT COUNT(*) FROM DavMultipartFiles WHERE Id = $id";
@@ -123,11 +126,12 @@ public class StreamingMigratorPathCollisionTests : IDisposable
         AssertRowMissing(target, sourceUncategorizedId);
 
         // The file that hung off the colliding source folder is re-parented onto the TARGET's
-        // existing row at that path, not dropped.
+        // existing row at that path, not dropped. Round 20: match uppercase GUID casing (see
+        // note in the scaffold-root collision test above).
         using var cmd = target.CreateCommand();
         cmd.CommandText = "SELECT ParentId FROM DavItems WHERE Id = $id";
-        cmd.Parameters.AddWithValue("$id", deepFileId.ToString());
-        Assert.Equal(existingUncategorizedId.ToString(), cmd.ExecuteScalar());
+        cmd.Parameters.AddWithValue("$id", deepFileId.ToString().ToUpperInvariant());
+        Assert.Equal(existingUncategorizedId.ToString().ToUpperInvariant(), cmd.ExecuteScalar());
 
         cmd.CommandText = "SELECT COUNT(*) FROM DavMultipartFiles WHERE Id = $id";
         Assert.Equal(1L, cmd.ExecuteScalar());
@@ -194,7 +198,7 @@ public class StreamingMigratorPathCollisionTests : IDisposable
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT Path FROM DavItems WHERE Id = $id";
-        cmd.Parameters.AddWithValue("$id", id.ToString());
+        cmd.Parameters.AddWithValue("$id", id.ToString().ToUpperInvariant());
         Assert.Equal(expectedPath, cmd.ExecuteScalar());
     }
 
@@ -202,7 +206,7 @@ public class StreamingMigratorPathCollisionTests : IDisposable
     {
         using var cmd = conn.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM DavItems WHERE Id = $id";
-        cmd.Parameters.AddWithValue("$id", id.ToString());
+        cmd.Parameters.AddWithValue("$id", id.ToString().ToUpperInvariant());
         Assert.Equal(0L, cmd.ExecuteScalar());
     }
 
@@ -367,6 +371,12 @@ public class StreamingMigratorPathCollisionTests : IDisposable
         return conn;
     }
 
+    /// <summary>
+    /// Round 20: real infinidysk-seeded target rows are written by EF, which binds Guid-typed
+    /// parameters uppercase - this fixture mimics that (rather than a plain lowercase
+    /// Guid.ToString()) so these tests exercise the actual casing the target DB carries in
+    /// production.
+    /// </summary>
     private static void InsertTargetDavItem(SqliteConnection conn, Guid id, Guid? parentId, string path, int type, int subType)
     {
         using var cmd = conn.CreateCommand();
@@ -374,9 +384,9 @@ public class StreamingMigratorPathCollisionTests : IDisposable
             INSERT INTO DavItems (Id, IdPrefix, CreatedAt, ParentId, Name, Type, SubType, Path)
             VALUES ($id, $prefix, '2026-01-01 00:00:00.000', $parentId, $name, $type, $subType, $path)
             """;
-        cmd.Parameters.AddWithValue("$id", id.ToString());
+        cmd.Parameters.AddWithValue("$id", id.ToString().ToUpperInvariant());
         cmd.Parameters.AddWithValue("$prefix", id.ToString()[..5]);
-        cmd.Parameters.AddWithValue("$parentId", (object?)parentId?.ToString() ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("$parentId", (object?)(parentId?.ToString().ToUpperInvariant()) ?? DBNull.Value);
         cmd.Parameters.AddWithValue("$name", path.Split('/').Last());
         cmd.Parameters.AddWithValue("$type", type);
         cmd.Parameters.AddWithValue("$subType", subType);

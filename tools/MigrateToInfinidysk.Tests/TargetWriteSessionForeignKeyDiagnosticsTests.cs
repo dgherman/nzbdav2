@@ -45,9 +45,10 @@ public class TargetWriteSessionForeignKeyDiagnosticsTests : IDisposable
 
         // The whole point of round 18: names the actual table, the actual row (resolved to its
         // real Id, not just an opaque internal rowid), and the table it fails to reference -
-        // not just "FOREIGN KEY constraint failed" with nothing to go on.
+        // not just "FOREIGN KEY constraint failed" with nothing to go on. Round 20: the resolved
+        // Id is read back from the target row, which InsertDavNzbFile now writes uppercase.
         Assert.Contains("DavNzbFiles", thrown.Message);
-        Assert.Contains(danglingId.ToString(), thrown.Message);
+        Assert.Contains(danglingId.ToString().ToUpperInvariant(), thrown.Message);
         Assert.Contains("DavItems", thrown.Message);
 
         // Diagnosing must never itself write partial data or change the existing safe-rollback

@@ -90,25 +90,28 @@ public class EndToEndMigrationTests : IDisposable
         AssertScalar(target, "SELECT Username FROM Accounts WHERE Type = 1", "bob");
         AssertScalar(target, "SELECT COUNT(*) FROM Accounts", 2L);
 
-        AssertScalar(target, $"SELECT Type FROM DavItems WHERE Id = '{movieItemId}'", 2L);
-        AssertScalar(target, $"SELECT SubType FROM DavItems WHERE Id = '{movieItemId}'", 201L);
-        AssertScalar(target, $"SELECT SubType FROM DavItems WHERE Id = '{contentFolderId}'", 104L);
+        // Round 20: SqliteTargetWriter.Apply now writes uppercase GUID text (matching
+        // infinidysk's own Normalize-Guid-Text-Casing migration and EF's uppercase parameter
+        // binding), so these literal-Id lookups have to match that casing.
+        AssertScalar(target, $"SELECT Type FROM DavItems WHERE Id = '{U(movieItemId)}'", 2L);
+        AssertScalar(target, $"SELECT SubType FROM DavItems WHERE Id = '{U(movieItemId)}'", 201L);
+        AssertScalar(target, $"SELECT SubType FROM DavItems WHERE Id = '{U(contentFolderId)}'", 104L);
 
-        AssertScalar(target, $"SELECT COUNT(*) FROM DavNzbFiles WHERE Id = '{movieItemId}'", 1L);
-        AssertScalar(target, $"SELECT COUNT(*) FROM DavMultipartFiles WHERE Id = '{obfuscatedItemId}'", 0L);
+        AssertScalar(target, $"SELECT COUNT(*) FROM DavNzbFiles WHERE Id = '{U(movieItemId)}'", 1L);
+        AssertScalar(target, $"SELECT COUNT(*) FROM DavMultipartFiles WHERE Id = '{U(obfuscatedItemId)}'", 0L);
         // The obfuscated file's DavItems row is skipped too - it must not appear in the target
         // library with no backing metadata behind it.
-        AssertScalar(target, $"SELECT COUNT(*) FROM DavItems WHERE Id = '{obfuscatedItemId}'", 0L);
+        AssertScalar(target, $"SELECT COUNT(*) FROM DavItems WHERE Id = '{U(obfuscatedItemId)}'", 0L);
 
-        AssertScalar(target, $"SELECT SortOrder FROM QueueItems WHERE Id = '{queueIdA}'", 1024L);
-        AssertScalar(target, $"SELECT SortOrder FROM QueueItems WHERE Id = '{queueIdB}'", 2048L);
+        AssertScalar(target, $"SELECT SortOrder FROM QueueItems WHERE Id = '{U(queueIdA)}'", 1024L);
+        AssertScalar(target, $"SELECT SortOrder FROM QueueItems WHERE Id = '{U(queueIdB)}'", 2048L);
 
         // CreatedAt must be stored as a real date, not a raw Unix-seconds integer - infinidysk
         // has no HasConversion for this column, so EF's Sqlite provider expects DateTime-shaped
         // TEXT. Reading it back with GetDateTime (not GetInt64/GetValue) is the point of this
         // assertion: it would throw or silently misparse if the column held a bare integer.
-        AssertDateTime(target, $"SELECT CreatedAt FROM QueueItems WHERE Id = '{queueIdA}'", DateTimeOffset.FromUnixTimeSeconds(1700000000).UtcDateTime);
-        AssertDateTime(target, $"SELECT CreatedAt FROM DavItems WHERE Id = '{movieItemId}'", new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+        AssertDateTime(target, $"SELECT CreatedAt FROM QueueItems WHERE Id = '{U(queueIdA)}'", DateTimeOffset.FromUnixTimeSeconds(1700000000).UtcDateTime);
+        AssertDateTime(target, $"SELECT CreatedAt FROM DavItems WHERE Id = '{U(movieItemId)}'", new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
 
         AssertScalar(target, "SELECT COUNT(*) FROM ConfigItems WHERE ConfigName = 'api.key'", 1L);
         AssertScalar(target, "SELECT COUNT(*) FROM ConfigItems WHERE ConfigName = 'usenet.host'", 0L);
@@ -136,6 +139,8 @@ public class EndToEndMigrationTests : IDisposable
         Assert.IsType<InvalidOperationException>(ex);
         AssertScalar(target, "SELECT COUNT(*) FROM Accounts", 0L);
     }
+
+    private static string U(Guid id) => id.ToString().ToUpperInvariant();
 
     private static void AssertScalar(SqliteConnection conn, string sql, object expected)
     {

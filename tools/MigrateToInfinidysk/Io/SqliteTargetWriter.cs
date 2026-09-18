@@ -10,6 +10,23 @@ namespace NzbWebDAV.MigrateToInfinidysk.Io;
 /// </summary>
 public static class SqliteTargetWriter
 {
+    /// <summary>
+    /// Round 20: infinidysk's own EF migration 20260820160000_Normalize-Guid-Text-Casing
+    /// uppercases every GUID-shaped TEXT column it knows about (see that migration's
+    /// GuidTextCasingSql.GuidColumns - the authoritative 18-table/27-column list, read from
+    /// infinidysk's source, not guessed) and is already recorded as applied in a freshly-created
+    /// target schema BEFORE this tool ever writes a row. Microsoft.Data.Sqlite binds Guid-typed
+    /// EF parameters as uppercase hex, and SQLite TEXT comparisons are case-sensitive, so a target
+    /// row written with the source database's original (frequently lowercase) casing is invisible
+    /// to every later EF Guid-typed lookup - confirmed live: 1,313/1,313 DavMultipartFiles.Id rows
+    /// lowercase, breaking both the blobstore migration background job (infinite per-row retry
+    /// loop) and legacy-playback fallback (DavDatabaseClient.cs:208) for every affected row.
+    /// Guid.ToString() (format "D") already produces exactly the hyphenated lowercase-hex text
+    /// infinidysk's own upper(Id) SQL produces the uppercase of, so this is a pure casing
+    /// normalization - it does not change which row an Id/FK value refers to.
+    /// </summary>
+    private static string G(Guid id) => id.ToString().ToUpperInvariant();
+
     public static void Apply(SqliteConnection conn, MigrationResult result)
     {
         if (!result.Success)
@@ -29,26 +46,26 @@ public static class SqliteTargetWriter
                 ON CONFLICT(Id) DO UPDATE SET
                     Type = excluded.Type, SubType = excluded.SubType
                 """,
-                ("$Id", item.Id.ToString()), ("$IdPrefix", item.IdPrefix), ("$CreatedAt", ToSqliteDateTime(item.CreatedAtUnixSeconds)),
-                ("$ParentId", (object?)item.ParentId?.ToString() ?? DBNull.Value), ("$Name", item.Name),
+                ("$Id", G(item.Id)), ("$IdPrefix", item.IdPrefix), ("$CreatedAt", ToSqliteDateTime(item.CreatedAtUnixSeconds)),
+                ("$ParentId", (object?)(item.ParentId.HasValue ? G(item.ParentId.Value) : null) ?? DBNull.Value), ("$Name", item.Name),
                 ("$FileSize", (object?)item.FileSize ?? DBNull.Value), ("$Type", item.Type), ("$SubType", item.SubType),
                 ("$Path", item.Path), ("$ReleaseDate", (object?)item.ReleaseDateUnixSeconds ?? DBNull.Value),
                 ("$LastHealthCheck", (object?)item.LastHealthCheckUnixSeconds ?? DBNull.Value),
                 ("$NextHealthCheck", (object?)item.NextHealthCheckUnixSeconds ?? DBNull.Value),
                 ("$HealthRepairPending", item.HealthRepairPending ? 1 : 0),
-                ("$HistoryItemId", (object?)item.HistoryItemId?.ToString() ?? DBNull.Value));
+                ("$HistoryItemId", (object?)(item.HistoryItemId.HasValue ? G(item.HistoryItemId.Value) : null) ?? DBNull.Value));
         }
 
         foreach (var f in result.DavNzbFiles)
         {
             Execute(conn, tx, "INSERT INTO DavNzbFiles (Id, SegmentIds) VALUES ($Id, $SegmentIds)",
-                ("$Id", f.Id.ToString()), ("$SegmentIds", f.SegmentIdsJson));
+                ("$Id", G(f.Id)), ("$SegmentIds", f.SegmentIdsJson));
         }
 
         foreach (var f in result.DavMultipartFiles)
         {
             Execute(conn, tx, "INSERT INTO DavMultipartFiles (Id, Metadata) VALUES ($Id, $Metadata)",
-                ("$Id", f.Id.ToString()), ("$Metadata", f.MetadataJson));
+                ("$Id", G(f.Id)), ("$Metadata", f.MetadataJson));
         }
 
         foreach (var q in result.QueueItems)
@@ -61,7 +78,7 @@ public static class SqliteTargetWriter
                     ($Id, $CreatedAt, $SortOrder, $FileName, $JobName, $NzbFileSize, $TotalSegmentBytes,
                      $Category, $Priority, $PostProcessing, $PauseUntil)
                 """,
-                ("$Id", q.Id.ToString()), ("$CreatedAt", ToSqliteDateTime(q.CreatedAtUnixSeconds)), ("$SortOrder", q.SortOrder),
+                ("$Id", G(q.Id)), ("$CreatedAt", ToSqliteDateTime(q.CreatedAtUnixSeconds)), ("$SortOrder", q.SortOrder),
                 ("$FileName", q.FileName), ("$JobName", q.JobName), ("$NzbFileSize", q.NzbFileSize),
                 ("$TotalSegmentBytes", q.TotalSegmentBytes), ("$Category", q.Category), ("$Priority", q.Priority),
                 ("$PostProcessing", q.PostProcessing),
@@ -71,7 +88,7 @@ public static class SqliteTargetWriter
         foreach (var q in result.QueueNzbContents)
         {
             Execute(conn, tx, "INSERT INTO QueueNzbContents (Id, NzbContents) VALUES ($Id, $NzbContents)",
-                ("$Id", q.Id.ToString()), ("$NzbContents", q.NzbContents));
+                ("$Id", G(q.Id)), ("$NzbContents", q.NzbContents));
         }
 
         foreach (var h in result.HistoryItems)
@@ -84,11 +101,11 @@ public static class SqliteTargetWriter
                     ($Id, $CreatedAt, $Category, $DownloadStatus, $DownloadTimeSeconds, $FailMessage,
                      $FileName, $JobName, $TotalSegmentBytes, $DownloadDirId)
                 """,
-                ("$Id", h.Id.ToString()), ("$CreatedAt", ToSqliteDateTime(h.CreatedAtUnixSeconds)), ("$Category", h.Category),
+                ("$Id", G(h.Id)), ("$CreatedAt", ToSqliteDateTime(h.CreatedAtUnixSeconds)), ("$Category", h.Category),
                 ("$DownloadStatus", h.DownloadStatusValue), ("$DownloadTimeSeconds", h.DownloadTimeSeconds),
                 ("$FailMessage", (object?)h.FailMessage ?? DBNull.Value), ("$FileName", h.FileName),
                 ("$JobName", h.JobName), ("$TotalSegmentBytes", h.TotalSegmentBytes),
-                ("$DownloadDirId", (object?)h.DownloadDirId?.ToString() ?? DBNull.Value));
+                ("$DownloadDirId", (object?)(h.DownloadDirId.HasValue ? G(h.DownloadDirId.Value) : null) ?? DBNull.Value));
         }
 
         foreach (var c in result.ConfigItems)
@@ -115,7 +132,7 @@ public static class SqliteTargetWriter
                 INSERT INTO HealthCheckResults (Id, CreatedAt, DavItemId, Path, Result, RepairStatus, Message)
                 VALUES ($Id, $CreatedAt, $DavItemId, $Path, $Result, $RepairStatus, $Message)
                 """,
-                ("$Id", h.Id.ToString()), ("$CreatedAt", h.CreatedAtUnixSeconds), ("$DavItemId", h.DavItemId.ToString()),
+                ("$Id", G(h.Id)), ("$CreatedAt", h.CreatedAtUnixSeconds), ("$DavItemId", G(h.DavItemId)),
                 ("$Path", h.Path), ("$Result", h.Result), ("$RepairStatus", h.RepairStatus),
                 ("$Message", (object?)h.Message ?? DBNull.Value));
         }
@@ -350,10 +367,10 @@ public static class SqliteTargetWriter
                 ON CONFLICT(Id) DO UPDATE SET
                     Type = excluded.Type, SubType = excluded.SubType
                 """);
-            SetParam(cmd, "$Id", item.Id.ToString());
+            SetParam(cmd, "$Id", G(item.Id));
             SetParam(cmd, "$IdPrefix", item.IdPrefix);
             SetParam(cmd, "$CreatedAt", ToSqliteDateTime(item.CreatedAtUnixSeconds));
-            SetParam(cmd, "$ParentId", (object?)item.ParentId?.ToString() ?? DBNull.Value);
+            SetParam(cmd, "$ParentId", (object?)(item.ParentId.HasValue ? G(item.ParentId.Value) : null) ?? DBNull.Value);
             SetParam(cmd, "$Name", item.Name);
             SetParam(cmd, "$FileSize", (object?)item.FileSize ?? DBNull.Value);
             SetParam(cmd, "$Type", item.Type);
@@ -363,14 +380,14 @@ public static class SqliteTargetWriter
             SetParam(cmd, "$LastHealthCheck", (object?)item.LastHealthCheckUnixSeconds ?? DBNull.Value);
             SetParam(cmd, "$NextHealthCheck", (object?)item.NextHealthCheckUnixSeconds ?? DBNull.Value);
             SetParam(cmd, "$HealthRepairPending", item.HealthRepairPending ? 1 : 0);
-            SetParam(cmd, "$HistoryItemId", (object?)item.HistoryItemId?.ToString() ?? DBNull.Value);
+            SetParam(cmd, "$HistoryItemId", (object?)(item.HistoryItemId.HasValue ? G(item.HistoryItemId.Value) : null) ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
 
         public void InsertDavNzbFile(TargetDavNzbFile f)
         {
             var cmd = GetCommand("DavNzbFile", "INSERT INTO DavNzbFiles (Id, SegmentIds) VALUES ($Id, $SegmentIds)");
-            SetParam(cmd, "$Id", f.Id.ToString());
+            SetParam(cmd, "$Id", G(f.Id));
             SetParam(cmd, "$SegmentIds", f.SegmentIdsJson);
             cmd.ExecuteNonQuery();
         }
@@ -378,7 +395,7 @@ public static class SqliteTargetWriter
         public void InsertDavMultipartFile(TargetDavMultipartFile f)
         {
             var cmd = GetCommand("DavMultipartFile", "INSERT INTO DavMultipartFiles (Id, Metadata) VALUES ($Id, $Metadata)");
-            SetParam(cmd, "$Id", f.Id.ToString());
+            SetParam(cmd, "$Id", G(f.Id));
             SetParam(cmd, "$Metadata", f.MetadataJson);
             cmd.ExecuteNonQuery();
         }
@@ -393,7 +410,7 @@ public static class SqliteTargetWriter
                     ($Id, $CreatedAt, $SortOrder, $FileName, $JobName, $NzbFileSize, $TotalSegmentBytes,
                      $Category, $Priority, $PostProcessing, $PauseUntil)
                 """);
-            SetParam(cmd, "$Id", q.Id.ToString());
+            SetParam(cmd, "$Id", G(q.Id));
             SetParam(cmd, "$CreatedAt", ToSqliteDateTime(q.CreatedAtUnixSeconds));
             SetParam(cmd, "$SortOrder", q.SortOrder);
             SetParam(cmd, "$FileName", q.FileName);
@@ -410,7 +427,7 @@ public static class SqliteTargetWriter
         public void InsertQueueNzbContents(TargetQueueNzbContents q)
         {
             var cmd = GetCommand("QueueNzbContents", "INSERT INTO QueueNzbContents (Id, NzbContents) VALUES ($Id, $NzbContents)");
-            SetParam(cmd, "$Id", q.Id.ToString());
+            SetParam(cmd, "$Id", G(q.Id));
             SetParam(cmd, "$NzbContents", q.NzbContents);
             cmd.ExecuteNonQuery();
         }
@@ -425,7 +442,7 @@ public static class SqliteTargetWriter
                     ($Id, $CreatedAt, $Category, $DownloadStatus, $DownloadTimeSeconds, $FailMessage,
                      $FileName, $JobName, $TotalSegmentBytes, $DownloadDirId)
                 """);
-            SetParam(cmd, "$Id", h.Id.ToString());
+            SetParam(cmd, "$Id", G(h.Id));
             SetParam(cmd, "$CreatedAt", ToSqliteDateTime(h.CreatedAtUnixSeconds));
             SetParam(cmd, "$Category", h.Category);
             SetParam(cmd, "$DownloadStatus", h.DownloadStatusValue);
@@ -434,7 +451,7 @@ public static class SqliteTargetWriter
             SetParam(cmd, "$FileName", h.FileName);
             SetParam(cmd, "$JobName", h.JobName);
             SetParam(cmd, "$TotalSegmentBytes", h.TotalSegmentBytes);
-            SetParam(cmd, "$DownloadDirId", (object?)h.DownloadDirId?.ToString() ?? DBNull.Value);
+            SetParam(cmd, "$DownloadDirId", (object?)(h.DownloadDirId.HasValue ? G(h.DownloadDirId.Value) : null) ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
 
@@ -468,9 +485,9 @@ public static class SqliteTargetWriter
                 INSERT INTO HealthCheckResults (Id, CreatedAt, DavItemId, Path, Result, RepairStatus, Message)
                 VALUES ($Id, $CreatedAt, $DavItemId, $Path, $Result, $RepairStatus, $Message)
                 """);
-            SetParam(cmd, "$Id", h.Id.ToString());
+            SetParam(cmd, "$Id", G(h.Id));
             SetParam(cmd, "$CreatedAt", h.CreatedAtUnixSeconds);
-            SetParam(cmd, "$DavItemId", h.DavItemId.ToString());
+            SetParam(cmd, "$DavItemId", G(h.DavItemId));
             SetParam(cmd, "$Path", h.Path);
             SetParam(cmd, "$Result", h.Result);
             SetParam(cmd, "$RepairStatus", h.RepairStatus);

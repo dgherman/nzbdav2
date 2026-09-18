@@ -53,9 +53,12 @@ public class StreamingMigratorForeignKeyOrderingTests : IDisposable
         Assert.Equal(1, result.Counts["DavItems"].Copied);
         Assert.Equal(1, result.Counts["DavMultipartFiles"].Copied); // the NZB-with-fallbacks wrap path
 
+        // Round 20: target rows are now written with uppercase GUID text (matching infinidysk's
+        // own Normalize-Guid-Text-Casing migration and EF's uppercase parameter binding), so the
+        // lookup here has to match that casing too.
         using var cmd = target.CreateCommand();
         cmd.CommandText = "SELECT COUNT(*) FROM DavItems WHERE Id = $id";
-        cmd.Parameters.AddWithValue("$id", nzbId.ToString());
+        cmd.Parameters.AddWithValue("$id", nzbId.ToString().ToUpperInvariant());
         Assert.Equal(1L, cmd.ExecuteScalar());
 
         cmd.CommandText = "SELECT COUNT(*) FROM DavMultipartFiles WHERE Id = $id";
@@ -92,9 +95,10 @@ public class StreamingMigratorForeignKeyOrderingTests : IDisposable
 
         // Not just "some exception" - specifically names the offending table/row and the
         // referenced table, so this test fails (rather than passing vacuously) if the
-        // diagnostic ever regresses back to a bare, unhelpful message.
+        // diagnostic ever regresses back to a bare, unhelpful message. Round 20: the row's Id is
+        // resolved from the target row itself, which is now written uppercase.
         Assert.Contains("DavNzbFiles", thrown.Message);
-        Assert.Contains(danglingNzbId.ToString(), thrown.Message);
+        Assert.Contains(danglingNzbId.ToString().ToUpperInvariant(), thrown.Message);
         Assert.Contains("DavItems", thrown.Message);
 
         // Rolled back: nothing from this run persisted.

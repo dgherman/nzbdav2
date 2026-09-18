@@ -13,6 +13,7 @@ public static class Program
         string? targetConfigPath = null;
         string? adminUsername = null;
         string? archivePath = null;
+        string? repairGuidCasingDbPath = null;
         var apply = false;
 
         for (var i = 0; i < args.Length; i++)
@@ -25,17 +26,27 @@ public static class Program
                 case "--archive-path": archivePath = args[++i]; break;
                 case "--apply": apply = true; break;
                 case "--dry-run": apply = false; break;
+                case "--repair-guid-casing": repairGuidCasingDbPath = args[++i]; break;
                 default:
                     Console.Error.WriteLine($"Unknown argument: {args[i]}");
                     return 2;
             }
         }
 
+        // Round 20: separate, standalone repair mode for a target db.sqlite this tool already
+        // wrote GUID-shaped TEXT columns to with the source database's original (frequently
+        // lowercase) casing, before PART 1's fix below existed. Deliberately does not touch
+        // source/target config paths, admin selection, or the archive - it only rewrites casing
+        // in place on the one database file given, and exits without running any migration.
+        if (repairGuidCasingDbPath != null)
+            return RunGuidCasingRepair(repairGuidCasingDbPath);
+
         if (sourceConfigPath == null || targetConfigPath == null)
         {
             Console.Error.WriteLine(
                 "Usage: MigrateToInfinidysk --source <nzbdav2 CONFIG_PATH> --target <infinidysk CONFIG_PATH> " +
                 "[--admin-username <name>] [--archive-path <file.json>] [--apply]\n" +
+                "       MigrateToInfinidysk --repair-guid-casing <path to infinidysk db.sqlite>\n" +
                 "Defaults to --dry-run (reports only, writes nothing) until --apply is passed.");
             return 2;
         }
@@ -138,6 +149,35 @@ public static class Program
         }
 
         Console.WriteLine($"\nApplied. Archive written to: {archivePath}");
+        return 0;
+    }
+
+    private static int RunGuidCasingRepair(string targetDbPath)
+    {
+        if (!File.Exists(targetDbPath))
+        {
+            Console.Error.WriteLine($"Target database not found: {targetDbPath}");
+            return 1;
+        }
+
+        using var conn = new SqliteConnection(new SqliteConnectionStringBuilder
+        {
+            DataSource = targetDbPath,
+            Mode = SqliteOpenMode.ReadWrite,
+        }.ToString());
+        conn.Open();
+
+        var report = GuidCasingRepair.Run(conn);
+
+        if (report.Changes.Count == 0)
+        {
+            Console.WriteLine("No mixed-case GUID text found - nothing to repair (safe to re-run any time).");
+            return 0;
+        }
+
+        Console.WriteLine($"Repaired {report.TotalRowsChanged} row(s) across {report.Changes.Count} table/column pair(s):");
+        foreach (var change in report.Changes)
+            Console.WriteLine($"  - {change.Table}.{change.Column}: {change.RowsChanged} row(s) uppercased");
         return 0;
     }
 
