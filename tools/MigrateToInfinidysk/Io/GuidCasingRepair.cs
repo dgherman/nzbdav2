@@ -62,10 +62,33 @@ public static class GuidCasingRepair
     /// trusting that by construction). One transaction for the whole repair - a failure partway
     /// through leaves the target completely untouched, same atomicity guarantee as every other
     /// write path in this tool.
+    /// <para>
+    /// Round 21 (blocking review finding on round 20): a real target schema declares FK
+    /// constraints between these very tables (DavMultipartFiles.Id/DavNzbFiles.Id/DavRarFiles.Id
+    /// -> DavItems.Id - the same FKs TargetWriteSession's constructor already documents), and
+    /// Microsoft.Data.Sqlite enables `PRAGMA foreign_keys` ON by default. Uppercasing DavItems.Id
+    /// before its still-lowercase child rows are uppercased in the same transaction would fail
+    /// per-statement with "FOREIGN KEY constraint failed" - reproduced directly by the reviewer.
+    /// `PRAGMA defer_foreign_keys = ON`, set fresh on this transaction immediately below (same
+    /// pattern, same reasoning, as TargetWriteSession's constructor), defers FK checks from
+    /// per-statement to COMMIT for the CURRENT transaction only - SQLite turns it back off
+    /// automatically at the end of every transaction, committed or rolled back, so it never
+    /// leaks onto any later use of this same connection. This lets every table in GuidColumns be
+    /// uppercased in any order within this one transaction, with the FK graph only checked once,
+    /// at Commit() below.
+    /// </para>
     /// </summary>
     public static RepairReport Run(SqliteConnection conn)
     {
         using var tx = conn.BeginTransaction();
+
+        using (var pragmaCmd = conn.CreateCommand())
+        {
+            pragmaCmd.Transaction = tx;
+            pragmaCmd.CommandText = "PRAGMA defer_foreign_keys = ON";
+            pragmaCmd.ExecuteNonQuery();
+        }
+
         var changes = new List<ColumnRepair>();
 
         foreach (var (table, columns) in GuidColumns)

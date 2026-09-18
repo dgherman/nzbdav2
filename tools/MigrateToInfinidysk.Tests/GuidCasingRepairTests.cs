@@ -10,9 +10,12 @@ namespace NzbWebDAV.MigrateToInfinidysk.Tests;
 ///
 /// Seeds a target-shaped DB with mixed-case GUIDs (lowercase Ids on the rows this tool itself
 /// wrote, uppercase Id on a row simulating one infinidysk's own EF layer already wrote correctly)
-/// spread across several of the authoritative table/column list's tables, including one FK
-/// relationship (DavNzbFiles.Id -> DavItems.Id) so referential integrity across the case change
-/// can be checked, not just per-column casing.
+/// spread across several of the authoritative table/column list's tables, including real FK
+/// constraints (DavNzbFiles.Id -> DavItems.Id, and a self-referential DavItems.ParentId ->
+/// DavItems.Id) with `PRAGMA foreign_keys = ON`, so referential integrity across the case change
+/// is actually enforced by SQLite, not just checked with an ordinary (vacuous) join - round 21
+/// fixed this fixture after review caught that the original, FK-less version would have passed
+/// even against round 20's FK-unsafe repair.
 /// </summary>
 public class GuidCasingRepairTests : IDisposable
 {
@@ -174,14 +177,31 @@ public class GuidCasingRepairTests : IDisposable
         Assert.Equal(expected, cmd.ExecuteScalar());
     }
 
+    /// <summary>
+    /// Round 21 (blocking review finding on round 20): the original version of this fixture
+    /// declared NO foreign keys at all, so its "referential integrity" assertions were vacuous
+    /// ordinary joins - they'd pass even against a repair that violates real FK constraints,
+    /// which is exactly what shipped in round 20 and had to be caught by review instead of by
+    /// this test. This now declares the same FK shape the real target schema does (and
+    /// TargetWriteSessionForeignKeyDiagnosticsTests.cs's fixture already models):
+    /// DavNzbFiles.Id -> DavItems.Id, plus a self-referential DavItems.ParentId -> DavItems.Id
+    /// (matching the real schema's Id/ParentId relationship), with `PRAGMA foreign_keys = ON`
+    /// explicit rather than relying on Microsoft.Data.Sqlite's default.
+    /// </summary>
     private SqliteConnection BuildFixture()
     {
         var conn = new SqliteConnection($"Data Source={_dbPath};Mode=ReadWriteCreate");
         conn.Open();
         using var cmd = conn.CreateCommand();
         cmd.CommandText = """
-            CREATE TABLE DavItems (Id TEXT PRIMARY KEY, ParentId TEXT, Path TEXT NOT NULL DEFAULT '');
-            CREATE TABLE DavNzbFiles (Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL);
+            PRAGMA foreign_keys = ON;
+
+            CREATE TABLE DavItems (
+                Id TEXT PRIMARY KEY, ParentId TEXT, Path TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY (ParentId) REFERENCES DavItems (Id));
+            CREATE TABLE DavNzbFiles (
+                Id TEXT PRIMARY KEY, SegmentIds TEXT NOT NULL,
+                FOREIGN KEY (Id) REFERENCES DavItems (Id) ON DELETE CASCADE);
             CREATE TABLE QueueItems (Id TEXT PRIMARY KEY, FileName TEXT NOT NULL);
             """;
         cmd.ExecuteNonQuery();
