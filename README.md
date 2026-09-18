@@ -1,3 +1,9 @@
+> [!IMPORTANT]
+> **This is the final release of nzbdav2. The project is no longer maintained.**
+> Please migrate to [infinidysk](https://github.com/infinidysk/infinidysk), its actively
+> maintained successor. See [`MIGRATING_TO_INFINIDYSK.md`](MIGRATING_TO_INFINIDYSK.md) in this
+> repo for the migration tool and full runbook.
+
 # nzbdav2
 
 nzbdav2 is a WebDAV server that allows you to mount and stream NZB content as a virtual file system without downloading. It integrates with Sonarr and Radarr via a SABnzbd-compatible API and enables streaming directly from Usenet providers through Plex or Jellyfin — using no local storage.
