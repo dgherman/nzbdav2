@@ -116,6 +116,46 @@ then.
    to infinidysk's `db.sqlite` by default, override with `--archive-path <in-container-path>`)
    containing everything that has no infinidysk equivalent - see "What is NOT preserved" below.
 
+   > **If you already ran `--apply` with a tool version older than this repair (before the GUID
+   > casing fix): repair your existing target before starting infinidysk.** A bug in earlier
+   > versions of this tool wrote GUID-shaped columns (`DavItems.Id`, `DavNzbFiles.Id`,
+   > `DavMultipartFiles.Id`, and others) using nzbdav2's original casing instead of the uppercase
+   > form infinidysk's own database expects. You'll know you're affected if infinidysk's logs
+   > repeat an error like:
+   > ```
+   > Error migrating usenet-file to blob-store: DavItem with id <guid> not found
+   > ```
+   > on the same row(s) over and over, and/or playback of files migrated from nzbdav2 (not
+   > freshly downloaded ones) fails. If you don't see this, skip this box - it doesn't apply to
+   > you.
+   >
+   > To fix it:
+   > 1. **Stop infinidysk first** - repair writes directly to the live `db.sqlite` file, and
+   >    infinidysk must not have it open while that happens.
+   >    ```bash
+   >    docker compose stop infinidysk   # or `docker stop infinidysk`, however you run it
+   >    ```
+   > 2. **Run the tool in repair mode.** This is a separate mode from the migration itself: the
+   >    database file path is a plain argument straight after the flag, not paired with
+   >    `--source`/`--target`, and any `--apply`/`--dry-run` you also pass is ignored - repair
+   >    mode always writes (nothing else runs alongside it).
+   >    ```bash
+   >    docker run --rm \
+   >      -v /path/to/infinidysk-config:/target \
+   >      ghcr.io/dgherman/nzbdav2-migrate-infinidysk:latest \
+   >      --repair-guid-casing /target/db.sqlite
+   >    ```
+   >    It prints exactly what it changed (table, column, row count) before exiting. It also runs
+   >    the same pre-commit foreign-key check the rest of this tool uses, so a genuine, unrelated
+   >    dangling reference in your target database surfaces as a clear "table X row Y references
+   >    missing parent Z" message instead of a bare database error.
+   > 3. **Safe to re-run.** Repair only ever rewrites a value that isn't already uppercase to its
+   >    uppercase form - rows already correct are left untouched and not reported as changed - so
+   >    running it again (or running it on a target that was never affected in the first place) is
+   >    a no-op. Run it as many times as you like.
+   > 4. **Start infinidysk again** once repair finishes, then continue with the verification steps
+   >    below as normal.
+
 6. **Start infinidysk against the now-populated config directory**, the same
    `/path/to/infinidysk-config` bind mount used above (via `docker run` directly, or your usual
    `docker-compose.yml`/Container Manager setup pointed at that same host path).
