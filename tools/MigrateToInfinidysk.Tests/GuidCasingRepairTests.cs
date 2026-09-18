@@ -126,6 +126,76 @@ public class GuidCasingRepairTests : IDisposable
         AssertAllUppercase(conn, "DavItems", "Id");
     }
 
+    /// <summary>
+    /// Round 22 (blocking review finding on round 21): GuidCasingRepair.Run() defers FK checks
+    /// via PRAGMA defer_foreign_keys=ON (round 21, correct - that only defers WHEN a violation
+    /// this transaction's own statements could cause is checked, to COMMIT) but used to call
+    /// tx.Commit() directly afterward with no explicit diagnostic. Confirmed empirically
+    /// (sabotage-verify): a PRE-EXISTING dangling FK row that this repair's own UPDATEs never
+    /// touch (e.g. already uppercase) does not even make a bare tx.Commit() throw - SQLite's
+    /// deferred check only re-validates what the current transaction's statements could have
+    /// affected, not the whole database - so without the fix, repair mode would silently
+    /// "succeed" while real corruption sits undetected, which is worse than an undiagnosed
+    /// exception. The fix (PRAGMA foreign_key_check, which DOES scan the whole database) makes
+    /// this surface as the same "table X row Y references missing parent Z" message the rest of
+    /// this tool already gives (round 18's ForeignKeyDiagnostics, round 22: shared with this
+    /// repair path too). This seeds a genuinely dangling DavNzbFiles row - no DavItems row with
+    /// that Id exists anywhere, not something the casing repair itself could ever cause or fix -
+    /// alongside an ordinary valid lowercase DavItems row that DOES need repairing, so the test
+    /// also proves the dangling row's presence doesn't silently swallow or skip the real repair
+    /// work; it has to surface as a clear diagnostic instead.
+    /// </summary>
+    [Fact]
+    public void Run_PreExistingDanglingForeignKeyUnrelatedToCasing_SurfacesDescriptiveDiagnosticAndRollsBackCleanly()
+    {
+        using var conn = BuildFixture();
+        var validDavItemId = Guid.NewGuid();
+        var danglingNzbFileId = Guid.NewGuid();
+
+        // A normal, valid, lowercase DavItems row - this is what the repair would ordinarily fix.
+        InsertRaw(conn, "DavItems",
+            "INSERT INTO DavItems (Id, ParentId, Path) VALUES ($id, NULL, $path)",
+            ("$id", validDavItemId.ToString().ToLowerInvariant()), ("$path", "/valid.mkv"));
+
+        // A genuinely dangling DavNzbFiles row - no DavItems row with this Id exists at all, and
+        // it's already uppercase, so the casing repair itself has no reason to ever touch it.
+        // PRAGMA foreign_keys is toggled off only for this one seeding statement (this fixture
+        // otherwise enforces real FKs on every other insert in this file) because SQLite enforces
+        // FKs per-statement outside a deferred transaction, and this row is deliberately invalid
+        // from the moment it's created - there's no valid insert order that avoids that.
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "PRAGMA foreign_keys = OFF";
+            cmd.ExecuteNonQuery();
+        }
+        InsertRaw(conn, "DavNzbFiles",
+            "INSERT INTO DavNzbFiles (Id, SegmentIds) VALUES ($id, $segIds)",
+            ("$id", danglingNzbFileId.ToString().ToUpperInvariant()), ("$segIds", "[\"seg-orphan\"]"));
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "PRAGMA foreign_keys = ON";
+            cmd.ExecuteNonQuery();
+        }
+
+        var thrown = Assert.Throws<InvalidOperationException>(() => GuidCasingRepair.Run(conn));
+
+        // Same descriptive format ForeignKeyDiagnostics already gives TargetWriteSession's
+        // callers - not a bare "FOREIGN KEY constraint failed" with nothing to go on.
+        Assert.Contains("DavNzbFiles", thrown.Message);
+        Assert.Contains(danglingNzbFileId.ToString().ToUpperInvariant(), thrown.Message);
+        Assert.Contains("DavItems", thrown.Message);
+
+        // Rolled back cleanly: the valid row's repair never committed either - it's still
+        // lowercase, proving this wasn't a partial write (repair work done, then silently lost)
+        // but a full, clean rollback of the whole transaction.
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT Id FROM DavItems WHERE Id = $id COLLATE NOCASE";
+            cmd.Parameters.AddWithValue("$id", validDavItemId.ToString());
+            Assert.Equal(validDavItemId.ToString().ToLowerInvariant(), cmd.ExecuteScalar());
+        }
+    }
+
     private static void SeedMixedCaseRows(SqliteConnection conn, Guid davItemId, Guid parentId, Guid alreadyUppercaseQueueItemId)
     {
         // Parent row: lowercase Id, no ParentId of its own.

@@ -120,6 +120,20 @@ public static class GuidCasingRepair
             }
         }
 
+        // Round 22 (blocking review finding on round 21): defer_foreign_keys above only defers
+        // WHEN a violation caused BY THIS TRANSACTION's own statements is checked - to COMMIT -
+        // it doesn't scan the whole database. Confirmed empirically (sabotage-verify on this
+        // exact line): a dangling FK row already sitting in the target, untouched by this
+        // repair's own UPDATEs (e.g. already uppercase, so RepairColumn's WHERE clause never
+        // matches it), does NOT make a bare tx.Commit() throw at all - SQLite's deferred check
+        // only re-validates constraints this transaction's own statements could have affected,
+        // not every row in the database. Without this explicit PRAGMA foreign_key_check (which
+        // DOES scan the whole database), repair mode would silently "succeed" while a real,
+        // pre-existing FK violation sits undetected in the target - worse than an undiagnosed
+        // exception. Same shared diagnostic TargetWriteSession.Commit() uses
+        // (ForeignKeyDiagnostics - round 18, extracted for reuse here in round 22).
+        ForeignKeyDiagnostics.ThrowIfAnyViolations(conn, tx);
+
         tx.Commit();
         return new RepairReport(changes);
     }
