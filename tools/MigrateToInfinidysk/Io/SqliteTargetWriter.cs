@@ -178,6 +178,34 @@ public static class SqliteTargetWriter
         {
             _conn = conn;
             _tx = conn.BeginTransaction();
+
+            // infinidysk's DavNzbFiles/DavRarFiles/DavMultipartFiles all declare a FOREIGN KEY
+            // on their Id column referencing DavItems.Id (see infinidysk's
+            // DavDatabaseContext.OnModelCreating - HasForeignKey<DavNzbFile>/<DavRarFile>/
+            // <DavMultipartFile>(f => f.Id), read-only reference). Microsoft.Data.Sqlite enables
+            // `PRAGMA foreign_keys` ON by default (confirmed: a fresh connection reports
+            // foreign_keys=1 with no pragma ever set), so SQLite enforces those FKs per-statement
+            // unless told otherwise. StreamingMigrator streams DavMultipartFiles/DavRarFiles/
+            // DavNzbFiles in one pass before DavItems in a later pass (DavItems' own Type/SubType
+            // depends on knowing which multipart/nzb rows were skipped or wrapped first - see
+            // StreamingMigrator.Run), so within this single transaction a DavMultipartFiles row
+            // can be inserted before its DavItems row exists, which SQLite would otherwise reject
+            // immediately with "FOREIGN KEY constraint failed" (reproduced on a real user's
+            // --apply run - round-14 fix).
+            //
+            // `PRAGMA defer_foreign_keys = ON` is SQLite's documented mechanism for exactly this:
+            // it defers FK enforcement from per-statement to commit-time, for the CURRENT
+            // transaction only (SQLite turns it back off automatically at the end of every
+            // transaction, committed or rolled back), so it must be set again for each new
+            // transaction rather than once per connection - which is what happens here, since
+            // this pragma is set fresh in this constructor every time a TargetWriteSession (and
+            // therefore a new transaction) is created. It requires an open transaction to have
+            // any effect (deferring only matters while there's something to defer until); setting
+            // it immediately after BeginTransaction() above satisfies that.
+            using var pragmaCmd = _conn.CreateCommand();
+            pragmaCmd.Transaction = _tx;
+            pragmaCmd.CommandText = "PRAGMA defer_foreign_keys = ON";
+            pragmaCmd.ExecuteNonQuery();
         }
 
         public void Commit()
